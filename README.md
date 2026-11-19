@@ -3,7 +3,9 @@
 A read-only [MCP](https://modelcontextprotocol.io) server that lets an AI agent check claims about ServiceNow against
 a live instance, instead of answering from memory.
 
-[![Watch the intro: what the eight functions do, in two minutes](docs/media/intro-poster.jpg)](docs/media/intro.mp4)
+https://github.com/user-attachments/assets/48cee9b5-aa48-4f32-b097-613aac823b13
+
+*Intro, two minutes, no sound. The same film as a file: [docs/media/intro.mp4](docs/media/intro.mp4).*
 
 An agent that answers ServiceNow questions from memory does not know your instance: which release it runs, which
 plugins are active, what was customized. A wrong answer sounds exactly like a right one. This server gives the agent
