@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 226">
+  <rect x="119" y="58" width="12" height="52" fill="var(--sf-c-navy)"/>
+  <rect x="48" y="100" width="154" height="12" rx="6" fill="var(--sf-c-navy)"/>
+  <rect x="48" y="100" width="12" height="52" rx="4" fill="var(--sf-c-navy)"/>
+  <rect x="190" y="100" width="12" height="52" rx="4" fill="var(--sf-c-navy)"/>
+  <rect x="70" y="0" width="110" height="64" rx="14" fill="var(--sf-c-cobalt)"/>
+  <rect x="88" y="24" width="74" height="14" rx="7" fill="var(--sf-c-chalk)"/>
+  <rect x="0" y="142" width="108" height="84" rx="14" fill="var(--sf-c-lilac)"/>
+  <rect x="142" y="142" width="108" height="84" rx="14" fill="var(--sf-c-lilac)"/>
+  <rect x="212" y="142" width="38" height="84" rx="14" fill="#000" opacity="0.12"/>
+  <rect x="16" y="162" width="76" height="14" rx="7" fill="var(--sf-c-cobalt)"/>
+  <rect x="16" y="190" width="50" height="14" rx="7" fill="var(--sf-c-navy)"/>
+  <rect x="158" y="162" width="76" height="14" rx="7" fill="var(--sf-c-cobalt)"/>
+  <rect x="158" y="190" width="58" height="14" rx="7" fill="var(--sf-c-navy)"/>
+</svg>

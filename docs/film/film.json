@@ -1,0 +1,206 @@
+{
+  "film": 1,
+  "meta": {
+    "title": "servicenow-sparring",
+    "lang": "en",
+    "byline": "open source · MIT licence",
+    "tagline": [
+      "a read-only MCP server for AI agents.",
+      "check ServiceNow claims on a live instance,",
+      "not from memory."
+    ],
+    "description": "servicenow-sparring is a read-only MCP server: an AI agent checks claims about ServiceNow against a live instance instead of answering from memory."
+  },
+  "look": {
+    "palette": "lab", "type": "tech", "token": "square",
+    "style": "flat gouache illustration, simplified geometric shapes, not photorealistic, matte with faint brush texture, soft light from the upper left, clean cool colours with orange-red accents"
+  },
+  "art": {
+    "architect": {
+      "kit": "figure", "outfit": "suit", "glasses": true, "hair": "bob", "hairColor": "black", "skin": "tan", "pose": "stand",
+      "prompt": "an enterprise software architect in her forties, slim build, black bob haircut, round glasses, orange-red blazer over a white shirt with a dark navy tie, dark charcoal trousers, white sneakers, arms relaxed at her sides, calm and attentive, facing the viewer"
+    },
+    "robot": {
+      "kit": "robot", "color": "lilac",
+      "prompt": "a small friendly robot assistant, rounded lilac body and head, a dark navy visor with two round orange-red eyes, a short antenna with an orange-red ball, grey metal arms, two small black wheels, standing upright, facing the viewer"
+    },
+    "bubble": { "kit": "bubble", "color": "lilac", "h": 15 },
+    "frame": { "kit": "frame", "picture": "landscape" },
+    "clock": { "kit": "clock" },
+    "window": { "kit": "window" },
+    "scale": {
+      "kit": "scale",
+      "prompt": "a brass balance scale with a central post, a level beam and two shallow hanging pans, on a small trapezoid base, golden yellow, simple and symmetrical"
+    },
+    "pencil": {
+      "kit": "pencil", "color": "cobalt", "h": 30,
+      "prompt": "a cobalt blue pencil standing upright on its sharpened tip, a pink eraser held by a metal band at the top, pale wood cone and dark graphite point at the bottom, simple shape"
+    },
+    "wrench": {
+      "kit": "wrench",
+      "prompt": "a steel grey open-ended wrench standing upright, the open jaw at the top and a ring end at the bottom, plain flat metal, simple shape"
+    },
+    "hammer": {
+      "kit": "hammer", "color": "navy",
+      "prompt": "a hammer standing upright on the end of its handle, dark navy handle, grey steel head at the top, simple shape"
+    },
+    "instance": {
+      "svg": "art/instance.svg", "h": 46,
+      "prompt": "a tall server cabinet in cobalt blue with rounded corners, four dark navy drive bays stacked on its front, each with a small amber status light and a pale bar, standing on a dark base, no logo, no letters"
+    },
+    "lens": {
+      "svg": "art/lens.svg", "h": 16, "mount": "air", "idle": "float",
+      "prompt": "a magnifying glass, thick orange-red round rim, pale blue glass with a small white highlight, short wooden handle pointing down to the right, no letters"
+    },
+    "answer": { "svg": "art/answer.svg", "h": 30, "idle": "bob" },
+    "answer-wrong": { "svg": "art/answer-wrong.svg", "h": 30, "idle": "bob" },
+    "cited": { "svg": "art/cited.svg", "h": 28, "mount": "wall" },
+    "fn-instance": { "svg": "art/fn-instance.svg", "h": 18, "idle": "bob" },
+    "fn-query": { "svg": "art/fn-query.svg", "h": 15 },
+    "fn-schema": { "svg": "art/fn-schema.svg", "h": 17 },
+    "fn-plugins": { "svg": "art/fn-plugins.svg", "h": 18, "idle": "sway" },
+    "fn-delta": { "svg": "art/fn-delta.svg", "h": 16, "idle": "float" },
+    "fn-origin": { "svg": "art/fn-origin.svg", "h": 14 },
+    "fn-deps": { "svg": "art/fn-deps.svg", "h": 17, "idle": "turn" },
+    "fn-skips": { "svg": "art/fn-skips.svg", "h": 18 }
+  },
+  "chapters": [
+    {
+      "id": "open",
+      "scenes": [
+        {
+          "type": "title",
+          "props": [
+            { "art": "architect", "x": 62 },
+            { "art": "robot", "x": 77 },
+            { "art": "instance", "x": 91.5 },
+            { "art": "lens", "x": 84.5, "y": 40, "z": 2 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "memory",
+      "heading": "Agents answer from memory",
+      "scenes": [
+        { "type": "chapter", "prop": "robot" },
+        {
+          "type": "tableau",
+          "props": [
+            { "art": "frame", "x": 25, "y": 38 },
+            { "art": "architect", "x": 12 },
+            { "art": "robot", "x": 33 },
+            { "art": "bubble", "x": 41, "y": 37 },
+            { "art": "instance", "x": 86 }
+          ],
+          "beats": [
+            { "line": "Memory does not know *your* instance.", "do": [{ "nod": "robot" }, { "dim": "instance", "to": 0.55, "after": "line" }] },
+            { "line": "Not its release, its plugins, or what was customized.", "do": [{ "shake": "instance" }, { "pose": "architect", "to": "think", "after": "line" }, { "nod": "architect", "deg": 5, "after": "line" }] }
+          ]
+        },
+        {
+          "type": "lineup",
+          "art": "answer",
+          "count": 5,
+          "odd": { "index": 4 },
+          "beats": [
+            { "line": "A wrong answer sounds exactly like a right one.", "do": [{ "swap": "odd", "art": "answer-wrong", "after": "line" }, { "shake": "odd", "after": "line", "delay": 0.55 }] }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ask",
+      "heading": "A read-only MCP server",
+      "scenes": [
+        { "type": "chapter", "prop": { "art": "lens", "h": 34 } },
+        {
+          "type": "tableau",
+          "props": [
+            { "art": "clock", "x": 9, "y": 46 },
+            { "art": "architect", "x": 21 },
+            { "art": "robot", "x": 42 },
+            { "art": "instance", "x": 82 },
+            { "art": "lens", "x": 60, "y": 32, "z": 2 }
+          ],
+          "beats": [
+            { "line": "servicenow-sparring lets the agent check a claim against the *live* instance.", "do": [{ "enter": "lens", "from": "above" }, { "glow": "instance", "color": "chalk", "after": "line" }, { "pose": "architect", "to": "point", "after": "line" }, { "nod": "architect", "deg": 6, "after": "line" }] },
+            { "line": "Eight functions. Each one answers one question.", "do": [{ "move": "lens", "x": 72 }, { "hop": "robot", "after": "line" }] }
+          ]
+        },
+        {
+          "type": "gallery",
+          "plinth": "amber",
+          "items": [
+            { "art": "fn-instance", "caption": "sn_instance", "line": "sn_instance: which release is this?" },
+            { "art": "fn-query", "caption": "sn_query", "line": "sn_query: what is really in this table?" },
+            { "art": "fn-schema", "caption": "sn_schema", "line": "sn_schema: which fields, inherited too?" },
+            { "art": "fn-plugins", "caption": "sn_plugins", "line": "sn_plugins: which plugins and store apps are installed?" }
+          ]
+        },
+        {
+          "type": "gallery",
+          "plinth": "amber",
+          "items": [
+            { "art": "fn-delta", "caption": "sn_delta", "line": "sn_delta: what was changed here?" },
+            { "art": "fn-origin", "caption": "sn_origin", "line": "sn_origin: out-of-the-box, customized, or customer-created?" },
+            { "art": "fn-deps", "caption": "sn_dependencies", "line": "sn_dependencies: what is attached to this table?" },
+            { "art": "fn-skips", "caption": "sn_upgrade_skips", "line": "sn_upgrade_skips: what did the upgrade skip?" }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "honest",
+      "heading": "How it stays honest",
+      "scenes": [
+        { "type": "chapter", "prop": { "art": "scale", "h": 28 } },
+        {
+          "type": "tableau",
+          "props": [
+            { "art": "robot", "x": 12 },
+            { "art": "instance", "x": 30 },
+            { "art": "lens", "x": 20, "y": 30, "z": 2 },
+            { "art": "pencil", "x": 50 },
+            { "art": "wrench", "x": 61 },
+            { "art": "hammer", "x": 72 },
+            { "art": "window", "x": 87, "y": 30 }
+          ],
+          "beats": [
+            { "line": "It only reads. It sends only GET requests.", "do": [{ "move": "lens", "x": 26 }, { "glow": "instance", "color": "chalk", "after": "line" }] },
+            { "line": "No function creates, changes or deletes anything.", "do": [{ "shake": ["pencil", "wrench", "hammer"] }, { "exit": ["pencil", "wrench", "hammer"], "to": "below", "after": "line", "stagger": 0.1 }] }
+          ]
+        },
+        {
+          "type": "statement",
+          "text": "A query on a field that does not exist is *refused*.",
+          "sub": "ServiceNow would ignore that condition and answer with everything."
+        },
+        {
+          "type": "tableau",
+          "props": [
+            { "art": "robot", "x": 12 },
+            { "art": "cited", "x": 32, "y": 34 },
+            { "art": "architect", "x": 54 },
+            { "art": "instance", "x": 86 }
+          ],
+          "beats": [
+            { "line": "Every answer names the instance, the table and the query.", "do": [{ "enter": "cited", "from": "pop" }, { "pose": "architect", "to": "think", "after": "line" }, { "nod": "architect", "deg": -5, "after": "line" }] },
+            { "line": "So a person can run it again.", "do": [{ "glow": "instance", "color": "chalk", "after": "line" }, { "move": "architect", "x": 70 }, { "pose": "architect", "to": "point", "after": "line" }, { "nod": "architect", "deg": 6, "after": "line" }] }
+          ]
+        },
+        {
+          "type": "statement",
+          "text": "“Could not be checked” is never reported as “nothing found”.",
+          "sub": "When the evidence does not decide, it says “unknown”."
+        }
+      ]
+    },
+    {
+      "id": "end",
+      "scenes": [
+        { "type": "outro", "lines": ["Open source, under the MIT licence."], "cast": ["architect", "robot", "instance"] }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+node_modules/
+dist/
+*.log
+.env
+.env.*
+!.env.example
+docs/film/dist/
+docs/film/verify/
+docs/film/og.png
+docs/film/*.mp4
+docs/film/art/_style.png

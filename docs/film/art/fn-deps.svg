@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 220">
+  <path d="M110 110V30M110 110L179 150M110 110L41 150" fill="none" stroke="var(--sf-c-chalk)" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="110" cy="110" r="42" fill="var(--sf-c-amber)"/>
+  <path d="M110 68a42 42 0 0 1 0 84z" fill="#000" opacity="0.12"/>
+  <circle cx="110" cy="110" r="14" fill="var(--sf-c-navy)"/>
+  <circle cx="110" cy="28" r="28" fill="var(--sf-c-chalk)"/>
+  <circle cx="181" cy="151" r="28" fill="var(--sf-c-lilac)"/>
+  <circle cx="39" cy="151" r="28" fill="var(--sf-accent)"/>
+</svg>
