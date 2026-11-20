@@ -55,6 +55,24 @@ export const SOURCES: Array<{ table: string; usedBy: string }> = [
 ]
 
 
+/**
+ * The fields that sn_delta, sn_origin, sn_upgrade_skips and sn_plugins filter by in queries they write themselves.
+ * They are fields of the platform and are not looked up before each call. An instance that does not know one of
+ * them would drop the condition and answer with every row, so the doctor command asks each of them once.
+ * sn_query, sn_schema and sn_dependencies check the fields they use against the dictionary on every call.
+ */
+export const FILTERED_BY: Array<{ table: string; fields: string[] }> = [
+  { table: 'sys_update_xml', fields: ['name', 'type', 'action', 'sys_created_by', 'sys_updated_by', 'sys_updated_on', 'sys_created_on'] },
+  { table: 'sys_update_version', fields: ['name', 'state', 'source_table', 'sys_created_on'] },
+  { table: 'sys_metadata', fields: ['sys_update_name', 'sys_class_name'] },
+  { table: 'upgrade_history_task', fields: ['state', 'upgrade_detail.upgrade_history', 'upgrade_detail.disposition', 'upgrade_detail.file_name', 'upgrade_detail.type', 'upgrade_detail.upgrade_history.to_version'] },
+  { table: 'sys_upgrade_history', fields: ['to_version', 'upgrade_finished'] },
+  { table: 'v_plugin', fields: ['active'] },
+  { table: 'sys_scope', fields: ['sys_class_name', 'active'] },
+  { table: 'sys_app', fields: ['active'] },
+  { table: 'sys_properties', fields: ['name', 'type'] },
+]
+
 export interface Probe {
   /** "readable", "row_restricted" (rows exist, none is visible to this account), or the kind of failure. */
   status: string

@@ -8,7 +8,7 @@
 import { ServiceNowClient } from './client.js'
 import { loadSettings } from './config.js'
 import { createContext } from './server.js'
-import { accountRoles, probe, SOURCES } from './tools/instance.js'
+import { accountRoles, FILTERED_BY, probe, SOURCES } from './tools/instance.js'
 import { errorKind, mapLimit, NO_CONNECTION } from './tools/shared.js'
 
 /**
@@ -67,6 +67,27 @@ export async function runDoctor(given?: ServiceNowClient, print: (line: string) 
     .catch((error) => `not readable (${errorKind(error)})`)
   line('upgrade details through a reference', details)
 
+  // The fields the functions filter by in queries of their own. An instance that does not know a field drops the
+  // condition and answers with every row. Asked for the rows where a field is empty and filled at once, it then
+  // answers with rows, where an instance that applies the condition answers with none.
+  const asked = FILTERED_BY.filter((item) => results.find((result) => result.table === item.table)?.status === 'readable').flatMap((item) => item.fields.map((field) => ({ table: item.table, field })))
+  const answers = await mapLimit(asked, 4, async ({ table, field }) => {
+    const both = await sn.query({ table, query: `${field}ISEMPTY^${field}ISNOTEMPTY`, fields: ['sys_id'], limit: 1 }).catch((error) => errorKind(error))
+    return { name: `${table}.${field}`, verdict: typeof both === 'string' ? both : both.total === 0 && !both.records.length ? 'applied' : 'dropped' }
+  })
+  const droppedHere = answers.filter((answer) => answer.verdict === 'dropped').map((answer) => answer.name)
+  const unasked = answers.filter((answer) => answer.verdict !== 'applied' && answer.verdict !== 'dropped').map((answer) => `${answer.name} (${answer.verdict})`)
+  line(
+    'fields the functions filter by',
+    `${answers.length - droppedHere.length - unasked.length} of ${answers.length} applied by this instance` +
+      (droppedHere.length ? `; DROPPED: ${droppedHere.join(', ')}` : '') +
+      (unasked.length ? `; could not be asked: ${unasked.join(', ')}` : ''),
+  )
+  if (droppedHere.length) {
+    print('\nThis instance drops a condition on a field a function filters by, and answers with every row instead.')
+    print('Answers of sn_delta, sn_origin, sn_upgrade_skips and sn_plugins that depend on that field are not to be trusted here.')
+  }
+
   const account = await accountRoles(sn)
   line(
     'account',
@@ -80,5 +101,5 @@ export async function runDoctor(given?: ServiceNowClient, print: (line: string) 
   }
 
   print(`\n${sn.requestCount} requests, all GET.`)
-  return closed.length === results.length ? 1 : 0
+  return closed.length === results.length || droppedHere.length ? 1 : 0
 }

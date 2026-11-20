@@ -320,6 +320,12 @@ This checks the address and the login with one request, then lists the tables th
 account can read each one, and finally the release, the Aggregate API and the roles of the account. Nothing has to
 be installed on the instance.
 
+It also asks the instance about each field that `sn_delta`, `sn_origin`, `sn_upgrade_skips` and `sn_plugins` filter
+by in queries of their own, 27 fields of nine tables: for the rows where the field is empty and filled at once.
+An instance that applies the condition answers with none. One that does not know the field drops the condition
+and answers with rows; the functions would then answer unfiltered there, and `doctor` ends with 1 and names the
+field. On the test instance all 27 are applied.
+
 Which roles the account needs depends on the access rules of your instance. Start with a read-only account and let
 `doctor` show what it cannot read; the functions report such a source as "could not be checked".
 

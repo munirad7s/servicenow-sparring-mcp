@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { runDoctor } from '../src/doctor.js'
-import { SOURCES } from '../src/tools/instance.js'
+import { FILTERED_BY, SOURCES } from '../src/tools/instance.js'
 import { fakeInstance, type Route } from './fake.js'
 
 async function doctor(routes: Route[]) {
@@ -33,9 +33,37 @@ test('the doctor command lists what the account can read, and what it cannot', a
   assert.match(output, /upgrade details through a reference\s+ok/)
   assert.match(output, /1 roles, admin: no, snc_read_only: NO/)
   assert.match(output, /does not have the role snc_read_only/)
-  // One request per source, and four for what lies beyond the tables. No source is asked twice.
-  assert.equal(calls.length, SOURCES.length + 4)
+  // One request per source, four for what lies beyond the tables, and one per field a function filters by, on
+  // the sources that could be read. No source is asked twice.
+  const fields = FILTERED_BY.flatMap((item) => item.fields).length
+  assert.match(output, new RegExp(`fields the functions filter by\\s+${fields} of ${fields} applied by this instance`))
+  assert.equal(calls.length, SOURCES.length + 4 + fields)
   assert.ok(calls.every((entry) => entry.method === 'GET'))
+})
+
+test('the doctor command asks the instance whether it applies a condition on each field the functions filter by', async () => {
+  // Measured on a database view: an instance that cannot use a condition drops it and answers with every row.
+  // Asked for the rows where a field is empty and filled at once, it then answers with rows.
+  const beyond: Route[] = [
+    { table: 'sys_properties', query: 'name=glide.war', rows: [{ name: 'glide.war', value: 'glide-zurich-07-01-2025__patch1.zip' }] },
+    { table: 'sys_update_xml', api: 'stats', rows: [{ stats: { count: '3' }, groupby_fields: [{ value: 'Business Rule' }] }] },
+  ]
+  const dropping = await doctor([{ table: 'sys_update_xml', exact: 'typeISEMPTY^typeISNOTEMPTY', rows: [{ sys_id: '1' }] }, ...beyond, ...readable()])
+  const fields = FILTERED_BY.flatMap((item) => item.fields).length
+  assert.match(dropping.output, new RegExp(`fields the functions filter by\\s+${fields - 1} of ${fields} applied by this instance; DROPPED: sys_update_xml\\.type`))
+  assert.match(dropping.output, /This instance drops a condition on a field a function filters by/)
+  assert.equal(dropping.exitCode, 1)
+
+  // A question the instance refuses is no proof either way: it is named, and the command does not fail for it.
+  const refusing = await doctor([{ table: 'upgrade_history_task', exact: 'upgrade_detail.dispositionISEMPTY^upgrade_detail.dispositionISNOTEMPTY', status: 403 }, ...beyond, ...readable()])
+  assert.match(refusing.output, /could not be asked: upgrade_history_task\.upgrade_detail\.disposition \(acl\)/)
+  assert.equal(refusing.exitCode, 0)
+
+  // A source that cannot be read is not asked about its fields.
+  const closed = await doctor([{ table: 'sys_update_version', status: 403 }, ...beyond, ...readable(['sys_update_version'])])
+  assert.ok(!closed.calls.some((entry) => entry.table === 'sys_update_version' && entry.query.includes('ISEMPTY')))
+  const left = fields - FILTERED_BY.find((item) => item.table === 'sys_update_version')!.fields.length
+  assert.match(closed.output, new RegExp(`fields the functions filter by\\s+${left} of ${left} applied`))
 })
 
 test('the doctor command takes the release by its name, not by its place', async () => {
