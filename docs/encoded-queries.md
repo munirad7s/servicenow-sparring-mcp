@@ -108,6 +108,9 @@ Also measured:
 - `=` without a value is applied as "is empty", and `!=` without a value as "is not empty", on text, reference,
   number, date and boolean fields alike.
 - A condition written behind an `ORDERBY` is applied.
+- A date and time in a condition is compared as UTC, not in the time zone of the account. With an account seven
+  hours behind UTC, `sys_created_on=<value>` matched a record with its stored value and not with the value the
+  list shows. The server returns the stored UTC value of a timestamp for that reason.
 - The Aggregate API returned every group also where there were thousands: counted by `name`, the groups of
   `sys_dictionary` add up to all 299,720 rows.
 - The Aggregate API can refuse a field that the Table API accepts. Counting `sys_metadata` by `sys_class_name`
