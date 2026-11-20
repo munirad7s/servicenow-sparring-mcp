@@ -149,13 +149,15 @@ Also measured:
 - A second sort key costs nothing where it runs the way of the first: on a table of 3.5 million rows, newest
   first took 878 ms and with the sys_id falling as a second key 928 ms. With the sys_id rising it took 4,212 ms.
 - A sort in one part of a query joined by `^NQ` holds for the whole answer, and so does a key added at its end.
+  A sort key behind `^EQ` is applied as well, and one behind a text search: the same 11 incidents matched with
+  the key and without, in the order asked for.
 - A caret at the end of a query, followed by one more sort key, is read as a caret inside a value: the key is no
   key then, and the sort before it is dropped with it. The server takes such a caret off before it adds its key.
 - A query that asks for no order, read by pages, brought no row twice: a thousand captured changes, 186
   dictionary entries and 110 labels. The instance does not promise that. For a list that has to be complete, give
   an order.
 - `sys_id` as a sort key does no harm on a database view, which has no field of that name: the rows and the total
-  were the same with it and without.
+  were the same with it and without. The same on four remote tables, whose rows a script makes up.
 - The Aggregate API gives the groups of a count another order from one request to the next: five requests for
   the dictionary entries per type brought three orders. The server puts groups in the order of their size, and
   groups of one size in the order of their values, so that a list of groups read by pages holds each group once.
