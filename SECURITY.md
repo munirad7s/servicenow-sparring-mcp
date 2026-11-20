@@ -26,6 +26,9 @@ Especially welcome:
   `SERVICENOW_*` variable is set. The server itself does not.
 
 Requests are built in `src/client.ts`, input is checked in `src/query.ts`, settings are read in `src/config.ts`.
+The rules for tables that are closed on the machine are in `src/closed.ts`; the client asks them for every request,
+whichever function sends it. What is taken out of an answer before it leaves the server is decided in
+`src/tools/shared.ts` and `src/tools/query.ts`.
 The tests that hold these promises are in `test/repo.test.ts`, `test/client.test.ts`, `test/config.test.ts` and
 `test/tools.test.ts`. They are a regression guard. They run in CI on every push; they are not a sandbox.
 
