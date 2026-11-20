@@ -419,7 +419,8 @@ npm run origin-check  # measures sn_origin on the configured instance, with abou
 ```
 
 `npm run smoke` drives the real server through an MCP client and exits with 1 if a check fails. It prints counts and
-verdicts, never record content. `npm run call` runs one function from the shell and prints what an agent would
+verdicts, never record content. Its last part asks the same instance through a second server on which the user
+table is closed, and checks that no row and no name of a user comes back. `npm run call` runs one function from the shell and prints what an agent would
 receive. In the Windows command prompt, write the JSON with escaped double quotes instead of single quotes:
 `"{\"table\":\"incident\"}"`.
 
@@ -443,8 +444,9 @@ What was tested, and what was not:
   account that reads English. What the server does for those cases follows the documentation and is covered by
   unit tests only.
 - Tables closed on the machine were tried live with three lists (a deny list of one table, one of a table with
-  child tables and a pattern, and an allow list): the rows, names and counts came out as described. That is a
-  trial on one instance, not a proof: the rules are in `src/closed.ts`, and the unit tests hold them.
+  child tables and a pattern, and an allow list): the rows, names and counts came out as described, and
+  `npm run smoke` repeats the first of them. That is a trial on one instance, not a proof: the rules are in
+  `src/closed.ts`, and the unit tests hold them.
 - On another release, run `npm run doctor` and `npm run smoke` first.
 - Signing in with a token is covered by unit tests only.
 - CI runs the unit tests on Linux, Windows and macOS.

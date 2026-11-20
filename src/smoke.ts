@@ -15,11 +15,13 @@ type Data = Record<string, any>
 
 const methods = new Set<string>()
 const paths = new Set<string>()
-const sn = new ServiceNowClient(loadSettings(process.env, process.cwd(), { cwdFile: true }), (url, init) => {
+const settings = loadSettings(process.env, process.cwd(), { cwdFile: true })
+const recorded = (url: string, init: RequestInit) => {
   methods.add(String(init.method))
   paths.add(new URL(url).pathname.split('/').slice(0, 4).join('/'))
   return fetch(url, init)
-})
+}
+const sn = new ServiceNowClient(settings, recorded)
 
 const server = buildServer(sn)
 const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
@@ -210,7 +212,39 @@ check('the limitations resource is served', String((resource.contents[0] as Data
 const prompts = (await client.listPrompts()).prompts.map((item) => item.name).sort()
 check('three prompts are served', JSON.stringify(prompts) === JSON.stringify(['assess_change', 'review_upgrade', 'verify_claim']))
 
-check('every request was a GET', methods.size === 1 && methods.has('GET'), `${sn.requestCount} requests`)
+// The same instance through a second server on which the user table is closed, as SERVICENOW_TABLE_DENY=sys_user
+// would close it: no row of it, and no name of a user, may come back by any way.
+const closedSn = new ServiceNowClient({ ...settings, tables: { allow: settings.tables.allow, deny: [...settings.tables.deny, 'sys_user'] } }, recorded)
+const [closedClient, closedServer] = InMemoryTransport.createLinkedPair()
+const closed = new Client({ name: 'smoke-closed', version: '1.0.0' })
+await Promise.all([closed.connect(closedClient), buildServer(closedSn).connect(closedServer)])
+const ask = async (name: string, args: Data = {}): Promise<{ data: Data; isError: boolean }> => {
+  const result = await closed.callTool({ name, arguments: args })
+  return { data: JSON.parse((result.content as Array<{ text: string }>)[0]?.text ?? '{}'), isError: result.isError === true }
+}
+const blocked = (answer: { data: Data; isError: boolean }) => answer.isError && answer.data.error === 'blocked'
+console.log('\nWith the user table closed on this machine:')
+check('the table itself is not asked for', blocked(await ask('sn_query', { table: 'sys_user', fields: ['sys_id'], limit: 1 })))
+check('a dot-walk into it is refused', blocked(await ask('sn_query', { table: 'incident', fields: ['caller_id.name'], limit: 1 })))
+const callers = await ask('sn_query', { table: 'incident', query: 'caller_idISNOTEMPTY^assignment_groupISNOTEMPTY', fields: ['caller_id', 'assignment_group'], displayValue: true, limit: 5 })
+check(
+  'the name behind a reference into it is left out, and other names stay',
+  !callers.isError && (callers.data.records ?? []).every((row: Data) => typeof row.caller_id === 'string') && callers.data.warnings.some((warning: string) => warning.includes('were left out: caller_id')) &&
+    (callers.data.returned === 0 || (callers.data.records ?? []).some((row: Data) => typeof row.assignment_group === 'object')),
+  `${callers.data.returned} rows`,
+)
+const perCaller = await ask('sn_query', { table: 'incident', groupBy: 'caller_id', limit: 5 })
+check('groups counted by such a reference carry no names', !perCaller.isError && (perCaller.data.groups ?? []).every((group: Data) => !group.display), `${perCaller.data.totalGroups} groups`)
+check('comparing such a reference with text is refused', blocked(await ask('sn_query', { table: 'incident', query: 'caller_idSTARTSWITHa', fields: ['sys_id'], limit: 1 })))
+check('a text search on a table that points into it is refused', refused(await ask('sn_query', { table: 'incident', query: '123TEXTQUERY321=network', fields: ['sys_id'], limit: 1 })))
+const userChanges = await ask('sn_query', { table: 'sys_update_xml', query: 'nameSTARTSWITHsys_user_', fields: ['target_name'], limit: 5 })
+check(
+  'the name of a captured change to one of its records is withheld',
+  !userChanges.isError && (userChanges.data.records ?? []).every((row: Data) => String(row.target_name).startsWith('[withheld')),
+  `${userChanges.data.returned} of ${userChanges.data.total} read`,
+)
+
+check('every request was a GET', methods.size === 1 && methods.has('GET'), `${sn.requestCount + closedSn.requestCount} requests`)
 check('only the two read endpoints were called', [...paths].every((path) => path === '/api/now/table' || path === '/api/now/stats'), [...paths].join(', '))
 
 console.log(failures ? `\n${failures} check(s) failed.` : '\nAll checks passed.')
