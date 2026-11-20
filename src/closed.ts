@@ -98,7 +98,9 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     for (const name of ['sys_db_object', 'sys_dictionary']) {
       if (!sn.allows(name)) continue
       const info = await dict.table(name).catch(unlessNoConnection(null))
-      const parent = info?.chain.slice(1).find((above) => !sn.allows(above))
+      // What the table extends could not be read: then it is not known whether the list closes it.
+      if (!info) return `it could not be established what "${name}" extends, which this server reads for every check, so it cannot be told whether SERVICENOW_TABLE_ALLOW closes it through a parent table`
+      const parent = info.chain.slice(1).find((above) => !sn.allows(above))
       if (parent) return `"${name}", which this server reads for every check, is a child table of ${parent}, which is not on SERVICENOW_TABLE_ALLOW: with that list nothing can be established without reading a closed table`
     }
     return null
@@ -226,9 +228,10 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
    *
    * So the instance is asked, per table and field, for rows that are two things at once, which has to match
    * nothing: a class that is empty and filled, and, where the condition uses them, a class that is one of two
-   * names and one that starts with two. "Is" and "starts with" are asked apart, because an instance can allow one
-   * and not the other (query_match, query_range). Each question stands alone in its query: measured, a part of a
-   * query whose conditions are dropped adds no rows, so several in one query would prove nothing.
+   * names, one that starts with two, and one that is a class and is not that class. "Is" and "starts with" are
+   * asked apart, because an instance can allow one and not the other (query_match, query_range). Each question
+   * stands alone in its query: measured, a part of a query whose conditions are dropped adds no rows, so several
+   * in one query would prove nothing.
    *
    * A table without rows answers every question with none, also the one it would have dropped. Such an answer
    * is taken for this request, where it gives nothing away, and not remembered for the next.
@@ -236,15 +239,24 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
   const proofs = new Map<string, { at: number; applied: Promise<boolean> }>()
   async function prove(table: string, field: string, kinds: string[]): Promise<{ applied: boolean; lasting: boolean }> {
     const [a, b] = NO_SUCH_CLASS
-    const questions = kinds.map((kind) => (kind === 'ISEMPTY' ? `${field}ISEMPTY^${field}ISNOTEMPTY` : `${field}${kind}${a}^${field}${kind}${b}`))
-    const ask = (query: string) => sn.query({ table, query, fields: ['sys_id'], limit: 1, trusted: true }).catch(unlessNoConnection(null))
-    const [any, ...answers] = await Promise.all([ask(''), ...questions.map(ask)])
-    const applied = answers.every((page) => page !== null && page.total === 0 && page.records.length === 0)
-    return { applied, lasting: Boolean(any && (any.records.length > 0 || (any.total ?? 0) > 0)) }
+    const ask = (query: string, fields = ['sys_id']) => sn.query<Record<string, unknown>>({ table, query, fields, limit: 1, trusted: true }).catch(unlessNoConnection(null))
+    const nothing = (page: Awaited<ReturnType<typeof ask>>) => page !== null && page.total === 0 && page.records.length === 0
+    const questions = kinds.filter((kind) => kind !== 'NOT IN').map((kind) => (kind === 'ISEMPTY' ? `${field}ISEMPTY^${field}ISNOTEMPTY` : `${field}${kind}${a}^${field}${kind}${b}`))
+    if (!(await Promise.all(questions.map((query) => ask(query)))).every(nothing)) return { applied: false, lasting: false }
+
+    // Only now is a row asked for that the questions above did not have to match nothing: one that has a class.
+    // Where a question failed, no such request goes out. Without such a row no row of a closed class is there.
+    const row = await ask(`${field}ISNOTEMPTY`, ['sys_id', field])
+    const lasting = Boolean(row && (row.records.length > 0 || (row.total ?? 0) > 0))
+    // "Is not one of" is what leaves the rows out, and it is asked by itself where a row shows its class: rows of
+    // that class that are not of that class. A view that does not show the field cannot be asked this way.
+    const shown = row?.records[0]?.[field]
+    if (kinds.includes('NOT IN') && isTableName(shown) && !nothing(await ask(`${field}=${shown}^${field}NOT IN${shown}`))) return { applied: false, lasting: false }
+    return { applied: true, lasting }
   }
   function appliesCondition(table: string, field: string, condition: string): Promise<boolean> {
     // Names of tables are written in small letters and operators in capitals, so a name cannot pass for one.
-    const kinds = ['ISEMPTY', ...(condition.includes('IN') ? ['IN'] : []), ...(condition.includes('STARTSWITH') ? ['STARTSWITH'] : [])]
+    const kinds = ['ISEMPTY', ...(condition.includes('IN') ? ['IN'] : []), ...(condition.includes('NOT IN') ? ['NOT IN'] : []), ...(condition.includes('STARTSWITH') ? ['STARTSWITH'] : [])]
     const key = `${table}.${field} ${kinds.join(' ')}`
     const hit = proofs.get(key)
     if (hit && Date.now() - hit.at < PROOF_TTL_MS) return hit.applied

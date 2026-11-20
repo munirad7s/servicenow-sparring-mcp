@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import type { Page } from '../src/client.js'
 import { ServiceNowError, validation } from '../src/errors.js'
-import { clip, fail, listing, redact, tally, tidy } from '../src/result.js'
+import { clip, fail, listing, ok, redact, tally, tidy } from '../src/result.js'
+import { currentCall, traced } from '../src/trace.js'
 import { fakeInstance } from './fake.js'
 
 const { sn } = fakeInstance([])
@@ -138,4 +139,18 @@ test('an error is an answer with a kind and a next step', () => {
   const field = fail(new ServiceNowError('example.service-now.com answered HTTP 403: "Insufficient rights to query records" ("Field(s) present in the query do not have permission to be read").', 'acl', 'sys_metadata', 403))
   assert.match(text(field).hint, /because of a field in it.*"sys_metadata" itself may be readable.*could not be checked/)
   assert.equal(text(fail(new Error('y'.repeat(5_000)))).message.length, 1_001)
+})
+
+test('a failure that ends the call is not turned into an answer by whatever caught it', async () => {
+  // A look-up that catches every failure, to say "this could not be read", catches a rejected login as well. The
+  // answer of the call is then that failure.
+  const answered = await traced('sn_example', async () => {
+    currentCall()!.ended = new ServiceNowError('The instance rejected the credentials (HTTP 401).', 'auth', 'incident', 401)
+    return ok({ warnings: ['incident could not be read (auth)'] })
+  })({})
+  assert.equal(answered.isError, true)
+  assert.equal(JSON.parse(answered.content[0].text).error, 'auth')
+  // Without such a failure the answer is the answer.
+  const fine = await traced('sn_example', async () => ok({ a: 1 }))({})
+  assert.equal(fine.isError, undefined)
 })

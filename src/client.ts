@@ -381,7 +381,10 @@ export class ServiceNowClient {
     if (this.paused) {
       if (Date.now() < this.paused.until) {
         const { error } = this.paused
-        throw new ServiceNowError(`${error.message} Not sent again for a moment, because the last request to this instance failed.`, error.kind, table, error.status)
+        const held = new ServiceNowError(`${error.message} Not sent again for a moment, because the last request to this instance failed.`, error.kind, table, error.status)
+        const now = currentCall()
+        if (now && (error.kind === 'auth' || error.kind === 'network' || error.kind === 'redirect' || error.kind === 'invalid_response')) now.ended ??= held
+        throw held
       }
       this.paused = null
     }
@@ -396,11 +399,12 @@ export class ServiceNowClient {
     }
     const call = currentCall()
     if (call && call.requests >= MAX_REQUESTS_PER_CALL) {
-      throw endsTheCall(
+      call.ended ??= endsTheCall(
         `This call was stopped after ${MAX_REQUESTS_PER_CALL} requests to the instance. A call needs that many only where it names hundreds of things that each have to be looked up. ` +
           'Ask for less at a time: fewer conditions, fewer fields, fewer rows.',
         table,
       )
+      throw call.ended
     }
     const url = `${this.config.instanceUrl}${path}`
     const sent = this.auth
@@ -429,7 +433,11 @@ export class ServiceNowClient {
       }
       text = await this.readBody(response, table)
     } catch (cause) {
-      throw this.pauseIfClosed(cause instanceof ServiceNowError ? cause : this.transportError(cause, table))
+      const error = this.pauseIfClosed(cause instanceof ServiceNowError ? cause : this.transportError(cause, table))
+      // An instance that cannot be reached, or that answers with a redirect, ends the call. One request that ran
+      // out of time, or one answer that was too large, is about that request.
+      if (call && (error.kind === 'network' || error.kind === 'redirect')) call.ended ??= error
+      throw error
     }
 
     if (response.status === 401) {
@@ -442,6 +450,8 @@ export class ServiceNowClient {
       // Back to one request at a time: an expired token must not be retried by everything in flight.
       this.accepted = false
       this.paused = { until: Date.now() + PAUSE_AFTER_REJECTED_LOGIN_MS, error, rejected: sent }
+      // A rejected login is not a missing piece of an answer: the call it happens in fails.
+      if (call) call.ended ??= error
       throw error
     }
 
@@ -475,9 +485,10 @@ export class ServiceNowClient {
 
     if (!isObject || !body) {
       const type = quoteInstanceText(response.headers.get('content-type') ?? 'unknown content type', 80)
-      throw this.pauseIfClosed(
-        new ServiceNowError(`${this.host} did not answer with JSON (HTTP ${response.status}, ${type}).`, 'invalid_response', table, response.status),
-      )
+      const error = this.pauseIfClosed(new ServiceNowError(`${this.host} did not answer with JSON (HTTP ${response.status}, ${type}).`, 'invalid_response', table, response.status))
+      // What answers is not the API of an instance: a page of a sleeping instance, or of a proxy.
+      if (call) call.ended ??= error
+      throw error
     }
 
     this.accepted = true

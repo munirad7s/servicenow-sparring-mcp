@@ -795,9 +795,9 @@ test('a database view that joins a parent table leaves out the rows of its close
     { table: 'task_with_sla', rows: [{ tsk_number: 'TASK1' }] },
   ]
   // The questions that have to match nothing: the class empty and filled at once, and one of two names at once.
-  // Beside them one row is asked for, to see that the view has rows at all.
+  // After them one row that has a class is asked for, to see that the view has such rows at all.
   const PROOF = 'tsk_sys_class_nameISEMPTY^tsk_sys_class_nameISNOTEMPTY'
-  const PROOFS = ['', PROOF, 'tsk_sys_class_nameINzz__no_such_class_a^tsk_sys_class_nameINzz__no_such_class_b']
+  const PROOFS = [PROOF, 'tsk_sys_class_nameINzz__no_such_class_a^tsk_sys_class_nameINzz__no_such_class_b', 'tsk_sys_class_nameISNOTEMPTY']
   const below = closedTables(tableRow('incident', 'Incident', 'task'))
   const { answer, sentTo, proofsFrom } = await connect(familyWorld([below, ...view]), { tables: { allow: [], deny: ['incident'] } })
   const data = await answer('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
@@ -834,8 +834,8 @@ test('rows of closed child tables are left out only after the instance showed th
   const world = (extra: Route[] = []) => familyWorld([below, ...extra, { table: 'task', rows: [{ number: 'TASK1' }] }, { table: 'task_sla', rows: [{ stage: 'x' }] }])
   const closed = { tables: { allow: [], deny: ['incident'] } }
   // Asked once per table and field: rows whose class is empty and filled at once, and rows whose class is one
-  // of two names at once. No row is either. Beside them one row is asked for, to see that the table has rows.
-  const questions = (field: string) => ['', `${field}ISEMPTY^${field}ISNOTEMPTY`, `${field}INzz__no_such_class_a^${field}INzz__no_such_class_b`]
+  // of two names at once. No row is either. After them one row that has a class is asked for.
+  const questions = (field: string) => [`${field}ISEMPTY^${field}ISNOTEMPTY`, `${field}INzz__no_such_class_a^${field}INzz__no_such_class_b`, `${field}ISNOTEMPTY`]
   const fine = await connect(world(), closed)
   await fine.answer('sn_query', { table: 'task', fields: ['number'] })
   await fine.answer('sn_query', { table: 'task', fields: ['number'] })
@@ -874,7 +874,7 @@ test('rows of closed child tables are left out only after the instance showed th
   const allowing = (extra: Route[] = []) => familyWorld([...extra, { table: 'sys_db_object', query: '^ORname=task', rows: [tableRow('task', 'Task'), tableRow('incident', 'Incident', 'task')] }, { table: 'task', rows: [{ number: 'TASK1' }] }])
   const listed = await connect(allowing(), pattern)
   await listed.answer('sn_query', { table: 'task', fields: ['number'] })
-  assert.deepEqual(listed.proofsFrom('task'), [...questions('sys_class_name'), starts])
+  assert.deepEqual(listed.proofsFrom('task'), [...questions('sys_class_name').slice(0, 2), starts, 'sys_class_nameISNOTEMPTY'])
   assert.equal(listed.sentTo('task')[0].query, 'sys_class_nameINtask,task_sla^ORsys_class_nameSTARTSWITHsys_^ORsys_class_nameSTARTSWITHu_^ORsys_class_nameISEMPTY')
   const refusing = await connect(allowing([{ table: 'task', exact: starts, rows: [{ sys_id: '1' }] }]), pattern)
   assert.equal((await refusing.call('sn_query', { table: 'task', fields: ['number'] })).data.error, 'blocked')
@@ -895,6 +895,22 @@ test('a table without rows proves nothing about a condition, and its answer is n
   await filled.answer('sn_query', { table: 'task', fields: ['number'] })
   await filled.answer('sn_query', { table: 'task', fields: ['number'] })
   assert.equal(filled.proofsFrom('task').length, 3)
+
+  // Nothing is asked of the table without a condition before the questions are answered: where one of them
+  // matches a row, the row that has a class is not asked for either.
+  const refused = await connect(familyWorld([below, { table: 'task', exact: 'sys_class_nameISEMPTY^sys_class_nameISNOTEMPTY', rows: [{ sys_id: '1' }] }, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
+  await refused.call('sn_query', { table: 'task', fields: ['number'] })
+  assert.deepEqual(refused.calls.filter((call) => call.table === 'task').map((call) => call.query).sort(), ['sys_class_nameINzz__no_such_class_a^sys_class_nameINzz__no_such_class_b', 'sys_class_nameISEMPTY^sys_class_nameISNOTEMPTY'])
+
+  // "Is not one of" is what leaves the rows out. Where a row shows its class, it is asked by itself: rows of that
+  // class that are not of that class. An instance that drops it answers with a row, and then nothing is read.
+  const classed = { table: 'task', rows: [{ number: 'TASK1', sys_class_name: 'problem' }] }
+  const direct = await connect(familyWorld([below, classed]), closed)
+  await direct.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(direct.proofsFrom('task').at(-1), 'sys_class_name=problem^sys_class_nameNOT INproblem')
+  const drops = await connect(familyWorld([below, { table: 'task', exact: 'sys_class_name=problem^sys_class_nameNOT INproblem', rows: [{ sys_id: '1' }] }, classed]), closed)
+  assert.equal((await drops.call('sn_query', { table: 'task', fields: ['number'] })).data.error, 'blocked')
+  assert.equal(drops.sentTo('task').length, 0)
 
   // An answer that says "no row matches" and carries a row all the same is no proof.
   const odd = await connect(familyWorld([below, { table: 'task', exact: 'sys_class_nameISEMPTY^sys_class_nameISNOTEMPTY', rows: [{ sys_id: '1' }], total: 0 }, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
@@ -1266,6 +1282,11 @@ test('with a list of the only tables that may be read, the tables the server dec
   // With the parent on the list, the same query is answered.
   const wide = await connect(world, { tables: { allow: ['sys_db_object', 'sys_dictionary', 'sys_db_view', 'sys_db_view_table', 'sys_metadata', 'task', 'incident'], deny: [] } })
   assert.equal((await wide.answer('sn_query', { table: 'incident', fields: ['number'] })).returned, 1)
+  // Where it cannot be read what one of the two extends, it is not known whether the list closes it.
+  const hidden = await connect([{ table: 'sys_db_object', exact: 'name=sys_dictionary', rows: [null] }, ...world], { tables: { allow: ['sys_db_object', 'sys_dictionary', 'sys_db_view', 'sys_db_view_table', 'sys_metadata', 'task', 'incident'], deny: [] } })
+  const unknown = await hidden.call('sn_query', { table: 'incident', fields: ['number'] })
+  assert.equal(unknown.data.error, 'blocked')
+  assert.match(unknown.data.message, /could not be established what "sys_dictionary" extends/)
 })
 
 test('the conditions for closed tables are measured as they stand in the address of the request', async () => {
@@ -2076,6 +2097,15 @@ test('text that begins ten thousand things and ends none costs its length, not i
     // Wrappers that never end: each new element was held against every one that was open.
     '<xml>'.repeat(200_000),
     '<a b="1" '.repeat(60_000),
+    // A run of CDATA sections one behind the other, with ten thousand elements that begin in front of it: the run
+    // was walked from each of them. And closing tags that end nothing: each was held against all that is open.
+    `${'<password><![CDATA['.repeat(40_000)}${']]><![CDATA['.repeat(40_000)}]]>`,
+    '<password><![CDATA[x]]><![CDATA[y'.repeat(40_000),
+    `${'<a>'.repeat(100_000)}${'</b>'.repeat(100_000)}`,
+    // The same shapes written with entities, and records whose end stands inside a CDATA section.
+    '&lt;password&gt;'.repeat(60_000),
+    '&lt;sys_properties&gt;&lt;name&gt;x&lt;/name&gt;'.repeat(40_000),
+    '<sys_properties><d><![CDATA[</sys_properties>'.repeat(40_000),
   ]
   const started = performance.now()
   for (const text of hostile) {
@@ -2083,7 +2113,8 @@ test('text that begins ten thousand things and ends none costs its length, not i
     payloadTables(text)
   }
   const took = performance.now() - started
-  assert.ok(took < 3_000, `${Math.round(took)} ms`)
+  // About 15 MB in all. Measured: about three seconds. One input that costs its length squared takes that alone.
+  assert.ok(took < 12_000, `${Math.round(took)} ms`)
 })
 
 test('a secret is taken out of markup that sits inside a CDATA section too', () => {
@@ -2188,6 +2219,14 @@ test('a payload does not hide the table of a record behind the way it is written
     tables('<record_update table="sys_ui_page"><sys_ui_page action="INSERT_OR_UPDATE"><html><![CDATA[<div><table><tr><td>x</td></tr></table><br></div>]]></html><description>a &lt;b&gt;bold&lt;/b&gt; word</description></sys_ui_page></record_update>'),
     ['sys_ui_page'],
   )
+  // A document inside a CDATA section says what it carries by its first element, also without a table on its
+  // wrapper and without an action: behind the declaration, and behind the wrappers.
+  assert.deepEqual(tables(link('<![CDATA[<?xml version="1.0" encoding="UTF-8"?><record_update><sys_user><name>Abel Tuter</name></sys_user></record_update>]]>')), ['sys_metadata_link', 'sys_user'])
+  assert.deepEqual(tables(link('<![CDATA[<?xml version="1.0"?><sys_user><name>Abel Tuter</name></sys_user>]]>')), ['sys_metadata_link', 'sys_user'])
+  // Entities written as numbers are entities.
+  assert.deepEqual(tables(link('&#60;sys_user action=&#34;INSERT_OR_UPDATE&#34;&#62;&#x3c;name&#x3e;x&#x3c;/name&#x3e;&#60;/sys_user&#62;')), ['sys_metadata_link', 'sys_user'])
+  // A closing tag that ends nothing that is open changes nothing.
+  assert.deepEqual(tables('<record_update table="incident"></b></c><incident action="INSERT_OR_UPDATE"><number>INC1</number></incident></record_update>'), ['incident'])
   // More tables than can be looked at one by one: such a payload cannot be judged, which an empty list says.
   const many = `<unload>${Array.from({ length: 60 }, (_, index) => `<u_table_${index}/>`).join('')}</unload>`
   assert.deepEqual(payloadTables(many), [])
@@ -2212,6 +2251,20 @@ test('a secret is taken out of a text however its element is written', () => {
   withheld('<sys_properties><description><![CDATA[uses <type>string</type>]]></description><name>x</name><type>password2</type><value>TOPSECRET</value></sys_properties>')
   // An element that ends in itself holds no record: the property behind it is judged by its own type.
   withheld('<record_update><sys_properties action="DELETE"/><incident><type>string</type></incident><sys_properties action="INSERT_OR_UPDATE"><name>x</name><type>password2</type><value>TOPSECRET</value></sys_properties></record_update>')
+  // An element with a prefix, as in a message a web service takes, and a closing tag with a blank in it.
+  assert.equal(withheld('<wsse:Password Type="PasswordText">TOPSECRET</wsse:Password>'), '<wsse:Password>[withheld]</wsse:Password>')
+  assert.equal(withheld('<password>TOPSECRET</password >'), '<password>[withheld]</password>')
+  // An element that ends in itself holds no text, but its attribute can repeat one.
+  assert.equal(withheld('<u_api_key display_value="TOPSECRET"/>'), '<u_api_key/>')
+  // The end of a property record that stands inside a CDATA section is text of a field, not the end of the record.
+  withheld('<sys_properties><description><![CDATA[</sys_properties>]]></description><name>x</name><type>password2</type><value>TOPSECRET</value></sys_properties>')
+  // Markup written with entities, as where a deleted captured change carries the payload it had.
+  assert.equal(withheld('<sys_update_xml><payload>&lt;record_update&gt;&lt;x&gt;&lt;password&gt;TOPSECRET&lt;/password&gt;&lt;/x&gt;&lt;/record_update&gt;</payload></sys_update_xml>'), '<sys_update_xml><payload>&lt;record_update&gt;&lt;x&gt;&lt;password&gt;[withheld]&lt;/password&gt;&lt;/x&gt;&lt;/record_update&gt;</payload></sys_update_xml>')
+  withheld('<payload>&lt;sys_properties action=&quot;INSERT_OR_UPDATE&quot;&gt;&lt;name&gt;x&lt;/name&gt;&lt;type&gt;password2&lt;/type&gt;&lt;value&gt;TOPSECRET&lt;/value&gt;&lt;/sys_properties&gt;</payload>')
+  assert.equal(scrubSecrets('<payload>&lt;sys_properties&gt;&lt;name&gt;glide.ui.width&lt;/name&gt;&lt;type&gt;integer&lt;/type&gt;&lt;value&gt;120&lt;/value&gt;&lt;/sys_properties&gt;</payload>').withheld, 0)
+  assert.equal(scrubSecrets('a &lt;b&gt;bold&lt;/b&gt; word and a &lt;display_password&gt;true&lt;/display_password&gt; switch').withheld, 0)
+  // JSON inside a JSON string with a line break between key and value, which the outer text writes as "\n".
+  assert.equal(withheld(String.raw`{"body": "{\n\"password\":\n\"TOPSECRET\"\n}"}`), String.raw`{"body": "{\n\"password\":\n\"[withheld]\"\n}"}`)
   // A property of another type keeps its value.
   assert.equal(scrubSecrets('<sys_properties action="INSERT_OR_UPDATE"><name>glide.ui.width</name><type>integer</type><value>120</value></sys_properties>').withheld, 0)
   // Also where an element in front of it ends in itself: that one holds no record, and what stands between the
@@ -3063,6 +3116,12 @@ test('a login that is rejected in the middle of a call is passed on as that', as
   assert.equal(overview.data.error, 'auth')
   // The entries of upgrades are one more witness, and many accounts cannot read them: that is no failure. A login
   // that is rejected there is one.
+  // Also where a tool catches every failure of a look-up to say "could not be read": a login that was rejected
+  // ends the call, whatever caught it. Here nothing is closed, and the list of plugins had been read.
+  const lists = await connect([{ table: 'v_plugin', rows: [{ id: 'com.example', name: 'Example', active: 'active', version: '1.0' }] }, rejected('sys_store_app'), rejected('sys_scope'), rejected('sys_app')])
+  const partly = await lists.call('sn_plugins')
+  assert.equal(partly.isError, true)
+  assert.equal(partly.data.error, 'auth')
   const witness = await connect([{ table: 'upgrade_history_task', status: 401 }, ...origin('sys_plugins', [], [])])
   assert.equal((await witness.call('sn_origin', { sysId: ID })).data.error, 'auth')
   const unreadable = await connect([{ table: 'upgrade_history_task', status: 403 }, ...origin('sys_plugins', [], [])])
@@ -3072,8 +3131,8 @@ test('a login that is rejected in the middle of a call is passed on as that', as
   const answer = await attached.call('sn_dependencies', { table: 'incident' })
   assert.equal(answer.data.error, 'auth')
   // One table that this account may not read is a category that could not be checked, and the others are answered.
-  const partly = await connect([{ table: 'sys_script', status: 403 }, { table: 'sys_script', api: 'stats', status: 403 }, ...dictionaryRoutes])
-  const some = await partly.answer('sn_dependencies', { table: 'incident', categories: ['businessRules', 'clientScripts'] })
+  const forbidden = await connect([{ table: 'sys_script', status: 403 }, { table: 'sys_script', api: 'stats', status: 403 }, ...dictionaryRoutes])
+  const some = await forbidden.answer('sn_dependencies', { table: 'incident', categories: ['businessRules', 'clientScripts'] })
   assert.equal(some.categories.businessRules.status, 'not_checked')
 })
 

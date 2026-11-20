@@ -71,38 +71,31 @@ const WITHHELD = '[withheld]'
 /**
  * Looks for the same text again and again while a longer text is read from left to right. A stretch that was
  * searched once is not searched again: a text made of ten thousand beginnings and no end then costs its length,
- * not its length squared. A question that goes back costs the way back and no more.
+ * not its length squared. Ask with positions that do not go backwards.
  */
 function finder(text: string, needle: string): (from: number) => number {
-  // "found" is the first place at or behind "asked", or -1 if there is none.
-  let asked = Infinity
-  let found = -1
+  let found = -2
   return (from) => {
-    if (from < asked) {
-      // Only the stretch in front of what was searched before.
-      const near = asked === Infinity ? text.indexOf(needle, from) : text.slice(from, asked + needle.length - 1).indexOf(needle)
-      if (asked === Infinity) found = near
-      else if (near >= 0) found = from + near
-    } else if (found !== -1 && found < from) {
-      found = text.indexOf(needle, from)
-    }
-    asked = from
+    if (found !== -1 && found < from) found = text.indexOf(needle, from)
     return found
   }
 }
 
 /** The attributes of a tag, read as such: a value may hold ">". */
 const ATTRIBUTES = String.raw`(?:\s+[\w:.-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*`
+/** The name of an element, with the prefix it may carry: "wsse:Password". */
+const ELEMENT = String.raw`[A-Za-z_][\w.:-]*`
 
 /**
  * The elements of a text that hold nothing but text, <tag …>text</tag>, with the text plain or in CDATA sections.
  * Read in one pass. Only the elements whose name is wanted are looked into.
  */
 function* simpleElements(text: string, wanted: (tag: string) => boolean): Generator<{ start: number; end: number; tag: string; plain: string }> {
-  const cdataEnd = finder(text, ']]>')
-  const OPEN = new RegExp(String.raw`<([A-Za-z_][\w.-]*)${ATTRIBUTES}\s*>`, 'g')
+  const firstEnd = finder(text, ']]>')
+  const OPEN = new RegExp(String.raw`<(${ELEMENT})${ATTRIBUTES}\s*>`, 'g')
   const CDATA = /\s*<!\[CDATA\[/y
   const BLANKS = /\s*/y
+  const CLOSED = /\s*>/y
   // The blanks behind one place are skipped once, however many elements end there.
   const skipped = { from: -1, to: -1 }
   const behindBlanks = (from: number) => {
@@ -114,39 +107,65 @@ function* simpleElements(text: string, wanted: (tag: string) => boolean): Genera
     }
     return skipped.to
   }
+  // A value that holds "]]>" is written as CDATA sections that stand one behind the other. Where such a run ends
+  // is kept for the end of every section in it, so a run is walked once, however many elements begin in front of it.
+  const runs = new Map<number, number>()
+  const endOfRun = (first: number): number => {
+    const walked: number[] = []
+    let last = first
+    for (;;) {
+      const known = runs.get(last)
+      if (known !== undefined) {
+        last = known
+        break
+      }
+      walked.push(last)
+      const next = text.startsWith('<![CDATA[', last + 3) ? text.indexOf(']]>', last + 12) : -1
+      if (next < 0) break
+      last = next
+    }
+    for (const end of walked) runs.set(end, last)
+    return last
+  }
   let done = 0
   for (let match = OPEN.exec(text); match; match = OPEN.exec(text)) {
     const tag = match[1]
     if (match.index < done || !wanted(tag)) continue
     const from = match.index + match[0].length
-    const closing = `</${tag}>`
-    const pieces: Array<[number, number]> = []
+    let inner = -1
+    let last = -1
     let after: number
     CDATA.lastIndex = from
     if (CDATA.test(text)) {
-      // A value that holds "]]>" is written as two sections, one behind the other.
-      let inner = CDATA.lastIndex
-      for (;;) {
-        const close = cdataEnd(inner)
-        if (close < 0) break
-        pieces.push([inner, close])
-        if (!text.startsWith('<![CDATA[', close + 3)) break
-        inner = close + 12
-      }
-      if (!pieces.length || cdataEnd(pieces.at(-1)![0]) < 0) continue
-      after = behindBlanks(pieces.at(-1)![1] + 3)
+      inner = CDATA.lastIndex
+      const first = firstEnd(inner)
+      if (first < 0) continue
+      last = endOfRun(first)
+      after = behindBlanks(last + 3)
     } else {
       after = text.indexOf('<', from)
       // No "<" is left, or the element is empty.
       if (after <= from) continue
-      pieces.push([from, after])
     }
     // The text is cut out only where the element ends as it should: ten thousand beginnings share one end.
-    if (!text.startsWith(closing, after)) continue
-    done = after + closing.length
-    yield { start: match.index, end: done, tag, plain: pieces.map(([start, end]) => text.slice(start, end)).join('').trim() }
+    if (!text.startsWith(`</${tag}`, after)) continue
+    CLOSED.lastIndex = after + tag.length + 2
+    if (!CLOSED.test(text)) continue
+    done = CLOSED.lastIndex
+    let plain = inner < 0 ? text.slice(from, after) : ''
+    for (let at = inner; at >= 0 && at <= last; ) {
+      const end = text.indexOf(']]>', at)
+      plain += text.slice(at, end)
+      at = end < last ? end + 12 : last + 1
+    }
+    yield { start: match.index, end: done, tag, plain: plain.trim() }
   }
 }
+
+/** Markup written with entities, as where a payload carries another payload: "&lt;password&gt;x&lt;/password&gt;". */
+const ESCAPED_ELEMENT = new RegExp(String.raw`&lt;(${ELEMENT})((?:\s(?:(?!&gt;|&lt;)[^<>])*)?)&gt;((?:(?!&lt;)[^<>])*)&lt;\/\1\s*&gt;`, 'g')
+const unescaped = (text: string) => text.replace(/&(?:lt|gt|quot|apos|amp);/g, (entity) => ENTITIES[entity])
+const ENTITIES: Record<string, string> = { '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&amp;': '&' }
 
 /**
  * Takes out of a text that carries a record what looks like a secret: the content of an XML element, or the value
@@ -157,19 +176,22 @@ function* simpleElements(text: string, wanted: (tag: string) => boolean): Genera
  * name, and without both its value is taken out. Any element "type" of the record that says "password" counts: a
  * text in front of it that only looks like a type does not make the property harmless.
  *
+ * The same is done where the markup is written with entities, as where one payload carries another.
+ *
  * The text comes from the instance, and whoever can write a record can write this text. It is read in passes that
  * cost its length: see finder().
  */
 export function scrubSecrets(text: string): { text: string; withheld: number } {
-  if (!/[<"]/.test(text)) return { text, withheld: 0 }
+  if (!/[<"]|&lt;/.test(text)) return { text, withheld: 0 }
   let withheld = 0
+  const isSwitch = (plain: string) => !plain || /^(true|false)$/.test(plain)
   /** The text with the content of the wanted elements taken out. "always" also where the content is a switch. */
   const without = (source: string, wanted: (tag: string) => boolean, always: boolean): string => {
     let out = ''
     let last = 0
     for (const element of simpleElements(source, wanted)) {
       // "true" and "false" are switches such as "display_password", not secrets.
-      if (!always && (!element.plain || /^(true|false)$/.test(element.plain))) continue
+      if (!always && isSwitch(element.plain)) continue
       withheld++
       // Without its attributes: a display value there would repeat the content.
       out += `${source.slice(last, element.start)}<${element.tag}>${WITHHELD}</${element.tag}>`
@@ -177,38 +199,79 @@ export function scrubSecrets(text: string): { text: string; withheld: number } {
     }
     return last ? out + source.slice(last) : source
   }
-  let out = without(text, (tag) => LOOKS_SECRET.test(tag), false)
+  /** The same for elements written with entities. */
+  const withoutEscaped = (source: string, wanted: (tag: string) => boolean, always: boolean): string =>
+    source.includes('&lt;')
+      ? source.replace(ESCAPED_ELEMENT, (whole, tag: string, _attributes: string, plain: string) => {
+          if (!wanted(tag) || (!always && isSwitch(unescaped(plain).trim()))) return whole
+          withheld++
+          return `&lt;${tag}&gt;${WITHHELD}&lt;/${tag}&gt;`
+        })
+      : source
+  const looksSecret = (tag: string) => LOOKS_SECRET.test(tag)
+  let out = withoutEscaped(without(text, looksSecret, false), looksSecret, false)
+  // An element that ends in itself holds no text, but an attribute of it can repeat one: a display value.
+  out = out.replace(new RegExp(String.raw`<(${ELEMENT})(${ATTRIBUTES})\s*\/>`, 'g'), (whole, tag: string, attributes: string) => {
+    if (!attributes.trim() || !looksSecret(tag)) return whole
+    withheld++
+    return `<${tag}/>`
+  })
 
   // A system property: its type says whether the value is a secret. An element that ends in itself holds none.
-  const RECORD = new RegExp(String.raw`<sys_properties${ATTRIBUTES}\s*>`, 'g')
-  const CLOSING = '</sys_properties>'
-  const recordEnd = finder(out, CLOSING)
-  let cleaned = ''
-  let last = 0
-  for (let match = RECORD.exec(out); match; match = RECORD.exec(out)) {
-    const close = recordEnd(match.index)
-    if (close < 0) break
-    const end = close + CLOSING.length
-    const record = out.slice(match.index, end)
+  const judge = (record: string): boolean => {
     const fields = [...simpleElements(record, (tag) => tag === 'type' || tag === 'name')]
     const types = fields.filter((field) => field.tag === 'type' && field.plain).map((field) => field.plain)
     const names = fields.filter((field) => field.tag === 'name' && field.plain).map((field) => field.plain)
-    const secret = types.length ? types.some((type) => /^password2?$/i.test(type)) : names.length ? names.some((name) => LOOKS_SECRET.test(name)) : true
-    if (secret) {
-      cleaned += out.slice(last, match.index) + without(record, (tag) => tag === 'value', true)
-      last = end
-    }
-    RECORD.lastIndex = end
+    return types.length ? types.some((type) => /^password2?$/i.test(type)) : names.length ? names.some((name) => LOOKS_SECRET.test(name)) : true
   }
-  if (last) out = cleaned + out.slice(last)
+  /**
+   * Every record of a system property in the text, from its opening tag to the end that belongs to it: an end
+   * that stands inside a CDATA section is the text of a field, and not the end of the record.
+   */
+  const records = (source: string, opening: RegExp, closing: string, sectionStart: string, sectionEnd: string, clean: (record: string) => string): string => {
+    const ends = finder(source, closing)
+    const sections = finder(source, sectionStart)
+    const sectionEnds = finder(source, sectionEnd)
+    let result = ''
+    let last = 0
+    for (let match = opening.exec(source); match; match = opening.exec(source)) {
+      let from = match.index + match[0].length
+      let close = -1
+      for (;;) {
+        close = ends(from)
+        const section = close < 0 ? -1 : sections(from)
+        if (section < 0 || section > close) break
+        const end = sectionEnds(section + sectionStart.length)
+        // A section that never ends holds the rest of the text, and with it every end of a record.
+        if (end < 0) {
+          close = -1
+          break
+        }
+        from = end + sectionEnd.length
+      }
+      if (close < 0) break
+      const end = close + closing.length
+      result += source.slice(last, match.index) + clean(source.slice(match.index, end))
+      last = end
+      opening.lastIndex = end
+    }
+    return last ? result + source.slice(last) : source
+  }
+  out = records(out, new RegExp(String.raw`<sys_properties${ATTRIBUTES}\s*>`, 'g'), '</sys_properties>', '<![CDATA[', ']]>', (record) => (judge(record) ? without(record, (tag) => tag === 'value', true) : record))
+  if (out.includes('&lt;sys_properties')) {
+    out = records(out, /&lt;sys_properties(?:\s(?:(?!&gt;)[^<>])*)?&gt;/g, '&lt;/sys_properties&gt;', '&lt;![CDATA[', ']]&gt;', (record) =>
+      judge(unescaped(record)) ? withoutEscaped(record, (tag) => tag === 'value', true) : record,
+    )
+  }
 
   // JSON, also where it sits inside a string of another JSON text and its quotes are escaped. There an escape of
   // the inner text is written with two backslashes: \\u003d, \\/ and, for a quote inside the value, \\\". An
-  // escape of the outer text has one, as where "/" was written "\/".
+  // escape of the outer text has one, as where "/" was written "\/", and a line break between key and value "\n".
   for (const quote of ['"', String.raw`\\"`]) {
     const value = quote === '"' ? String.raw`"(?:[^"\\]|\\.)+"` : String.raw`\\"(?:[^"\\]|\\\\(?:\\\\|\\"|[^"\\])|\\[^"\\])+\\"`
-    out = out.replace(new RegExp(String.raw`(${quote}([A-Za-z_][\w.-]*)${quote}\s*:\s*)(?:${value}|-?\d[\d.]*)`, 'g'), (whole, lead: string, key: string) => {
-      if (!LOOKS_SECRET.test(key) || /:\s*\\?"(true|false)\\?"$/.test(whole)) return whole
+    const gap = quote === '"' ? String.raw`\s*` : String.raw`(?:\s|\\[nrt])*`
+    out = out.replace(new RegExp(String.raw`(${quote}([A-Za-z_][\w.-]*)${quote}${gap}:${gap})(?:${value}|-?\d[\d.]*)`, 'g'), (whole, lead: string, key: string) => {
+      if (!LOOKS_SECRET.test(key) || /:(?:\s|\\[nrt])*\\?"(true|false)\\?"$/.test(whole)) return whole
       withheld++
       const mark = quote === '"' ? '"' : String.raw`\"`
       return `${lead}${mark}${WITHHELD}${mark}`
@@ -387,9 +450,12 @@ const SECTIONS: Array<[start: string, end: string]> = [
 ]
 /** A payload that names more tables than this is not looked at table by table: it is taken for one that cannot be judged. */
 const MAX_PAYLOAD_TABLES = 40
-const TAG = new RegExp(String.raw`<(\/?)([A-Za-z_][\w.:-]*)(${ATTRIBUTES})\s*(\/?)>`, 'y')
+const TAG = new RegExp(String.raw`<(\/?)(${ELEMENT})(${ATTRIBUTES})\s*(\/?)>`, 'y')
+/** A tag that carries attributes, wherever it stands. */
+const TAG_WITH_ATTRIBUTES = new RegExp(String.raw`<(${ELEMENT})(\s+[\w:.-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?${ATTRIBUTES})\s*\/?>`, 'g')
 const ATTRIBUTE = /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
-const ENTITIES: Record<string, string> = { '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&amp;': '&' }
+/** The first element of a document: behind its declaration, and behind the wrappers that hold records. */
+const FIRST_ELEMENT = new RegExp(String.raw`<\?xml\b[^<>]*\?>\s*(?:<(?:record_update|unload|xml)${ATTRIBUTES}\s*>\s*)*<(${ELEMENT})`, 'gi')
 
 /** A tag name as the name of a table: in small letters, without a prefix, or null if it can be none. */
 const asTable = (name: string): string | null => {
@@ -397,17 +463,25 @@ const asTable = (name: string): string | null => {
   return /^[a-z0-9_]{1,80}$/.test(plain) ? plain : null
 }
 
+/** Entities turned back into the characters they stand for, by name and by number. */
+const decoded = (text: string): string =>
+  text.replace(/&(?:(lt|gt|quot|apos|amp)|#(\d{1,7})|#x([0-9a-fA-F]{1,6}));/g, (entity, name: string | undefined, decimal: string | undefined, hex: string | undefined) => {
+    if (name) return ENTITIES[entity]
+    const code = decimal ? Number(decimal) : parseInt(hex ?? '', 16)
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : entity
+  })
+
 /**
  * The tables of the records a payload carries. An empty list means that it cannot be told: the payload names no
  * table, or more than can be looked at.
  *
- * Two signs are read wherever they stand, also inside a CDATA section and in markup that is written with
- * entities: the table named on a "record_update", and every element that has an action on it. Measured: a linked
- * application file carries the record it links to as a whole payload inside a CDATA section. And measured on 150
- * captured changes: 127 carried more than one element with an action, the record itself and what was removed
- * along with it.
+ * Three signs are read wherever they stand, also inside a CDATA section and in markup that is written with
+ * entities: the table named on a "record_update", every element that has an action on it, and the first element
+ * of a document, behind its declaration. Measured: a linked application file carries the record it links to as a
+ * whole payload inside a CDATA section. And measured on 150 captured changes: 127 carried more than one element
+ * with an action, the record itself and what was removed along with it.
  *
- * The third sign is the place of an element. Measured: a deleted or an archived record is stored under an element
+ * The fourth sign is the place of an element. Measured: a deleted or an archived record is stored under an element
  * that carries the name of its table and nothing else, and a captured change under a wrapper. So the outermost
  * element counts, and every element that stands directly inside a wrapper, whether it says what was done to it or
  * not. That is read from the markup of the payload itself only: inside a CDATA section stands the text of a
@@ -419,62 +493,71 @@ const asTable = (name: string): string | null => {
 export function payloadTables(text: string): string[] {
   const names = new Set<string>()
 
-  /** Reads the tags of a text. "placed" also takes an element for a record by where it stands. */
-  const read = (source: string, placed: boolean): void => {
-    const open: string[] = []
-    // How many of the open elements are no wrapper: with none, the next element is a record.
-    let inside = 0
-    const ends = SECTIONS.map(([, end]) => finder(source, end))
-    scan: for (let at = source.indexOf('<'); at >= 0; at = source.indexOf('<', at)) {
-      if (placed) {
-        for (const [index, [start, end]] of SECTIONS.entries()) {
-          if (!source.startsWith(start, at)) continue
-          const close = ends[index](at + start.length)
-          // Not ended: the rest of the text is inside it.
-          if (close < 0) break scan
-          at = close + end.length
-          continue scan
-        }
+  // By its place: the markup of the payload itself.
+  const open: string[] = []
+  const opened = new Map<string, number>()
+  // How many of the open elements are no wrapper: with none, the next element is a record.
+  let inside = 0
+  const ends = SECTIONS.map(([, end]) => finder(text, end))
+  scan: for (let at = text.indexOf('<'); at >= 0; at = text.indexOf('<', at)) {
+    for (const [index, [start, end]] of SECTIONS.entries()) {
+      if (!text.startsWith(start, at)) continue
+      const close = ends[index](at + start.length)
+      // Not ended: the rest of the text is inside it.
+      if (close < 0) break scan
+      at = close + end.length
+      continue scan
+    }
+    TAG.lastIndex = at
+    const tag = TAG.exec(text)
+    if (!tag) {
+      at++
+      continue
+    }
+    at = TAG.lastIndex
+    const [, closing, name, , empty] = tag
+    const table = asTable(name)
+    const element = table ?? name
+    if (closing) {
+      // Up to the element this tag ends: one that was never ended inside it ends with it. A tag that ends
+      // nothing that is open is passed over without a look at what is open.
+      if (!opened.get(element)) continue
+      for (const gone of open.splice(open.lastIndexOf(element))) {
+        opened.set(gone, opened.get(gone)! - 1)
+        if (!PAYLOAD_WRAPPERS.has(gone)) inside--
       }
-      TAG.lastIndex = at
-      const tag = TAG.exec(source)
-      if (!tag) {
-        at++
-        continue
-      }
-      at = TAG.lastIndex
-      const [, closing, name, attributes, empty] = tag
-      const table = asTable(name)
-      const element = table ?? name
-      if (closing) {
-        // Up to the element this tag ends: one that was never ended inside it ends with it.
-        const index = open.lastIndexOf(element)
-        if (index >= 0) for (const gone of open.splice(index)) if (!PAYLOAD_WRAPPERS.has(gone)) inside--
-        continue
-      }
-      let acted = false
-      for (const [, key, double, single] of attributes.matchAll(ATTRIBUTE)) {
-        const attribute = key.toLowerCase()
-        if (attribute === 'action') acted = true
-        const named = attribute === 'table' && element === 'record_update' ? asTable(double ?? single ?? '') : null
-        if (named) names.add(named)
-      }
-      if (table && !PAYLOAD_WRAPPERS.has(table) && (acted || (placed && inside === 0))) names.add(table)
-      if (placed && !empty) {
-        open.push(element)
-        if (!PAYLOAD_WRAPPERS.has(element)) inside++
-      }
+      continue
+    }
+    if (table && !PAYLOAD_WRAPPERS.has(table) && inside === 0) names.add(table)
+    if (!empty) {
+      open.push(element)
+      opened.set(element, (opened.get(element) ?? 0) + 1)
+      if (!PAYLOAD_WRAPPERS.has(element)) inside++
     }
   }
 
-  read(text, true)
-  // Once more without regard to sections, for what stands inside them, and for markup written with entities.
-  read(text, false)
-  let decoded = text
-  // "&amp;lt;" is markup that was written with entities twice.
-  for (let round = 0; round < 3 && /&(?:amp;)*lt;/.test(decoded); round++) {
-    decoded = decoded.replace(/&(?:lt|gt|quot|apos|amp);/g, (entity) => ENTITIES[entity])
-    read(decoded, false)
+  /** By what a tag says, wherever it stands: without regard to sections. */
+  const read = (source: string): void => {
+    for (const [, name, attributes] of source.matchAll(TAG_WITH_ATTRIBUTES)) {
+      const table = asTable(name)
+      for (const [, key, double, single] of attributes.matchAll(ATTRIBUTE)) {
+        const attribute = key.toLowerCase()
+        if (attribute === 'action' && table && !PAYLOAD_WRAPPERS.has(table)) names.add(table)
+        const named = attribute === 'table' && table === 'record_update' ? asTable(double ?? single ?? '') : null
+        if (named) names.add(named)
+      }
+    }
+    for (const [, name] of source.matchAll(FIRST_ELEMENT)) {
+      const table = asTable(name)
+      if (table && !PAYLOAD_WRAPPERS.has(table)) names.add(table)
+    }
+  }
+  read(text)
+  // Markup written with entities, once or more than once: "&amp;lt;" is markup that was written that way twice.
+  let plain = text
+  for (let round = 0; round < 3 && /&(?:amp;)*(?:lt|#0*60|#[xX]0*3[cC]);/.test(plain); round++) {
+    plain = decoded(plain)
+    read(plain)
   }
   return names.size > MAX_PAYLOAD_TABLES ? [] : [...names]
 }

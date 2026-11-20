@@ -6,6 +6,12 @@ export interface CallTrace {
   requests: number
   /** What the gate of closed tables did to the requests of this call. Every answer passes it on as warnings. */
   closed: { rowsLeftOut: boolean; names: Set<string>; untold: Set<string> }
+  /**
+   * The failure that ends this call, whatever the tool does with it: the login was rejected, the instance could
+   * not be reached, or the call sent as many requests as one call may. A tool that catches such a failure where
+   * it only meant to catch "this table is not readable" does not turn it into an answer.
+   */
+  ended?: Error
 }
 
 const calls = new AsyncLocalStorage<CallTrace>()

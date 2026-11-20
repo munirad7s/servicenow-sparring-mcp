@@ -213,6 +213,10 @@ function mapStrings<T>(value: T, change: (text: string) => string): T {
 }
 
 export function ok(payload: Record<string, unknown>): ToolResult {
+  // A rejected login, an instance that could not be reached, or the limit of requests for one call: a look-up
+  // that caught such a failure, where it meant to catch "this table is not readable", does not make it an answer.
+  const ended = currentCall()?.ended
+  if (ended) return fail(ended)
   return { content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: payload }
 }
 

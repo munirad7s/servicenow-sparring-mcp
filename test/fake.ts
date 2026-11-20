@@ -85,7 +85,7 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     // A field that is empty and filled at once: no row is. An instance that applies the query answers with none,
     // whatever the table holds. A test that wants an instance which drops the condition says so with a route for
     // exactly this query.
-    const impossible = /^([a-z0-9_.]+)ISEMPTY\^\1ISNOTEMPTY$/.test(query) || /^([a-z0-9_.]+)(IN|STARTSWITH)zz__no_such_[a-z_]+\^\1\2zz__no_such_[a-z_]+$/.test(query)
+    const impossible = IMPOSSIBLE.some((pattern) => pattern.test(query))
     const route = impossible ? (routes.find((candidate) => candidate.exact === query && fits(candidate)) ?? (routes.some((candidate) => candidate.table === table) ? { table, rows: [] } : undefined)) : routes.find(fits)
 
     if (!route) return json({ error: { message: `Invalid table ${table}`, detail: null }, status: 'failure' }, 400)
@@ -128,10 +128,22 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
  * has to match nothing, or the one row it asks a table for to see that the table has rows at all.
  */
 export function isProof(call: Call): boolean {
-  const impossible = /^([a-z0-9_.]+)ISEMPTY\^\1ISNOTEMPTY$/.test(call.query) || /^([a-z0-9_.]+)(IN|STARTSWITH)zz__no_such_[a-z_]+\^\1\2zz__no_such_[a-z_]+$/.test(call.query)
-  const anyRow = call.query === '' && call.params.get('sysparm_fields') === 'sys_id' && call.params.get('sysparm_limit') === '1' && call.api === 'table'
-  return impossible || anyRow
+  const impossible = IMPOSSIBLE.some((pattern) => pattern.test(call.query))
+  // One row that has a class, with its class: `<field>ISNOTEMPTY`, asking for the sys_id and that field.
+  const field = /^([a-z0-9_.]+)ISNOTEMPTY$/.exec(call.query)?.[1]
+  const oneRow = field !== undefined && call.params.get('sysparm_fields') === `sys_id,${field}` && call.params.get('sysparm_limit') === '1' && call.api === 'table'
+  return impossible || oneRow
 }
+
+/**
+ * Questions that no row can answer: a field that is empty and filled at once, one of two names that nothing has,
+ * a class and not that class.
+ */
+const IMPOSSIBLE = [
+  /^([a-z0-9_.]+)ISEMPTY\^\1ISNOTEMPTY$/,
+  /^([a-z0-9_.]+)(IN|STARTSWITH)zz__no_such_[a-z_]+\^\1\2zz__no_such_[a-z_]+$/,
+  /^([a-z0-9_.]+)=([a-z0-9_]+)\^\1NOT IN\2$/,
+]
 
 function isPair(value: unknown): value is { value: unknown; display_value: unknown } {
   return Boolean(value) && typeof value === 'object' && 'value' in (value as object) && 'display_value' in (value as object)
@@ -195,6 +207,9 @@ export const dictionaryRoutes: Route[] = [
     // Asked which tables are below it, each answers with itself and no child table.
     { table: 'sys_db_object', query: `^ORname=${name}`, rows: [tableRow(name, name)] },
   ]),
+  // The two tables everything else is read from, as tables of their own.
+  { table: 'sys_db_object', exact: 'name=sys_db_object', rows: [tableRow('sys_db_object', 'Table')] },
+  { table: 'sys_db_object', exact: 'name=sys_dictionary', rows: [tableRow('sys_dictionary', 'Dictionary Entry')] },
   // No table of this small world is a child of a closed one, unless a test says so with a route of its own.
   closedTables(),
   // Asked which of some names are tables, it lists the tables of this world.
