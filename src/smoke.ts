@@ -113,6 +113,16 @@ check('property values are not listed as groups', refused(await call('sn_query',
 const field = await call('sn_schema', { table: 'incident', filter: 'short_description' })
 check('sn_schema finds an inherited field by default', !field.isError && field.data.columns?.[0]?.definedOn === 'task' && field.data.fieldCount > field.data.ownFieldCount, `${field.data.ownFieldCount} own, ${field.data.fieldCount} in all`)
 
+// A field of task that incident overrides or relabels: the override is a record of its own, and so is the label.
+const overridden = await call('sn_schema', { table: 'incident' })
+const withRecords = (overridden.data.columns ?? []).filter((column: Data) => column.overrideRecords?.length)
+const relabelled = (overridden.data.columns ?? []).filter((column: Data) => column.labelFrom)
+check(
+  'sn_schema names dictionary overrides as records, and where a label comes from',
+  !overridden.isError && withRecords.every((column: Data) => column.overrideRecords.every((item: Data) => /^[0-9a-f]{32}$/.test(item.sysId) && item.changes.length > 0)),
+  `${withRecords.length} fields with an override, ${relabelled.length} with a label of another table`,
+)
+
 const views = await call('sn_query', { table: 'sys_db_view', fields: ['name'], limit: 1 })
 const viewName = views.data.records?.[0]?.name
 if (viewName) {
@@ -180,6 +190,14 @@ check(
   !skips.isError && typeof skips.data.total === 'number',
   `total ${skips.data.total}, not reviewed ${skips.data.notReviewed}, codes from ${skips.data.dispositionCodes?.from}, upgrade ${skips.data.upgrade?.kind ?? 'none'}`,
 )
+const captured = Object.values(skips.data.capturedBy ?? {}).reduce((sum: number, count) => sum + Number(count), 0)
+check(
+  'sn_upgrade_skips says who captured the changes to each entry',
+  !skips.isError && (skips.data.records ?? []).every((row: Data) => ['people', 'system_accounts', 'nobody'].includes(row.capturedBy)) && captured === skips.data.returned,
+  JSON.stringify(skips.data.capturedBy),
+)
+const changedOnly = await call('sn_upgrade_skips', { limit: 1, excludeErrors: true })
+check('sn_upgrade_skips can leave out the files an upgrade could not apply', !changedOnly.isError && changedOnly.data.total <= skips.data.total, `${changedOnly.data.total} of ${skips.data.total}`)
 check('sn_upgrade_skips counts per disposition for the whole filter', skips.data.total === 0 || (Array.isArray(skips.data.byDisposition) && skips.data.byDisposition.reduce((sum: number, item: Data) => sum + item.count, 0) === skips.data.total))
 
 const resource = await client.readResource({ uri: 'servicenow-sparring://limitations' })
