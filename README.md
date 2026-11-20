@@ -138,8 +138,8 @@ its error output and keeps answering. The npm scripts do not write it.
 ## Requests, caching and pauses
 
 - One `sn_query` is one request, plus a few to check its field names the first time a table is used. The other
-  functions cost more: `sn_origin` 5, `sn_dependencies` about 25, `sn_instance` about 45. Every answer carries its
-  count in `requests`. At most four requests of one function are in flight at a time.
+  functions cost more: `sn_origin` 5, `sn_dependencies` 25 to 30, `sn_instance` about 45. Every answer carries its
+  count in `requests`. At most six requests of one function are in flight at a time.
 - What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is
   missing from an entry older than 30 seconds is looked up once more, so a field created during a session is
   found. `sn_schema` reads the dictionary anew for every call.
