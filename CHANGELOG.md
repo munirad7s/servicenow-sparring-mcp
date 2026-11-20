@@ -3,7 +3,7 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
-## Unreleased
+## 0.4.3 (2026-11-20)
 
 Three reviews of 0.4.2, the day it came out: whether its fixes hold, which changes of one line no test would
 notice, and the documents against the code once more. The first rated 13 of 15 fixes as holding for the case they
