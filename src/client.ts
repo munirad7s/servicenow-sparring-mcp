@@ -78,7 +78,7 @@ export class ServiceNowClient {
   /** Becomes true once the instance has accepted the credentials. Until then requests go one at a time. */
   private accepted = false
   private opening: Promise<void> | null = null
-  private paused: { until: number; error: ServiceNowError } | null = null
+  private paused: { until: number; error: ServiceNowError; rejected?: Auth } | null = null
   private readonly sleep: (ms: number) => Promise<void>
 
   constructor(
@@ -240,18 +240,19 @@ export class ServiceNowClient {
     count: { sent: number },
     attempt = 0,
   ): Promise<{ body: { result?: unknown }; headers: Headers }> {
+    if (this.paused?.rejected) {
+      // A pause after a rejected login holds for the credentials that were rejected. Others end it at once:
+      // a renewed token in the env file, or one a request in flight picked up in the meantime.
+      const renewed = this.config.reloadAuth?.()
+      if (renewed && !sameAuth(renewed, this.paused.rejected)) this.auth = renewed
+      if (!sameAuth(this.auth, this.paused.rejected)) this.paused = null
+    }
     if (this.paused) {
-      // A renewed token ends the pause after a rejected login at once.
-      const renewed = this.paused.error.kind === 'auth' ? this.config.reloadAuth?.() : undefined
-      if (renewed && !sameAuth(renewed, this.auth)) {
-        this.auth = renewed
-        this.paused = null
-      } else if (Date.now() < this.paused.until) {
+      if (Date.now() < this.paused.until) {
         const { error } = this.paused
         throw new ServiceNowError(`${error.message} Not sent again for a moment, because the last request to this instance failed.`, error.kind, table, error.status)
-      } else {
-        this.paused = null
       }
+      this.paused = null
     }
 
     const url = `${this.config.instanceUrl}/api/now/${api}/${table}?${params}`
@@ -294,7 +295,7 @@ export class ServiceNowClient {
       const error = new ServiceNowError(`${this.host} rejected the credentials (HTTP 401).`, 'auth', table, 401)
       // Back to one request at a time: an expired token must not be retried by everything in flight.
       this.accepted = false
-      this.paused = { until: Date.now() + PAUSE_AFTER_REJECTED_LOGIN_MS, error }
+      this.paused = { until: Date.now() + PAUSE_AFTER_REJECTED_LOGIN_MS, error, rejected: sent }
       throw error
     }
 

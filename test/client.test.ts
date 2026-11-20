@@ -297,6 +297,32 @@ test('a token renewed during the pause after a rejected login is used at once', 
   assert.equal((await sn.query({ table: 'incident' })).records.length, 0)
 })
 
+test('a token renewed between two rejections is tried, and ends the pause', async () => {
+  let token = 'old'
+  let valid = 'old'
+  const held: Array<() => void> = []
+  const sn = new ServiceNowClient({ ...config, auth: { kind: 'bearer', token: 'old' }, reloadAuth: () => ({ kind: 'bearer', token }) }, async (_url, init) => {
+    if ((init.headers as Record<string, string>).Authorization === `Bearer ${valid}`) return json({ result: [{ a: '1' }] })
+    await new Promise<void>((resolve) => held.push(resolve))
+    return json({ error: { message: 'User Not Authenticated' } }, 401)
+  })
+  await sn.query({ table: 'incident' })
+
+  // The token expires while two requests are in flight. The first rejection arrives before a helper has written the new token.
+  valid = 'new'
+  const first = sn.query({ table: 'incident' })
+  const second = sn.query({ table: 'incident' })
+  await new Promise((resolve) => setImmediate(resolve))
+  held[0]()
+  assert.equal(await kindOf(() => first), 'auth')
+
+  // The second arrives after it: it goes again with the new token, and the pause the first one set is over.
+  token = 'new'
+  held[1]()
+  assert.equal((await second).records.length, 1)
+  assert.equal((await sn.query({ table: 'incident' })).records.length, 1)
+})
+
 test('an answer from in front of the instance does not count as an accepted login', async () => {
   // A gateway error first: the requests behind it must still go one at a time, or a wrong password is sent by all of them.
   let requests = 0
