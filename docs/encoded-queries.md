@@ -74,6 +74,7 @@ the same to keep one form.
 | `NULL` behind an operator other than `=` and `!=` | `sys_created_on>NULL`, `<NULL`, `BETWEENNULL@NULL`, `assigned_toINNULL` | refuses: each matched none of 82 rows |
 | `ON` on a number field | `reassignment_countONfoo@bar@baz` | refuses: it matched nothing |
 | A text search without a word | `123TEXTQUERY321=` | refuses: it matched nothing |
+| A text search on a database view | `123TEXTQUERY321=printer` on `incident_sla` | refuses, and names the tables to search: on thirty views that join a table with a text index it matched no row, where the same search finds rows on the table |
 | A condition joined to a text search with `^OR` | `123TEXTQUERY321=printer^ORpriority=1` | refuses: it matched none of the 27 rows with priority 1 |
 | A word on a choice that stores numbers | `priority=High` | refuses, and lists the values with their labels |
 | `>`, `>=`, `<` or `<=` without a value | `priority>` | refuses: on a number or a date it matched nothing, on a text field the empty rows |
@@ -176,7 +177,7 @@ Also measured:
 - Tables go deep. Of the 10,806 tables of one instance, 5 have a parent eight levels up and none has one nine
   levels up. The server reads eight levels in one request and asks again for what is below a table it finds at
   the eighth.
-- A database view can list the fields it shows of a table (104 of 558 views do). A condition on the class of a
+- A database view can list the fields it shows of a table (103 of 558 views do). A condition on the class of a
   joined table, `<prefix>_sys_class_name`, was applied on views whose list leaves that field out: a view of 44
   rows, 7 of them incidents, answered with 37 where incidents were left out. The server does not rely on it. Before
   it leaves rows out of a view this way, it asks the view for rows whose class is two things at once (empty and
@@ -231,6 +232,14 @@ Also measured:
   changes, whose payload names the table of the record, and over the application files of 1,998 classes. Where
   tables are closed, the server takes a name of such a beginning for a record of those tables as well. An
   instance can have more rules of this kind than this one had records of.
+- Counted per value, a table without rows mostly answers with an empty list, but not always: counted per class,
+  2 of 51 tables without rows and 15 views answered with one group of no rows and an empty value. The server
+  leaves such a group out.
+- A condition on the class of a row that the Table API applies is applied by the Aggregate API as well, as far as
+  measured: "empty and filled at once" on the class of 120 parent tables, on 400 class fields of database views and
+  behind 150 references matched nothing through both wherever both answered. In 8 cases the Aggregate API
+  answered HTTP 400 where the Table API applied the condition, and in 3 the Table API answered HTTP 403 where a
+  plain count through the Aggregate API went through.
 - Update names have few beginnings a table could be named by. Of 76,000 names (captured changes, versions and
   application files) none had more than fifteen, and the most a page of two hundred had between them was 433.
 - What a field shows beside its stored value depends on its kind. Of the 167 kinds of fields of one instance, 35

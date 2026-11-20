@@ -1311,8 +1311,23 @@ test('which tables are parts of a rotated one is read from the list of the insta
   assert.match(part.data.message, /"u_queue2" holds rows of u_queue/)
   // Not on the list: a table whose name ends in digits is a table of its own, whatever stands before the digits.
   assert.equal((await listed.answer('sn_query', { table: 'u_report2024', fields: ['sys_id'] })).returned, 1)
-  assert.equal((await listed.answer('sn_query', { table: 'u_queue7777', fields: ['sys_id'] })).returned, 1)
   assert.equal(listed.sentTo('sys_table_rotation_schedule').length, 1)
+  // A name that reads like a part of a table the list knows as rotated: the list is read anew, because a part
+  // that was created since it was read is not on it. Still not on it, the table is one of its own.
+  assert.equal((await listed.answer('sn_query', { table: 'u_queue7777', fields: ['sys_id'] })).returned, 1)
+  assert.equal(listed.sentTo('sys_table_rotation_schedule').length, 2)
+  // Once a minute at most, however often such a name is asked for.
+  for (let run = 0; run < 3; run++) await listed.answer('sn_query', { table: 'u_queue7777', fields: ['sys_id'] })
+  assert.equal(listed.sentTo('sys_table_rotation_schedule').length, 2)
+
+  // The table is rotated between two calls: the new part is closed with the next call, not ten minutes later.
+  const growing: Route = { table: 'sys_table_rotation_schedule', rows: [...schedule.rows!] }
+  const rotating = await connect([growing, ...world], closed)
+  assert.equal((await rotating.call('sn_query', { table: 'u_queue2', fields: ['sys_id'] })).data.error, 'blocked')
+  growing.rows!.push({ table_name: 'u_queue7777', 'name.name': 'u_queue' })
+  const fresh = await rotating.call('sn_query', { table: 'u_queue7777', fields: ['sys_id'] })
+  assert.equal(fresh.data.error, 'blocked')
+  assert.match(fresh.data.message, /"u_queue7777" holds rows of u_queue/)
 
   // The list cannot be read, is incomplete, or is closed on this machine: then a name that ends in digits may be a part.
   const hidden: Array<[string, Route[], InstanceConfig['tables']]> = [
@@ -1638,7 +1653,8 @@ test('a page of update names written to cost requests costs a bounded number, an
   // that was 368 requests for the names in sn_delta, and sn_query ended at the 500 requests one call may send.
   const tail = '_a'.repeat(38)
   const written = (name: string, target: string) => ({ name, type: 'Other', target_name: target, sys_created_by: 'abel', sys_updated_by: 'abel' })
-  const rows = [written('sys_dictionary_incident_u_field_0', 'Field 0'), ...Array.from({ length: 199 }, (_, index) => written(`k${index}${tail}_x`, `Thing ${index}`))]
+  // The last name shares its beginning with the first and has thirty more of its own, which no longer fit.
+  const rows = [written('sys_dictionary_incident_u_field_0', 'Field 0'), ...Array.from({ length: 198 }, (_, index) => written(`k${index}${tail}_x`, `Thing ${index}`)), written(`sys_dictionary_zz${'_a'.repeat(30)}`, 'Half asked')]
   const world: Route[] = [
     knownTables('sys_dictionary', 'incident'),
     { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Update')] },
@@ -1657,6 +1673,9 @@ test('a page of update names written to cost requests costs a bounded number, an
   assert.equal(data.updates[0].target_name, 'Field 0')
   // The others begin with no table: asked about or not, the record counts as one of a closed table.
   assert.ok(data.updates.slice(1).every((row: Data) => /^\[withheld: the record is in a table closed/.test(row.target_name)))
+  // A name is asked about as a whole or not at all. The last one begins with an open table that the first name
+  // was asked about: that half of an answer does not make it the record of an open table.
+  assert.match(data.updates.at(-1).target_name, /^\[withheld: the record is in a table closed/)
   // Five beginnings of the first name, then 39 a name: 51 names fit into the two thousand that are asked about.
   assert.match(data.warnings.join(' '), /148 update name\(s\) on this page were not looked up: together the names begin with more than 2000 different names a table could have/)
   const asked = calls.filter((call) => call.table === 'sys_db_object' && /^nameIN[^^]*\^ORDERBYsys_id$/.test(call.query))
@@ -1669,6 +1688,14 @@ test('a page of update names written to cost requests costs a bounded number, an
   assert.equal(page.records[0].target_name, 'Field 0')
   assert.match(page.warnings.join(' '), /148 update name\(s\) on this page were not looked up/)
   assert.ok(queried.calls.length < 110, `${queried.calls.length} requests in all`)
+
+  // The look-up fails for the page: every name counts as one whose table cannot be told, and the answer says why
+  // the names are missing. No request per row follows.
+  const unreadable = await connect([{ table: 'sys_db_object', match: /^nameIN[^^]*\^ORDERBYsys_id$/, status: 403 }, ...world.slice(1)], only)
+  const blind = await unreadable.answer('sn_delta', { limit: 200 })
+  assert.match(blind.updates[0].target_name, /^\[withheld/)
+  assert.match(blind.warnings.join(' '), /Which tables the update names on this page begin with could not be read \(sys_db_object: acl\)/)
+  assert.ok(unreadable.calls.filter((call) => call.table === 'sys_db_object' && call.query.startsWith('nameIN')).length <= 2)
 
   // A page as an instance has them says nothing of the kind.
   const usual = await connect(world.map((route) => (route.table === 'sys_update_xml' && route.rows === rows ? { ...route, rows: rows.slice(0, 1) } : route)), only)
@@ -2497,6 +2524,18 @@ test('text that begins ten thousand things and ends none costs its length, not i
   const before = performance.now()
   for (let run = 0; run < 200; run++) recordPayload(manyReadings, 'payload')
   assert.ok(performance.now() - before < 2_000, `${Math.round(performance.now() - before)} ms for a name read two hundred times`)
+})
+
+test('a field that carries whole records is known through a view over a child table', () => {
+  // A view that joins a table below sys_update_xml: the field of the view is one of the table it joins, and the
+  // table that defines it stands above that one. Judged by the joined table alone, the payload was passed on as text.
+  const joined = { name: 'chg_payload', label: 'Payload', type: 'string', reference: null, mandatory: false, readOnly: false, maxLength: null, active: true, choice: false, definedOn: 'u_changes', sourceField: 'payload', sourceDefinedOn: 'sys_update_xml' }
+  assert.equal(recordPayload('u_changes_view', 'chg_payload', joined), 'payload')
+  assert.equal(recordPayload('u_changes_view', 'chg_payload', { ...joined, sourceField: 'payload_diff', sourceDefinedOn: 'sys_update_diff' }), 'diff')
+  // A field of the same name on a table that carries no records is none.
+  assert.equal(recordPayload('u_changes_view', 'chg_payload', { ...joined, sourceDefinedOn: 'u_changes' }), null)
+  // Joined directly, the table that carries payloads is the one the field is defined on.
+  assert.equal(recordPayload('u_changes_view', 'chg_payload', { ...joined, definedOn: 'sys_update_xml', sourceDefinedOn: 'sys_update_xml' }), 'payload')
 })
 
 test('a secret is taken out where a section stands inside a section, and where the markup is written another way', () => {

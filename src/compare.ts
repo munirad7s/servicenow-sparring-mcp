@@ -35,9 +35,20 @@
  * For each table named, a server is started on which that table is closed, and
  * the instance is asked directly what belongs to the table: the tables below it,
  * the tables above it, the fields that point into it, the views that join it,
- * the captured changes to its records. Then every way round is tried through
- * the server. A row, a name or a count of the closed table that comes back is a
- * finding. That is a trial on the data of one instance, not a proof.
+ * the captured changes to its records. Then the ways round that this script
+ * knows are tried through the server. A row, a name or a count of the closed
+ * table that comes back is a finding. A check counts as passed only where the
+ * server refuses because of the closed table, or answers without anything of
+ * it: a refusal for another reason, and a check that could not be run, are
+ * listed apart, and the second ends the run with 1 as a finding does.
+ *
+ * That is a trial on the data of one instance, not a proof. It closes a table
+ * by a deny list, never by a list of the only tables that may be read. Per
+ * table it tries six tables below it, eight fields that point into it and six
+ * views. It does not try a dot-walk of more than one step, the parts of a
+ * rotated table, a view that joins a view, what a condition field or a list
+ * shows beside its value, or records captured under a name that does not begin
+ * with their table.
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -558,7 +569,7 @@ process.exit(differences.length || wrong.length || altered.length || miscounted.
 
 // ---------------------------------------------------------------- closed tables
 
-/** Tries every way round a closed table, for each table named. Returns the exit code. */
+/** Tries the ways round a closed table that this script knows, for each table named. Returns the exit code. */
 async function closedTables(names: string[]): Promise<number> {
   console.log(`A closed table, tried on ${new URL(settings.instanceUrl).host}`)
   const list = async (table: string, query: string, columns: string[], limit = 1_000) => (await get(table, { sysparm_query: query, sysparm_fields: columns.join(','), sysparm_limit: limit })).rows ?? []
@@ -566,6 +577,18 @@ async function closedTables(names: string[]): Promise<number> {
   const passed = new Map<string, number>()
   const good = (kind: string) => passed.set(kind, (passed.get(kind) ?? 0) + 1)
   const findings: string[] = []
+  // Refused, but not because of the closed table: that proves nothing about it. And what could not be run at all.
+  const otherwise = new Map<string, number>()
+  const notRun = new Map<string, number>()
+  /** true if the server answered with an error. Only a refusal because of the closed table counts as passed. */
+  const refused = (answer: { data: Data; isError: boolean }, kind: string): boolean => {
+    if (!answer.isError) return false
+    const error = String(answer.data.error)
+    if (error === 'blocked') good(kind)
+    else if (['validation', 'acl', 'not_found'].includes(error)) otherwise.set(`${kind}: as "${error}"`, (otherwise.get(`${kind}: as "${error}"`) ?? 0) + 1)
+    else notRun.set(`${kind}: ended with "${error}"`, (notRun.get(`${kind}: ended with "${error}"`) ?? 0) + 1)
+    return true
+  }
   let requests = 0
 
   for (const closed of names) {
@@ -592,16 +615,11 @@ async function closedTables(names: string[]): Promise<number> {
 
     // 1. The table itself and tables below it.
     for (const table of family.slice(0, 6)) {
-      const read = await ask('sn_query', { table, limit: 1 })
-      if (read.isError && read.data.error === 'blocked') good('the table or a table below it is refused')
-      else finding(`${table} is answered`)
-      const counted = await ask('sn_query', { table, groupBy: 'sys_created_by' })
-      if (counted.isError && counted.data.error === 'blocked') good('a count on the table or a table below it is refused')
-      else finding(`${table} is counted per value`)
+      if (!refused(await ask('sn_query', { table, limit: 1 }), 'the table or a table below it is refused')) finding(`${table} is answered`)
+      if (!refused(await ask('sn_query', { table, groupBy: 'sys_created_by' }), 'a count on the table or a table below it is refused')) finding(`${table} is counted per value`)
     }
     for (const [name, args] of [['sn_dependencies', { table: closed }], ['sn_query', { table: `ar_${closed}`, limit: 1 }]] as const) {
-      if ((await ask(name, args)).isError) good('what is attached to the table, and its archive, are refused')
-      else finding(`${name} with ${JSON.stringify(args)} is answered`)
+      if (!refused(await ask(name, args), 'what is attached to the table, and its archive, are refused')) finding(`${name} with ${JSON.stringify(args)} is answered`)
     }
 
     // 2. Through the tables above it: no row of the family, and a total without them.
@@ -609,10 +627,7 @@ async function closedTables(names: string[]): Promise<number> {
       const queries = ['', 'sys_created_onISNOTEMPTY^ORDERBYDESCsys_created_on', `sys_class_name=${closed}`, `sys_class_nameIN${family.slice(0, 3).join(',')}`, `sys_class_nameINSTANCEOF${closed}`, 'sys_class_name!=zz^ORDERBYsys_class_name', `sys_class_nameSTARTSWITH${closed.slice(0, 4)}`]
       for (const query of queries) {
         const read = await ask('sn_query', { table: parent, query, fields: ['sys_id', 'sys_class_name'], limit: 100 })
-        if (read.isError) {
-          good('a query on a table above is refused')
-          continue
-        }
+        if (refused(read, 'a query on a table above is refused')) continue
         const ids = (read.data.records as Data[]).map((row) => String(row.sys_id ?? '')).filter(Boolean)
         const shown = (read.data.records as Data[]).filter((row) => family.includes(String(row.sys_class_name))).length
         let closedRows = 0
@@ -627,8 +642,8 @@ async function closedTables(names: string[]): Promise<number> {
         else finding(`${parent} with "${masked(query)}": the total is ${read.data.total}, and only ${whole - closedInAll} rows are open`)
       }
       const perClass = await ask('sn_query', { table: parent, groupBy: 'sys_class_name', limit: 200 })
-      if (perClass.isError) good('a count per class on a table above is refused')
-      else if ((perClass.data.groups as Data[]).some((group) => family.includes(String(group.value)))) finding(`${parent} counted per class shows a class of the closed table`)
+      if (refused(perClass, 'a count per class on a table above is refused')) continue
+      if ((perClass.data.groups as Data[]).some((group) => family.includes(String(group.value)))) finding(`${parent} counted per class shows a class of the closed table`)
       else good('a count per class through a table above shows no closed class')
     }
 
@@ -646,31 +661,32 @@ async function closedTables(names: string[]): Promise<number> {
     }
     for (const [table, field] of tried) {
       const shown = await ask('sn_query', { table, query: `${field}ISNOTEMPTY`, fields: [field], limit: 20, displayValue: true })
-      if (shown.isError) good('a read of a field that points into the closed table is refused')
-      else if ((shown.data.records as Data[]).some((row) => row[field] && typeof row[field] === 'object' && (row[field].display ?? row[field].display_value))) finding(`${table}.${field}: cells carry the name of a record of the closed table`)
+      if (refused(shown, 'a read of a field that points into the closed table is refused')) {
+        // Nothing came back.
+      } else if ((shown.data.records as Data[]).some((row) => row[field] && typeof row[field] === 'object' && (row[field].display ?? row[field].display_value))) finding(`${table}.${field}: cells carry the name of a record of the closed table`)
       else good('a reference into the closed table comes without the name of the record')
       for (const query of [`${field}.sys_created_byISNOTEMPTY`, `${field}.sys_idISNOTEMPTY`, `${field}LIKEa`, `${field}STARTSWITHa`, `ORDERBY${field}`]) {
         const probe = await ask('sn_query', { table, query, fields: ['sys_id'], limit: 1 })
-        if (probe.isError) good('a condition or a sort that reads the closed record through a reference is refused')
-        else finding(`${table} with "${query}" is answered, and it reads a record of the closed table`)
+        if (!refused(probe, 'a condition or a sort that reads the closed record through a reference is refused')) finding(`${table} with "${query}" is answered, and it reads a record of the closed table`)
       }
-      if ((await ask('sn_query', { table, fields: [`${field}.sys_created_by`], limit: 1 })).isError) good('a field of the closed record asked for through a reference is refused')
-      else finding(`${table}: the field ${field}.sys_created_by is answered, and it is a field of the closed table`)
+      if (!refused(await ask('sn_query', { table, fields: [`${field}.sys_created_by`], limit: 1 }), 'a field of the closed record asked for through a reference is refused')) {
+        finding(`${table}: the field ${field}.sys_created_by is answered, and it is a field of the closed table`)
+      }
       const counted = await ask('sn_query', { table, groupBy: field, limit: 50 })
-      if (counted.isError) good('a count per reference into the closed table is refused')
-      else if ((counted.data.groups as Data[]).some((group) => group.display)) finding(`${table} counted per ${field}: the groups carry names of records of the closed table`)
+      if (refused(counted, 'a count per reference into the closed table is refused')) {
+        // Nothing came back.
+      } else if ((counted.data.groups as Data[]).some((group) => group.display)) finding(`${table} counted per ${field}: the groups carry names of records of the closed table`)
       else good('a count per reference into the closed table comes without names')
-      if ((await ask('sn_query', { table, query: '123TEXTQUERY321=a', fields: ['sys_id'], limit: 1 })).isError) good('a text search on a table that points into the closed one is refused')
-      else finding(`${table}: a text search is answered, and it finds records by the names of the closed table`)
+      if (!refused(await ask('sn_query', { table, query: '123TEXTQUERY321=a', fields: ['sys_id'], limit: 1 }), 'a text search on a table that points into the closed one is refused')) {
+        finding(`${table}: a text search is answered, and it finds records by the names of the closed table`)
+      }
     }
 
     // 4. Database views that join the family.
     const views = new Set<string>()
     for (const part of await inFamily('tableIN<family>')) for (const member of await list('sys_db_view_table', part, ['view.name'], 200)) if (member['view.name']) views.add(member['view.name'])
     for (const view of [...views].slice(0, 6)) {
-      const read = await ask('sn_query', { table: view, limit: 1 })
-      if (read.isError && read.data.error === 'blocked') good('a view that joins the closed table is refused')
-      else finding(`the view ${view} joins the closed table and is answered`)
+      if (!refused(await ask('sn_query', { table: view, limit: 1 }), 'a view that joins the closed table is refused')) finding(`the view ${view} joins the closed table and is answered`)
     }
 
     // 5. Captured changes to its records: their names and payloads, and the verdict on one of them.
@@ -678,12 +694,11 @@ async function closedTables(names: string[]): Promise<number> {
     const captured = (await list('sys_update_xml', `nameSTARTSWITH${closed}_`, ['name'], 200)).map((row) => row.name).filter((name) => ownName.test(name))
     if (captured.length) {
       const read = await ask('sn_query', { table: 'sys_update_xml', query: `nameIN${captured.slice(0, 20).join(',')}`, fields: ['name', 'target_name', 'payload'], limit: 20 })
-      if (read.isError) good('captured changes to records of the closed table are refused')
-      else if ((read.data.records as Data[]).some((row) => !String(row.target_name ?? '').startsWith('[withheld') || !String(row.payload ?? '').startsWith('[withheld'))) finding('sys_update_xml: a captured change to a record of the closed table comes with its name or its payload')
+      if (refused(read, 'captured changes to records of the closed table are refused')) {
+        // Nothing came back.
+      } else if ((read.data.records as Data[]).some((row) => !String(row.target_name ?? '').startsWith('[withheld') || !String(row.payload ?? '').startsWith('[withheld'))) finding('sys_update_xml: a captured change to a record of the closed table comes with its name or its payload')
       else good('captured changes to records of the closed table come without name and payload')
-      const origin = await ask('sn_origin', { updateName: captured[0] })
-      if (origin.isError && origin.data.error === 'blocked') good('sn_origin for a record of the closed table is refused')
-      else finding('sn_origin by the update name of a record of the closed table is answered')
+      if (!refused(await ask('sn_origin', { updateName: captured[0] }), 'sn_origin for a record of the closed table is refused')) finding('sn_origin by the update name of a record of the closed table is answered')
     }
 
     requests += instance.requestCount
@@ -694,7 +709,16 @@ async function closedTables(names: string[]): Promise<number> {
   for (const [kind, value] of [...passed].sort((a, b) => b[1] - a[1])) console.log(`  ${String(value).padStart(5)}  ${kind}`)
   console.log(`  ${String(findings.length).padStart(5)}  finding(s)`)
   for (const line of findings.slice(0, 60)) console.log(`         ${line}`)
+  const sum = (counts: Map<string, number>) => [...counts.values()].reduce((total, value) => total + value, 0)
+  if (otherwise.size) {
+    console.log(`  ${String(sum(otherwise)).padStart(5)}  check(s) the server refused for another reason than the closed table: no finding, and no proof either`)
+    for (const [kind, value] of [...otherwise].sort((a, b) => b[1] - a[1])) console.log(`         ${value} x ${kind}`)
+  }
+  if (notRun.size) {
+    console.log(`  ${String(sum(notRun)).padStart(5)}  check(s) that could not be run`)
+    for (const [kind, value] of [...notRun].sort((a, b) => b[1] - a[1])) console.log(`         ${value} x ${kind}`)
+  }
   console.log(`\n${requests + direct} requests, all GET: ${requests} by the servers, ${direct} directly.`)
-  return findings.length ? 1 : 0
+  return findings.length || notRun.size ? 1 : 0
 }
 

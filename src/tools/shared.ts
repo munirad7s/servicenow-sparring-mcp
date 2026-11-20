@@ -416,6 +416,8 @@ export interface RecordTables {
   asked: Set<string>
   /** Names that were not asked about, because the page had more beginnings than one call asks about. */
   leftOut: number
+  /** Why the look-up failed, where it did: then no name of the page was answered. */
+  failed?: string
 }
 
 /**
@@ -440,12 +442,23 @@ export async function knowRecordTables(ctx: Context, updateNames: string[]): Pro
     else for (const cut of fresh) asked.add(cut)
   }
   // A look-up that fails leaves every name without an answer: each is then judged as one whose table cannot be told.
-  const tables = await ctx.dict.knownTables([...asked]).catch(unlessNoConnection(null))
-  return tables ? { tables, asked, leftOut } : { tables: new Set(), asked: new Set(), leftOut: 0 }
+  let failed: string | undefined
+  const tables = await ctx.dict.knownTables([...asked]).catch((error) => {
+    if (noConnection(error)) throw error
+    failed = errorKind(error)
+    return null
+  })
+  return tables ? { tables, asked, leftOut } : { tables: new Set(), asked: new Set(), leftOut: 0, failed }
 }
 
-/** What an answer says where a page had more beginnings of update names than one call asks about. */
+/** What an answer says where the update names of a page could not all be looked up. */
 export function leftOutNames(page: RecordTables): string[] {
+  if (page.failed) {
+    return [
+      `Which tables the update names on this page begin with could not be read (sys_db_object: ${page.failed}). A name is then taken for a record of a closed table wherever it could be one, ` +
+        'so names of records in open tables can be withheld as well.',
+    ]
+  }
   if (!page.leftOut) return []
   return [
     `${page.leftOut} update name(s) on this page were not looked up: together the names begin with more than ${MAX_BEGINNINGS_ASKED} ` +

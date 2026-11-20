@@ -144,7 +144,14 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     // A part of a rotated table, or the archive of a table, holds the rows of that table and of its child tables.
     // Which tables are parts of a rotated one, the instance says in a list. Where that list cannot be read, or
     // is closed on this machine, the name of a table has to do.
-    const parts = sn.allows('sys_table_rotation_schedule') && sn.allows('sys_table_rotation') ? await dict.rotatedParts() : null
+    let parts = sn.allows('sys_table_rotation_schedule') && sn.allows('sys_table_rotation') ? await dict.rotatedParts() : null
+    if (parts) {
+      // The list is remembered for a while, and a part that was created since is not on it. A name that reads like
+      // a part of a table the list knows as rotated, and is not on the list, has it read anew.
+      const known = parts
+      const rotated = new Set(known.values())
+      if (info.chain.some((name) => !known.has(name) && partOfByName(name).some((base) => base !== undefined && rotated.has(base)))) parts = await dict.rotatedParts(true)
+    }
     const basesOf = (name: string) => tableNames([archiveOf(name), ...(parts ? [parts.get(name)] : partOfByName(name))], name)
     for (const [name, base] of info.chain.flatMap((name) => basesOf(name).map((base) => [name, base]))) {
       // A table the deny list names counts whether or not the instance still has it: its archive can outlive it.

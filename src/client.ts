@@ -298,7 +298,9 @@ export class ServiceNowClient {
       const shown = String(field?.display_value ?? '')
       return { value, count: Number(count), ...(shown && shown !== value ? { display: shown } : {}) }
     })
-    return { groups, query }
+    // Measured: counted per class, a table without rows can answer with one group of no rows and an empty value
+    // (2 of 51 such tables, 15 views), where others answer with an empty list. A group of no rows is none.
+    return { groups: groups.filter((group) => group.count > 0), query }
   }
 
   private async get(

@@ -148,6 +148,8 @@ const MAX_ENTRIES = 400
 const NO_SUCH_TABLE = ['zz__no_such_table_a', 'zz__no_such_table_b']
 /** As many names as are remembered to be a table or none. An entry is a name and a flag. */
 const MAX_KNOWN_NAMES = 5_000
+/** How often at most the list of the parts of rotated tables is read anew because a name looks like a new part. */
+const PARTS_ANEW_MS = 60_000
 
 /**
  * The parents of a row of sys_db_object as they were asked for, nearest first. null if the row cannot be used: it
@@ -203,6 +205,7 @@ export class Dictionary {
   private readonly parentChecks = new Map<string, Entry<boolean>>()
   private readonly knownNames = new Map<string, { table: boolean; at: number }>()
   private readonly partLists = new Map<string, Entry<Map<string, string> | null>>()
+  private partsReadAnew = 0
 
   /**
    * The client, for the lookups the gate of closed tables is built from: what a table is, what it extends, which
@@ -619,7 +622,14 @@ export class Dictionary {
    * named after the table with four digits, 8 with one digit, and 30 name the table itself. null where the list
    * cannot be read completely: the caller then has to go by the name of a table.
    */
-  rotatedParts(): Promise<Map<string, string> | null> {
+  rotatedParts(anew = false): Promise<Map<string, string> | null> {
+    // A part that was created after the list was read is not on it. A caller that meets a name which reads like
+    // a part and is not on the list asks for it anew: once a minute at most, or such a name would cost a request
+    // every time it is asked for.
+    if (anew && Date.now() - this.partsReadAnew >= PARTS_ANEW_MS) {
+      this.partsReadAnew = Date.now()
+      this.partLists.delete('parts')
+    }
     return this.cached(this.partLists, 'parts', async () => {
       const read = await this.sn.all<Record<string, string>>({ table: 'sys_table_rotation_schedule', fields: ['table_name', 'name.name'] }, 5_000).catch(unlessNoConnection(null))
       if (!read || !read.complete || (read.total !== null && read.records.length < read.total)) return null

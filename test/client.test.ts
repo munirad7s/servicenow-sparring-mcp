@@ -270,6 +270,10 @@ test('counts per group come from the Aggregate API', async () => {
 
   const broken = fakeInstance([{ table: 'sys_update_xml', api: 'stats', rows: [{ stats: { count: 'many' }, groupby_fields: [{ value: 'x' }] }] }])
   assert.equal(await kindOf(() => broken.sn.groupCount('sys_update_xml', 'type')), 'invalid_response')
+
+  // Measured: a table without rows can answer with one group of no rows. That is no group.
+  const empty = fakeInstance([{ table: 'task', api: 'stats', rows: [{ stats: { count: '0' }, groupby_fields: [{ field: 'sys_class_name', value: '' }] }] }])
+  assert.deepEqual(await empty.sn.groupCount('task', 'sys_class_name'), [])
 })
 
 test('a wrong password costs one rejected login, however many requests are waiting', async () => {

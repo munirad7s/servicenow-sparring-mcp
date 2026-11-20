@@ -161,11 +161,13 @@ provider, the data leaves your network. Five things limit what can go that way:
     Measured: `syslog0003` extends nothing, is read like any table, and answered with 655,964 rows of `syslog`
     and of its child tables; an archive table, `ar_<table>`, extends nothing either. Which tables are parts of
     which, the instance lists in `sys_table_rotation_schedule`, and the server goes by that list: measured, 319
-    of 327 parts are named after their table with four digits, and 8 with one. Where the list cannot be read, a
-    table whose name ends in digits counts as a part of the table without them. Where the table is open and has
-    a closed table below it, its parts and its archive are closed all the same: ask the table itself, which
-    leaves those rows out. The archive of a table the deny list names is closed also where the instance no
-    longer has the table.
+    of 327 parts are named after their table with four digits, and 8 with one. The list is remembered for ten
+    minutes; a name that reads like a part of a rotated table and is not on it has the list read anew, once a
+    minute at most, so that a part created in between is closed with the next call. Where the list cannot be
+    read, a table whose name ends in digits counts as a part of the table without them. Where the table is open
+    and has a closed table below it, its parts and its archive are closed all the same: ask the table itself,
+    which leaves those rows out. The archive of a table the deny list names is closed also where the instance
+    no longer has the table.
   - What the instance lists neither as a table nor as a database view counts as closed, and so does a database
     view that joins another view, or that comes back without a table it joins: nothing says whose rows it holds.
   - A parent table answers without the rows of its closed child tables. The same holds where a query walks a
@@ -253,16 +255,19 @@ many. The npm scripts do not write it.
 
 ## Requests, caching and pauses
 
-- A list that is longer than one answer is read by pages (`nextOffset`). A sorted query is sent with the sys_id
-  as its last sort key, so that every row comes once: without it, rows that are equal in what the query sorts by
-  change places between pages (measured: 989 different rows in a thousand captured changes read newest first).
-  The `query` of an answer shows the key.
+- A list that is longer than one answer is read by pages (`nextOffset`). A sorted query on a table is sent with
+  the sys_id as its last sort key, so that every row comes once: without it, rows that are equal in what the
+  query sorts by change places between pages (measured: 989 different rows in a thousand captured changes read
+  newest first). The `query` of an answer shows the key. A row of a database view has no sys_id of its own: its
+  keys are the sys_ids of the tables the view joins, where the view carries them, and the answer says so where
+  it does not, because the rows of such a view cannot all be told apart.
 - One `sn_query` is one request, plus five to seven the first time a table is used: to check its field names, and
   to look for rules that filter, archive or rotate it. On a database view, one more to read which fields it takes,
-  and two for each field it is filtered, sorted or counted by for the first time in ten minutes. The other functions cost more: `sn_origin` 4 to 9,
-  `sn_upgrade_skips` about 10, `sn_dependencies` 25 to 35 (about 18 for one field), `sn_instance` about 50. Every
-  answer carries its count in `requests`. At most eight requests are with the instance at a time, whichever
-  function sends them.
+  and two for each field it is filtered, sorted or counted by for the first time in ten minutes. The other
+  functions cost more: `sn_origin` 2 to 6 as measured on seven kinds of records, and a few more where a record
+  has to be looked up in several places, `sn_upgrade_skips` about 10, `sn_dependencies` 25 to 35 (about 18 for
+  one field), `sn_instance` about 50. Every answer carries its count in `requests`. At most eight requests are
+  with the instance at a time, whichever function sends them.
 - With tables closed on the machine, the first calls cost more: the server has to establish which tables are
   closed, what a table is a child or a parent of, and that the instance applies the conditions it relies on.
   Measured on a fresh server: 15 requests to list the 1,349 tables below a closed one, 18 for the first query on
@@ -333,11 +338,12 @@ account can read each one, and finally the release, the Aggregate API and the ro
 be installed on the instance.
 
 It also asks the instance about each field the server filters by in queries it writes itself: those of
-`sn_delta`, `sn_origin`, `sn_upgrade_skips` and `sn_plugins`, and those it reads the dictionary with, 52 fields of
-21 tables. It asks for the rows where the field is empty and filled at once. An instance that applies the
+`sn_delta`, `sn_origin`, `sn_upgrade_skips` and `sn_plugins`, and those it reads the dictionary with, 61 fields of
+22 tables. It asks for the rows where the field is empty and filled at once. An instance that applies the
 condition answers with none. One that does not know the field drops the condition and answers with rows; the
-functions would then answer unfiltered there, and `doctor` ends with 1 and names the field. On the test instance
-all 52 are applied.
+functions would then answer unfiltered there, and `doctor` ends with 1 and names the field. A field of a table
+the account cannot read is not asked about. On the test instance 58 of the 61 could be asked, and all 58 are
+applied.
 
 Which roles the account needs depends on the access rules of your instance. Start with a read-only account and let
 `doctor` show what it cannot read; the functions report such a source as "could not be checked".
@@ -555,10 +561,15 @@ npm run compare -- --closed incident sys_user
 ```
 
 It reads from the instance itself what belongs to the table (the tables below and above it, the fields that point
-into it, the views that join it, the captured changes to its records) and tries every way round through a server
-of its own: the table and its child tables, rows and totals through the tables above, names behind references,
-conditions, sorts and counts through a reference, text searches, views, and the names of captured changes. A row,
-a name or a count of the closed table that comes back is a finding, and it ends with 1.
+into it, the views that join it, the captured changes to its records) and tries the ways round that it knows
+through a server of its own: the table and its child tables, rows and totals through the tables above, names
+behind references, conditions, sorts and counts through a reference, text searches, views, and the names of
+captured changes. A row, a name or a count of the closed table that comes back is a finding, and it ends with 1.
+A check counts as passed only where the server refuses because of the closed table, or answers without anything
+of it: a refusal for another reason is listed apart, because it proves nothing about the closed table. The trial
+closes a table by a deny list, and per table it tries six tables below it, eight fields that point into it and
+six views. It does not try a dot-walk of more than one step, the parts of a rotated table, a view that joins a
+view, or records captured under a name that does not begin with their table.
 
 To check the verdicts of `sn_origin` by hand, let it write a sheet:
 
@@ -589,11 +600,13 @@ What was tested, and what was not:
   closed; with form layouts closed, the names of their captured changes were withheld; with one table closed
   that application files link to, 17 of 92 linked files came back without name and payload.
   `npm run compare -- --closed` repeats such trials from what the instance itself says belongs to a table: for
-  incidents, users, business rules and servers (58 tables with those below), 290 checks without a finding, and
-  eight findings when the rule that takes the names off references was switched off for a trial. That is a trial on one instance, not a proof:
-  the rules are in `src/closed.ts`, and the unit tests hold them. What an account sees that may not read or
-  filter by what a table extends was not tried, because the test account is an administrator: the server asks
-  for proof of both and closes everything without it. Those proofs were only ever seen to pass.
+  nine tables, among them one with 132 tables below it and one with 1,347, 618 checks passed without a finding,
+  and two more were refused by the instance itself, which proves nothing either way. With the rule that takes
+  the names off references switched off for a trial, it reported eight findings. That is a trial on one
+  instance, not a proof: the rules are in `src/closed.ts`, and the unit tests hold them. What an account sees
+  that may not read or filter by what a table extends was not tried, because the test account is an
+  administrator: the server asks for proof of both and closes everything without it. Those proofs were only ever
+  seen to pass.
 - Against the instance asked directly, with `npm run compare`: 2,727 fields of 55 tables came out the same in
   every property compared, and so did two earlier runs with other tables at random. Of 331 encoded queries, 311
   brought the same total and the same first rows as the Table API, 18 were refused as intended, and two went out
@@ -605,9 +618,10 @@ What was tested, and what was not:
   rows that are equal in what a query sorts by change places between pages. A thousand captured changes read
   newest first, in ten pages, were 989 different rows. The server now sends the sys_id as the last sort key of
   every sorted query, and the same read brings a thousand.
-- Database views with a field list, tried on 30 of them: of 31 conditions on a field outside the list that no row
-  carries, the instance dropped 15 and refused 16 with 403 when asked directly; the server refused all 31 before
-  a request went out. Of 54 system fields a row carried beyond its list, 52 passed the proof and were used. Of
+- Database views with a field list, tried on 30 of them by `npm run compare`, after the 40 that were measured by
+  hand: of 31 conditions on a field outside the list that no row carries, the instance dropped 15 and refused 16
+  with 403 when asked directly; the server asked its question for each, and sent none of the 31 queries. Of 54
+  system fields a row carried beyond its list, 52 passed the proof and were used. Of
   123 fields that the lists of 12 views name, the instance applied a condition on 122, and the server sent it;
   it dropped the condition on one, and the server refused that one. `npm run compare` repeats the last trial.
 - On another release, run `npm run doctor`, `npm run smoke` and `npm run compare` first.
