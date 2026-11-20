@@ -3,7 +3,7 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
-## Unreleased
+## 0.4.1 (2026-11-20)
 
 Found by measuring, not by reading: every function was held against the instance asked directly, and each
 difference was followed up. Two of them were answers this server exists to prevent. After that, three reviews:
