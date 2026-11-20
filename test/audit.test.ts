@@ -31,6 +31,21 @@ test('the audit log gets one line per request, readable by its owner only', asyn
   }
 })
 
+test('the lines of the audit log stand in the order of the requests', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sparring-audit-'))
+  try {
+    const path = join(dir, 'audit.jsonl')
+    const { sn } = fakeInstance([{ table: 'incident', rows: [] }], {}, auditWriter(path))
+    for (let index = 0; index < 40; index++) await sn.query({ table: 'incident', query: `priority=${index}` })
+    await until(() => existsSync(path) && readFileSync(path, 'utf8').trim().split('\n').length === 40)
+
+    const queries = readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line).query)
+    assert.deepEqual(queries, Array.from({ length: 40 }, (_, index) => `priority=${index}`))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('a log that cannot be written is reported once and breaks nothing', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'sparring-audit-'))
   try {

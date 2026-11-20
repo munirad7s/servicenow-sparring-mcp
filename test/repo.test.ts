@@ -50,7 +50,7 @@ test('only the client talks to the network, and only through fetch', () => {
 test('the only file the server writes is the audit log', () => {
   const usesFiles = sourceFiles.filter((path) => /['"`](node:)?fs(\/promises)?['"`]/.test(read(path))).sort()
   assert.deepEqual(usesFiles, ['src/audit.ts', 'src/config.ts'])
-  assert.match(read('src/audit.ts'), /^import \{ appendFile \} from 'node:fs'$/m)
+  assert.match(read('src/audit.ts'), /^import \{ appendFile \} from 'node:fs\/promises'$/m)
   assert.match(read('src/config.ts'), /^import \{ readFileSync, statSync \} from 'node:fs'$/m)
 })
 
