@@ -109,6 +109,7 @@ export class Dictionary {
   private readonly rotations = new Map<string, Entry<{ rotations: number; days: number } | null>>()
   private readonly settings = new Map<string, Entry<boolean | null>>()
   private readonly closedSets = new Map<string, Entry<Map<string, string[]>>>()
+  private readonly parentChecks = new Map<string, Entry<boolean>>()
 
   /**
    * The client, for the lookups the gate of closed tables is built from: what a table is, what it extends, which
@@ -149,6 +150,7 @@ export class Dictionary {
    */
   forget(name: string): void {
     for (const cache of [this.tables, this.columnSets, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.childSets]) cache.delete(name)
+    this.parentChecks.clear()
     for (const key of [...this.choiceLists.keys()]) if (key.startsWith(`${name}.`)) this.choiceLists.delete(key)
   }
 
@@ -342,6 +344,20 @@ export class Dictionary {
   }
 
   /**
+   * Whether this account can be told which table a table extends. The lists of child tables are built from
+   * conditions on that field. An account that may not read it could be answered as if those conditions were not
+   * there: then a table named on a list would come back, and none of its child tables, and nothing in the answer
+   * would show it. So the instance has to hand out one table together with its parent before a list is trusted.
+   */
+  private parentsReadable(): Promise<boolean> {
+    return this.cached(this.parentChecks, 'super_class', async () => {
+      const page = await this.sn.query<Record<string, string>>({ table: 'sys_db_object', query: 'super_class.nameISNOTEMPTY', fields: ['name', 'super_class.name'], limit: 1 })
+      const parent = page.records[0]?.['super_class.name']
+      return typeof parent === 'string' && parent !== ''
+    })
+  }
+
+  /**
    * Every table the deny list of this machine closes, each with its parents: the tables it names, the tables its
    * patterns match, and the child tables of all of them, whatever they are called. A child table holds rows of its
    * parent, so a query on a grandparent answers with them. Empty without a deny list.
@@ -363,6 +379,11 @@ export class Dictionary {
       const untrusted = (why: string) =>
         new ServiceNowError(`Tables are closed on this machine, and the list of their child tables could not be established (${why}). Nothing was sent.`, 'blocked', SENTINEL)
       const closed = new Map<string, string[]>()
+      const readable = await this.parentsReadable().catch((error) => {
+        if (noConnection(error)) throw error
+        return false
+      })
+      if (!readable) throw untrusted('the instance did not show this account which table a table extends (sys_db_object.super_class)')
 
       /**
        * The tables that carry one of these names, or match one of these patterns, at their own name or at one of
@@ -438,6 +459,11 @@ export class Dictionary {
   childTables(table: string): Promise<Map<string, string[]> | null> {
     assertTableName(table)
     return this.cached(this.childSets, table, async () => {
+      const readable = await this.parentsReadable().catch((error) => {
+        if (noConnection(error)) throw error
+        return false
+      })
+      if (!readable) return null
       const below = new Map<string, string[]>()
       let above = [table]
       for (let round = 0; above.length; round++) {

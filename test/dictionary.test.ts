@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Dictionary } from '../src/dictionary.js'
 import { ServiceNowError } from '../src/errors.js'
-import { column, dictionaryRoutes, fakeInstance, tableRow } from './fake.js'
+import { column, dictionaryRoutes, fakeInstance, showsParents, tableRow } from './fake.js'
 
 test('a table knows its parents and its kind', async () => {
   const { sn } = fakeInstance(dictionaryRoutes)
@@ -258,6 +258,7 @@ test('the tables a long deny list closes are asked for in several requests, each
   const child = tableRow('u_child_of_the_last', 'Child', names[59])
   const { sn, calls } = fakeInstance(
     [
+      showsParents,
       // Every request is answered with the same rows: the table of tables as proof, one closed table and its child.
       { table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [tableRow(names[59], 'Closed'), child, tableRow('sys_db_object', 'Table')] },
     ],
@@ -267,7 +268,7 @@ test('the tables a long deny list closes are asked for in several requests, each
   assert.deepEqual([...closed.keys()].sort(), [names[59], 'u_child_of_the_last'].sort())
   assert.deepEqual(closed.get('u_child_of_the_last'), ['u_child_of_the_last', names[59]])
 
-  const asked = calls.filter((call) => call.table === 'sys_db_object')
+  const asked = calls.filter((call) => call.table === 'sys_db_object' && call.query !== showsParents.exact)
   assert.ok(asked.length > 1, `${asked.length} requests`)
   for (const call of asked) {
     assert.ok(call.query.length < 3_500, `a query of ${call.query.length} characters`)
@@ -291,7 +292,7 @@ test('the tables a long deny list closes are asked for in several requests, each
 })
 
 test('the tables below a table are listed only where the answer can be trusted', async () => {
-  const below = (rows: Array<Record<string, string> | null>, extra: Partial<{ total: number; status: number }> = {}) => fakeInstance([{ table: 'sys_db_object', query: '^ORname=task', rows, ...extra }])
+  const below = (rows: Array<Record<string, string> | null>, extra: Partial<{ total: number; status: number }> = {}) => fakeInstance([showsParents, { table: 'sys_db_object', query: '^ORname=task', rows, ...extra }])
   const task = tableRow('task', 'Task')
   const incident = tableRow('incident', 'Incident', 'task')
   const major = tableRow('u_major_incident', 'Major incident', 'incident', 'task')
@@ -300,7 +301,7 @@ test('the tables below a table are listed only where the answer can be trusted',
   // Each with its parents up to the table, so that a closed table in between can be seen.
   assert.deepEqual([...((await new Dictionary(fine.sn).childTables('task')) ?? [])], [['incident', ['incident', 'task']], ['u_major_incident', ['u_major_incident', 'incident', 'task']]])
   // Every level of parents is asked for, and the table itself as proof that the query was applied.
-  assert.match(fine.calls[0].query, /^super_class\.name=task\^ORsuper_class\.super_class\.name=task\^OR.*\^ORname=task$/)
+  assert.match(fine.calls[1].query, /^super_class\.name=task\^ORsuper_class\.super_class\.name=task\^OR.*\^ORname=task$/)
   assert.equal((await new Dictionary(below([task]).sn).childTables('task'))?.size, 0)
 
   // Not trusted: the table itself is missing from the answer, a row matches none of the conditions, rows are
@@ -324,6 +325,7 @@ test('a child table more than eight levels below a closed table is found, with i
   const proof = tableRow('sys_db_object', 'Table')
   const { sn, calls } = fakeInstance(
     [
+      showsParents,
       // Asked a second time, for what is below the table that was found at the eighth level.
       { table: 'sys_db_object', query: 'super_class.nameINu_deep^', rows: [deep, deeper, proof] },
       { table: 'sys_db_object', query: 'nameINu_base', rows: [tableRow('u_base', 'Base', 'u_root'), deep, proof] },
@@ -347,13 +349,30 @@ test('the tables below a table are followed deeper than one request sees', async
   const deep = tableRow('u_deep', 'Deep', ...mids, 'u_root')
   const deeper = tableRow('u_deeper', 'Deeper', 'u_deep', ...mids)
   const { sn, calls } = fakeInstance([
+    showsParents,
     { table: 'sys_db_object', query: 'super_class.name=u_deep^', rows: [root, deeper] },
     { table: 'sys_db_object', query: 'super_class.name=u_root^', rows: [root, deep] },
   ])
   const below = await new Dictionary(sn).childTables('u_root')
   assert.deepEqual(below?.get('u_deep'), ['u_deep', ...mids, 'u_root'])
   assert.deepEqual(below?.get('u_deeper'), ['u_deeper', 'u_deep', ...mids, 'u_root'])
-  assert.equal(calls.length, 2)
+  assert.equal(calls.filter((call) => call.query !== showsParents.exact).length, 2)
+})
+
+test('an account that is not shown what a table extends gets no list of child tables', async () => {
+  // The lists are built from conditions on the parent of a table. An instance that drops them for this account
+  // would answer with the table that was named and none of its child tables, and nothing would show it.
+  const task = tableRow('task', 'Task')
+  for (const [name, proof] of [
+    ['no row', { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', rows: [] }],
+    ['a row without its parent', { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', rows: [{ name: 'incident' }] }],
+    ['not readable', { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', status: 403 }],
+  ] as const) {
+    const routes = [proof, { table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [task, tableRow('sys_db_object', 'Table')] }, { table: 'sys_db_object', query: '^ORname=task', rows: [task] }]
+    const denying = new Dictionary(fakeInstance(routes, { tables: { allow: [], deny: ['task'] } }).sn)
+    await assert.rejects(denying.closedTables(), (error: unknown) => error instanceof ServiceNowError && error.kind === 'blocked' && /did not show this account which table a table extends/.test(error.message), name)
+    assert.equal(await new Dictionary(fakeInstance(routes).sn).childTables('task'), null, name)
+  }
 })
 
 test('a rotation entry that is hidden, or cannot be read, is not "not rotated"', async () => {

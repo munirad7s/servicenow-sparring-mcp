@@ -151,8 +151,15 @@ export const tableRow = (name: string, label: string, ...parents: string[]) => (
  */
 export const closedTables = (...rows: Row[]): Route => ({ table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [...rows, tableRow('sys_db_object', 'Table')] })
 
+/**
+ * What an instance answers when it is asked for one table that extends another: the proof that this account can be
+ * told what a table extends. The lists of child tables are trusted only after it.
+ */
+export const showsParents: Route = { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', rows: [{ name: 'incident', 'super_class.name': 'task' }] }
+
 /** Dictionary of a small world: incident extends task; both point to sys_user. */
 export const dictionaryRoutes: Route[] = [
+  showsParents,
   { table: 'sys_db_object', query: 'name=incident', rows: [tableRow('incident', 'Incident', 'task')] },
   { table: 'sys_db_object', query: 'name=task', rows: [tableRow('task', 'Task')] },
   { table: 'sys_db_object', query: 'name=sys_user', rows: [tableRow('sys_user', 'User')] },

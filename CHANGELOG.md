@@ -60,6 +60,10 @@ found. Every claim about the platform was measured on an instance before anythin
   - The list of tables below a closed one ended eight levels down. Measured on one instance: 5 of 10,806 tables
     have a parent eight levels up, none nine, so a larger instance can have tables the list missed. The server
     asks again for what is below a table it finds at the eighth level, and follows every chain up to its root.
+  - The lists of child tables are built from conditions on the parent of a table. An account that may not read
+    that field could be answered as if they were not there: the named table would come back, and none below
+    it. The instance now has to show one table together with its parent before a list is trusted. (Not seen on
+    an instance: the test account is an administrator.)
   - `sn_origin`, asked by the sys_id of a record of a closed table, found its update name through a captured
     change and read its history. It stops there now. Where application files of closed tables were left out of
     its look-up, it no longer says "not found" of a record that can be one of them.
