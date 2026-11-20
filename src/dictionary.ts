@@ -686,6 +686,47 @@ export class Dictionary {
   }
 
   /**
+   * The same for several tables at once: two requests for forty of them, where asking table by table is two each.
+   * A read with display values asks about every table its references point into. Best effort: where anything
+   * comes back incomplete, nothing is kept, and each table is asked for by itself.
+   */
+  async knowDisplayReferences(tables: string[]): Promise<void> {
+    const now = Date.now()
+    const wanted = [...new Set(tables)].filter((name) => {
+      const hit = this.shownSets.get(name)
+      return isTableName(name) && !(hit && now - hit.at < this.ttlMs)
+    })
+    if (wanted.length < 2) return
+    const infos = (await Promise.all(wanted.map((name) => this.table(name).catch(unlessNoConnection(null))))).filter((info): info is TableInfo => Boolean(info) && info!.kind !== 'database_view')
+    const marked = new Map<string, Array<{ field: string; reference: string | null }>>()
+    const moved = new Set<string>()
+    for (const group of inGroups([...new Set(infos.flatMap((info) => info.chain))])) {
+      const names = group.join(',')
+      const entries = await this.sn.all<Record<string, string>>(
+        { table: 'sys_dictionary', query: `nameIN${names}^display=true^ORelementIN${NAMED_AS_DISPLAY.join(',')}`, fields: ['name', 'element', 'internal_type', 'reference'] },
+        5_000,
+      )
+      if (!entries.complete || (entries.total !== null && entries.records.length < entries.total)) return
+      const overrides = await this.gated.all<Record<string, string>>({ table: 'sys_dictionary_override', query: `nameIN${names}^display_override=true`, fields: ['name'] }, 5_000)
+      if (!overrides.complete || overrides.total === null || overrides.records.length < overrides.total) return
+      for (const row of overrides.records) moved.add(String(row.name))
+      for (const row of entries.records) {
+        // A row that does not say which table it is of cannot be placed.
+        if (!group.includes(row.name)) return
+        if (POINTS_ELSEWHERE.has(row.internal_type)) marked.set(row.name, [...(marked.get(row.name) ?? []), { field: String(row.element), reference: isTableName(row.reference) ? row.reference : null }])
+      }
+    }
+    for (const info of infos) {
+      const known = this.shownSets.get(info.name)
+      if (known && now - known.at < this.ttlMs) continue
+      const shown = info.chain.some((name) => moved.has(name)) ? null : info.chain.flatMap((name) => marked.get(name) ?? [])
+      this.shownSets.delete(info.name)
+      this.shownSets.set(info.name, { value: Promise.resolve(shown), at: now })
+      if (this.shownSets.size > MAX_ENTRIES) this.shownSets.delete(this.shownSets.keys().next().value as string)
+    }
+  }
+
+  /**
    * Every table below a table, however deep, each with its parents up to the table. Used where a list names the
    * only tables that may be read: a table below an open one can be closed, by itself or by a parent in between.
    * null if the list cannot be trusted, for the reasons given at closedTables: the caller then has to assume that

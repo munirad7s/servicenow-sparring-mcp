@@ -92,11 +92,36 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     const impossible = IMPOSSIBLE.some((pattern) => pattern.test(query))
     const route = impossible ? (routes.find((candidate) => candidate.exact === query && fits(candidate)) ?? (routes.some((candidate) => candidate.table === table) ? { table, rows: [] } : undefined)) : routes.find(fits)
 
-    if (!route) return json({ error: { message: `Invalid table ${table}`, detail: null }, status: 'failure' }, 400)
-    if (route.unreachable) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } })
-    if (route.timesOut) throw new DOMException('timed out', 'TimeoutError')
-    const status = route.status ?? 200
-    if (route.body !== undefined) return new Response(route.body, { status, headers: { 'content-type': 'text/html' } })
+    // The two questions about what tables show as their names can name several tables at once. An instance answers
+    // with the entries of all of them. The routes of a test hold the entries table by table, so the stand-in puts
+    // the answer together: each name is answered by the route that would answer for it alone.
+    const asksWhatIsShown = (table === 'sys_dictionary' && /\^display=true(?:\^ORelementIN[a-z_,]+)?(?:\^ORDERBY|$)/.test(query)) || (table === 'sys_dictionary_override' && /\^display_override=true(?:\^ORDERBY|$)/.test(query))
+    const several = asksWhatIsShown ? (/^nameIN([a-z0-9_,]+)\^/.exec(query)?.[1].split(',') ?? []) : []
+    let together: Route | undefined
+    if (several.length > 1 && route?.exact !== query) {
+      const forName = (name: string) =>
+        routes.find(
+          (candidate) =>
+            candidate.table === table &&
+            (candidate.api ?? 'table') === api &&
+            candidate.exact === undefined &&
+            candidate.match === undefined &&
+            (candidate.query === undefined || (candidate.query.startsWith('nameIN') && candidate.query.slice('nameIN'.length).split(/[,^]/).includes(name))),
+        )
+      const answers = several.map((name) => ({ name, from: forName(name) }))
+      const failing = answers.find(({ from }) => !from || from.status !== undefined || from.unreachable || from.timesOut || from.body !== undefined)
+      together = failing
+        ? (failing.from ?? undefined)
+        : { table, rows: [...new Set(answers.map(({ from }) => from!))].flatMap((from) => (from.rows ?? []).filter((row) => row === null || several.includes(String(row.name)))) }
+      if (failing && !failing.from) return json({ error: { message: `Invalid table ${table}`, detail: null }, status: 'failure' }, 400)
+    }
+    const answering = together ?? route
+
+    if (!answering) return json({ error: { message: `Invalid table ${table}`, detail: null }, status: 'failure' }, 400)
+    if (answering.unreachable) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } })
+    if (answering.timesOut) throw new DOMException('timed out', 'TimeoutError')
+    const status = answering.status ?? 200
+    if (answering.body !== undefined) return new Response(answering.body, { status, headers: { 'content-type': 'text/html' } })
     if (status !== 200) return json({ error: ERRORS[status] ?? { message: `HTTP ${status}`, detail: '' }, status: 'failure' }, status)
 
     // Asked which fields a row shows as its own name, an instance answers with the fields the dictionary marks as
@@ -104,8 +129,8 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     // that do. The routes of a test list every field of a table, so the stand-in picks from them as an instance does.
     const shownAs = table === 'sys_dictionary' ? /\^display=true(?:\^ORelementIN([a-z_,]+))?(?:\^ORDERBY|$)/.exec(query) : null
     const namedAsDisplay = shownAs ? (shownAs[1]?.split(',') ?? []) : undefined
-    const movesDisplay = table === 'sys_dictionary_override' && query.endsWith('^display_override=true')
-    const rows = (route.rows ?? []).filter((row) => {
+    const movesDisplay = table === 'sys_dictionary_override' && /\^display_override=true(?:\^ORDERBY|$)/.test(query)
+    const rows = (answering.rows ?? []).filter((row) => {
       if (row === null) return true
       if (namedAsDisplay) return row.display === 'true' || namedAsDisplay.includes(String(row.element))
       if (movesDisplay) return row.display_override === 'true'
@@ -130,9 +155,9 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
 
     // Asked for one row that has a class, with its class ("<field>ISNOTEMPTY" and that field): an instance answers
     // with a row that carries it, because that is what was asked for. A test that wants one which does not hand
-    // the field out says so with a route for exactly this query.
+    // the field out says so with a answering for exactly this query.
     const classOf = /^([a-z0-9_.]+)ISNOTEMPTY$/.exec(query)?.[1]
-    const shows = classOf !== undefined && route.exact === undefined && parsed.searchParams.get('sysparm_fields') === `sys_id,${classOf}`
+    const shows = classOf !== undefined && answering.exact === undefined && parsed.searchParams.get('sysparm_fields') === `sys_id,${classOf}`
     const visible = rows
       .slice(offset, offset + limit)
       .filter((row): row is Row => row !== null)
@@ -142,7 +167,7 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
       if (!display) return Object.fromEntries(Object.entries(kept).map(([key, value]) => [key, isPair(value) ? value.value : value]))
       return Object.fromEntries(Object.entries(kept).map(([key, value]) => [key, isPair(value) ? value : { value, display_value: value }]))
     })
-    return json({ result: page }, 200, route.noTotal ? {} : { 'x-total-count': String(route.total ?? rows.length) })
+    return json({ result: page }, 200, answering.noTotal ? {} : { 'x-total-count': String(answering.total ?? rows.length) })
   }
 
   return { calls, sn: new ServiceNowClient({ ...config, ...overrides }, fetchImpl, { audit, sleep: async () => undefined }) }

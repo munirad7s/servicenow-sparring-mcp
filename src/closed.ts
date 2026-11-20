@@ -68,6 +68,13 @@ const NAMED_AFTER_OTHERS = new Set(['sys_audit_delete', 'sys_archive_log', 'sys_
 const MAX_NAMES_BEHIND = 6
 
 /**
+ * The table whose records a field shows the names of. The display value of a journal field is the text of its
+ * entries, which are rows of sys_journal_field; an attachment field shows the name of a file.
+ */
+const shownFrom = (column: { type: string; reference: string | null } | undefined): string | null =>
+  !column ? null : column.type === 'domain_id' ? 'domain' : JOURNALS.has(column.type) ? 'sys_journal_field' : ATTACHMENTS.has(column.type) ? 'sys_attachment' : column.reference
+
+/**
  * As long as a query may be once it is written into the address of a request. Measured: an instance took an
  * address of 8,218 characters and answered HTTP 414 to one of 8,223, and a caret or a comma takes three of them.
  * The rest is left for the fields a request names.
@@ -405,14 +412,25 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
       return sent
     },
 
+    async prepare(table, paths) {
+      if (!sn.restricted) return
+      // Best effort: whatever fails here fails again where each field is judged, and is dealt with there.
+      const check = await dict.checkFields(table, paths).catch(unlessNoConnection(null))
+      const targets = [...new Set(paths.map((path) => shownFrom(check?.resolved.get(path))).filter((target): target is string => Boolean(target)))]
+      if (targets.length < 2) return
+      // What each of these tables extends, in one request for forty of them, and then what each shows as its name.
+      // That is read from the dictionary, also for a table that is closed: no row of the table is asked for.
+      await dict.knownTables(targets).catch(unlessNoConnection(null))
+      await dict.knowDisplayReferences(targets).catch(unlessNoConnection(null))
+    },
+
     async hidesNames(table, path, shown = false) {
       if (!sn.restricted) return null
       const check = await dict.checkFields(table, [path])
       const column = check.resolved.get(path)
       // Which table the name comes from is not known: the type could not be read, or the field can point anywhere.
       if (!column?.type || column.type === 'document_id') return 'untold'
-      // The display value of a journal field is the text of its entries, which are rows of sys_journal_field.
-      const target = column.type === 'domain_id' ? 'domain' : JOURNALS.has(column.type) ? 'sys_journal_field' : ATTACHMENTS.has(column.type) ? 'sys_attachment' : column.reference
+      const target = shownFrom(column)
       if (target) return namesBehind(target)
       if (column.type === 'reference' || column.type === 'glide_list') return 'untold'
       // A comparison with text works on what such a field stores. What it shows is another matter.

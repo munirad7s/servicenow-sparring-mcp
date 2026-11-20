@@ -5,6 +5,14 @@ answer; such changes are listed under "Changed".
 
 ## Unreleased
 
+### Changed
+
+- With tables closed, a first read with display values costs fewer requests. 0.4.1 asked about each table
+  behind a reference by itself, three requests a table: what it is, what a row of it shows as its name, and
+  whether a dictionary override moves that. They are asked together now, three requests for up to forty tables.
+  Measured with users closed, the first read of twenty incidents with display values: 10 requests where 0.4.1
+  took 27. Five other tables that took 12 to 30 take 9 or 10.
+
 ### Fixed
 
 - **A request that the instance ended because it ran too long was reported as an unknown failure.** Measured: a

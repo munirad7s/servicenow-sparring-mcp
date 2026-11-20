@@ -287,9 +287,10 @@ many. The npm scripts do not write it.
   closed, what a table is a child or a parent of, and that the instance applies the conditions it relies on.
   Measured on a fresh server: 15 requests to list the 1,349 tables below a closed one, 18 for the first query on
   the parent of a closed table, then 1 for the next and 2 for the first on another table. With a long list of the
-  only tables that may be read, a first `sn_instance` took 172. A read with display values costs two requests
-  for each table its filled references point into, once in ten minutes: that is how the server learns what a row
-  of that table shows as its name.
+  only tables that may be read, a first `sn_instance` took 172. A read with display values asks, once in ten
+  minutes, what the tables behind its references are and what a row of each shows as its name: three requests
+  for up to forty tables. Measured with users closed, the first read of twenty incidents with display values
+  took 10 requests.
 - One call sends at most 500 requests and ends with an error after that. A call needs that many only where it
   names hundreds of things that each have to be looked up. A request whose address would be longer than 8,000
   characters is not sent: measured, an instance took 8,218 and answered HTTP 414 to 8,223, and a caret, a comma

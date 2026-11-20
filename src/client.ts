@@ -41,6 +41,11 @@ export interface Gate {
    * Without it the question is whether a comparison with text, or a sort, works on such names.
    */
   hidesNames(table: string, path: string, shown?: boolean): Promise<'closed' | 'copies' | 'untold' | null>
+  /**
+   * Told which fields of a table are about to be asked about with hidesNames: what the tables behind them are,
+   * and what they show as their names, can then be read for all of them at once. Nothing depends on it.
+   */
+  prepare?(table: string, paths: string[]): Promise<void>
 }
 
 export interface Page<T = Row> {
@@ -217,12 +222,19 @@ export class ServiceNowClient {
   private async withoutClosedNames(gate: Gate, table: string, records: Row[]): Promise<void> {
     const verdicts = new Map<string, 'closed' | 'copies' | 'untold' | null>()
     const notes = currentCall()?.closed
+    const shows = (value: unknown): value is { value?: unknown; display_value?: unknown } => {
+      if (!value || typeof value !== 'object' || !('display_value' in value)) return false
+      const { value: raw, display_value: shown } = value as { value?: unknown; display_value?: unknown }
+      // A display value that only repeats what is stored names nothing.
+      return !(shown === raw || shown === '' || shown === null || shown === undefined)
+    }
+    // Every field that shows something is judged below, one after the other. What that takes is read together.
+    const keys = new Set(records.flatMap((row) => Object.entries(row).filter(([, value]) => shows(value)).map(([key]) => key)))
+    if (keys.size > 1) await gate.prepare?.(table, [...keys])
     for (const row of records) {
       for (const [key, value] of Object.entries(row)) {
-        if (!value || typeof value !== 'object' || !('display_value' in value)) continue
-        const { value: raw, display_value: shown } = value as { value?: unknown; display_value?: unknown }
-        // A display value that only repeats what is stored names nothing.
-        if (shown === raw || shown === '' || shown === null || shown === undefined) continue
+        if (!shows(value)) continue
+        const raw = value.value
         if (!verdicts.has(key)) verdicts.set(key, await gate.hidesNames(table, key, true))
         const verdict = verdicts.get(key)
         if (!verdict) continue

@@ -2081,6 +2081,59 @@ test('the name behind a reference is left out where the table it points into sho
   assert.equal(open.sentTo('sys_dictionary').filter((sent) => sent.query.includes('^display=true')).length, 0)
 })
 
+test('what the tables behind the references of a row show as their names is read for all of them together', async () => {
+  // Measured: with users closed, the first read of twenty incidents with display values cost 27 requests, and 22
+  // of them asked about seven tables one by one: what each is, what it shows as its name, whether an override moves that.
+  const targets = ['u_ta', 'u_tb', 'u_tc', 'u_td', 'u_te', 'u_tf']
+  const shows = (table: string, field: string, target: string) => column(table, field, 'reference', target, { display: 'true' })
+  const entries = (odd: Route[] = []): Route[] => [
+    closedTables(tableRow('sys_user', 'User')),
+    // Asked which of some names are tables, the instance answers with each table and what it extends.
+    { table: 'sys_db_object', match: /^nameIN[^^]*\^ORDERBYsys_id$/, rows: targets.map((name) => tableRow(name, name)) },
+    { table: 'sys_db_object', exact: 'name=u_wide', rows: [tableRow('u_wide', 'Wide')] },
+    { table: 'sys_dictionary', query: 'nameINu_wide', rows: [column('u_wide', 'u_note'), ...targets.map((name) => column('u_wide', name, 'reference', name))] },
+    ...odd,
+    ...targets.slice(0, 5).map((name): Route => ({ table: 'sys_dictionary', query: `nameIN${name}`, rows: [column(name, 'name'), column(name, 'u_owner', 'reference', 'sys_user')] })),
+    // The sixth shows the user it belongs to as its own name.
+    { table: 'sys_dictionary', query: 'nameINu_tf', rows: [shows('u_tf', 'u_user', 'sys_user')] },
+    ...dictionaryRoutes,
+    { table: 'u_wide', rows: [{ u_note: 'x', ...Object.fromEntries(targets.map((name) => [name, labelled(ID, `Name in ${name}`)])) }] },
+  ]
+  const noUsers = { tables: { allow: [], deny: ['sys_user'] } }
+  const wanted = { table: 'u_wide', fields: ['u_note', ...targets], displayValue: true }
+
+  const { answer, calls, sentTo } = await connect(entries(), noUsers)
+  const [row] = (await answer('sn_query', wanted)).records
+  for (const name of targets.slice(0, 5)) assert.deepEqual(row[name], { value: ID, display: `Name in ${name}` }, name)
+  assert.equal(row.u_tf, ID)
+  // One question for the six tables, and one for their overrides. None of the six is asked for by itself.
+  const shown = () => sentTo('sys_dictionary').filter((sent) => sent.query.includes('^display=true')).map((sent) => sent.query)
+  assert.deepEqual(shown(), [`nameIN${targets.join(',')}^display=true^ORelementINname,u_name,number,u_number^ORDERBYsys_id`])
+  assert.deepEqual(sentTo('sys_dictionary_override').map((sent) => sent.query), [`nameIN${targets.join(',')}^display_override=true^ORDERBYsys_id`])
+  assert.equal(calls.filter((call) => call.table === 'sys_db_object' && /^name=u_t/.test(call.query)).length, 0)
+  // Remembered: the same read again asks nothing of the kind.
+  await answer('sn_query', wanted)
+  assert.equal(shown().length, 1)
+
+  // Read together, each table is still judged by its own entries: one whose display field an override moves, and
+  // one of whose entries a row is hidden, are tables of which it cannot be told what a row shows.
+  const moved = await connect(entries([{ table: 'sys_dictionary_override', query: 'nameINu_te', rows: [{ name: 'u_te', element: 'u_owner', display_override: 'true' }] }]), noUsers)
+  const [withOverride] = (await moved.answer('sn_query', wanted)).records
+  assert.equal(withOverride.u_te, ID)
+  assert.deepEqual(withOverride.u_ta, { value: ID, display: 'Name in u_ta' })
+  assert.equal(moved.sentTo('sys_dictionary').filter((sent) => sent.query.includes('^display=true')).length, 1)
+  const hidden = await connect(entries([{ table: 'sys_dictionary', query: 'nameINu_td', rows: [column('u_td', 'name'), null] }]), noUsers)
+  const [withHidden] = (await hidden.answer('sn_query', wanted)).records
+  assert.equal(withHidden.u_td, ID)
+  assert.deepEqual(withHidden.u_ta, { value: ID, display: 'Name in u_ta' })
+  assert.equal(withHidden.u_tf, ID)
+  // The same for an override that is hidden from the account: whether it moves the display field is not known.
+  const veiled = await connect(entries([{ table: 'sys_dictionary_override', query: 'nameINu_tc', rows: [null] }]), noUsers)
+  const [withVeiled] = (await veiled.answer('sn_query', wanted)).records
+  assert.equal(withVeiled.u_tc, ID)
+  assert.deepEqual(withVeiled.u_ta, { value: ID, display: 'Name in u_ta' })
+})
+
 test('a text search is not a way to probe a field that holds a secret', async () => {
   const LEFT_OUT = 'typeNOT INpassword,password2'
   const world: Route[] = [
