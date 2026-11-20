@@ -156,17 +156,19 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
   async function warnAboutQueryRules(table: string, warnings: string[]): Promise<void> {
     // A lookup that failed is not "none": the answer says what it could not check. A table that does not exist has
     // no rules, because the plugin behind it is not active.
-    const unchecked: string[] = []
-    const lookup = <T>(source: string, what: string, read: Promise<T | null>): Promise<T | null> =>
+    const failed: Array<string | null> = [null, null, null]
+    const lookup = <T>(at: number, source: string, what: string, read: Promise<T | null>): Promise<T | null> =>
       read.catch((error) => {
-        if (errorKind(error) !== 'not_found') unchecked.push(`${what} (${source}: ${errorKind(error)})`)
+        if (errorKind(error) !== 'not_found') failed[at] = `${what} (${source}: ${errorKind(error)})`
         return null
       })
     const [rules, archive, rotation] = await Promise.all([
-      lookup('sys_script', 'whether business rules hide rows on every read', ctx.dict.queryRules(table)),
-      lookup('sys_archive', 'whether records of this table are moved to an archive', ctx.dict.archiveRules(table)),
-      lookup('sys_table_rotation', 'whether old rows of this table are dropped by rotation', ctx.dict.rotation(table)),
+      lookup(0, 'sys_script', 'whether business rules hide rows on every read', ctx.dict.queryRules(table)),
+      lookup(1, 'sys_archive', 'whether records of this table are moved to an archive', ctx.dict.archiveRules(table)),
+      lookup(2, 'sys_table_rotation', 'whether old rows of this table are dropped by rotation', ctx.dict.rotation(table)),
     ])
+    // In the order of the questions, whichever answer came first.
+    const unchecked = failed.filter((note): note is string => note !== null)
     if (unchecked.length) warnings.push(`Not checked: ${unchecked.join('; ')}. Rows and total can be fewer than what was once there.`)
     if (rules?.count) {
       warnings.push(

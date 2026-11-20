@@ -113,6 +113,23 @@ test('sn_query says when a table archives its records or drops old rows', async 
   // Asked once per table, not with every query.
   await answer('sn_query', { table: 'syslog', fields: ['source'] })
   assert.equal(sentTo('sys_table_rotation').length, 2)
+
+  // Where the tables that would say so cannot be read, the answer says what it did not check: that is not "none".
+  const blind = await connect([{ table: 'sys_archive', status: 403 }, { table: 'sys_table_rotation', status: 403 }, ...dictionaryRoutes, { table: 'incident', rows: [] }])
+  const unsure = await blind.answer('sn_query', { table: 'incident', fields: ['number'] })
+  assert.deepEqual(unsure.warnings, [
+    'Not checked: whether records of this table are moved to an archive (sys_archive: acl); whether old rows of this table are dropped by rotation (sys_table_rotation: acl). Rows and total can be fewer than what was once there.',
+  ])
+
+  // A rotation shorter than a day is not rounded to nothing: eight parts of six hours are two days.
+  const short = await connect([
+    { table: 'sys_db_object', query: 'name=syslog', rows: [tableRow('syslog', 'Log')] },
+    { table: 'sys_dictionary', query: 'nameINsyslog', rows: [column('syslog', 'source')] },
+    { table: 'sys_table_rotation', rows: [{ name: 'syslog', type: 'rotate', duration: '1970-01-01 06:00:00', rotations: '8' }] },
+    ...dictionaryRoutes,
+    { table: 'syslog', rows: [] },
+  ])
+  assert.match((await short.answer('sn_query', { table: 'syslog', fields: ['source'] })).warnings.join(' '), /keeps about 2 days \(8 parts of 0\.25 days\)/)
 })
 
 test('sn_query says when business rules run on every read of the table', async () => {
