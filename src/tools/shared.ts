@@ -182,7 +182,14 @@ export function payloadTables(text: string): string[] {
 export const JOURNAL_TYPES = new Set(['journal', 'journal_input', 'journal_list'])
 
 const DATE_TYPES = new Set(['glide_date_time', 'glide_date', 'due_date', 'datetime', 'date', 'calendar_date_time'])
-const NUMBER_TYPES = new Set(['integer', 'longint', 'long', 'decimal', 'float', 'double', 'numeric'])
+/**
+ * Types that are compared as numbers. Measured for each of the second row as for integer: a word matches nothing,
+ * also behind "!=", and LIKE matches nothing (currency 123 rows, price 565, order_index 1,868, auto_increment 347,931).
+ */
+const NUMBER_TYPES = new Set([
+  ...['integer', 'longint', 'long', 'decimal', 'float', 'double', 'numeric'],
+  ...['currency', 'price', 'percent_complete', 'order_index', 'integer_time', 'auto_increment'],
+])
 /** A duration is stored as a point in time counted from 1970-01-01 00:00:00: eight hours are "1970-01-01 08:00:00". */
 const DURATION_TYPES = new Set(['glide_duration', 'timer'])
 /** Operators that compare text. */

@@ -40,7 +40,7 @@ A value of the wrong kind belongs here too. The instance does not reject it:
 |---|---|---|---|
 | A date it cannot read | `sys_created_on>01.01.2026`, `>01/01/2026`, `>yesterday`, `>2026`, `>2026-13-45 00:00:00` | `>` and `>=` match every row, `<` and `=` match none | refuses, and names the form: `YYYY-MM-DD` or `YYYY-MM-DD HH:MM:SS` |
 | A value other than `true`, `false`, `1` or `0` on a true/false field | `active=yes`, `active=on`, `active=2` | reads it as false: `active=yes` returned the 29 inactive rows, not the 53 active ones | refuses |
-| A value that is not a number on a number field | `reassignment_count=abc`, `!=abc`, `>abc`, `IN1;2;3` | matches nothing, also with `!=` | refuses |
+| A value that is not a number on a number field | `reassignment_count=abc`, `!=abc`, `>abc`, `IN1;2;3` | matches nothing, also with `!=`. The same on fields of the types currency, price, percent complete, order index, integer time and auto increment | refuses |
 | `LIKE`, `NOT LIKE`, `STARTSWITH`, `ENDSWITH` or `CONTAINS` on a number field | `priorityLIKE1` | matches nothing: 0 rows where `priority=1` finds 27 | refuses |
 | The same operators on a true/false field | `activeLIKEtrue` | returns the rows where the field is false | refuses |
 | A duration written as a number or a time | `business_duration>3600`, `>01:00:00` | `>3600` matches every filled row, `>01:00:00` none: a duration is stored as a date counted from 1970-01-01 | refuses, and names the form: `1970-01-01 01:00:00` for one hour |
