@@ -1083,6 +1083,15 @@ test('a call that is refused because of a closed table is written to the audit l
   // A call that was refused for another reason asked nothing of a closed table.
   await call('sn_query', { table: 'incident', query: 'no_such_field=1' })
   assert.equal(refusals().length, tried.length)
+
+  // A tool that asks the client for a closed table is refused there, and the client writes that down itself.
+  const once: AuditEntry[] = []
+  const captured = await connect([closedTables(tableRow('sys_update_xml', 'Customer Update')), ...dictionaryRoutes], { tables: { allow: [], deny: ['sys_update_xml'] } }, (entry) => once.push(entry))
+  assert.equal((await captured.call('sn_delta')).data.error, 'blocked')
+  const lines = once.filter((entry) => entry.status === 'blocked' && entry.table === 'sys_update_xml')
+  assert.ok(lines.length >= 1)
+  // One line per request that was refused, and none on top for the call.
+  assert.equal(new Set(lines.map((entry) => `${entry.api} ${entry.query}`)).size, lines.length)
 })
 
 test('one call does not send hundreds of requests, whatever it names', async () => {
@@ -1139,6 +1148,54 @@ test('with a list of the only tables that may be read, the tables the server dec
   // With the parent on the list, the same query is answered.
   const wide = await connect(world, { tables: { allow: ['sys_db_object', 'sys_dictionary', 'sys_db_view', 'sys_db_view_table', 'sys_metadata', 'task', 'incident'], deny: [] } })
   assert.equal((await wide.answer('sn_query', { table: 'incident', fields: ['number'] })).returned, 1)
+})
+
+test('the conditions for closed tables are measured as they stand in the address of the request', async () => {
+  // Measured: a comma takes three characters there. 270 names of twenty characters are a query of 5,700 characters
+  // and one of 6,300 in the address, which with the fields of a request is more than an instance takes.
+  const children = Array.from({ length: 270 }, (_, index) => tableRow(`u_closed_child_t_${String(index).padStart(3, '0')}`, 'Child', 'u_closed_parent', 'task'))
+  const routes: Route[] = [closedTables(tableRow('u_closed_parent', 'Parent', 'task'), ...children), ...dictionaryRoutes, { table: 'task', rows: [{ number: 'TASK1' }] }]
+  const { call, sentTo } = await connect(routes, { tables: { allow: [], deny: ['u_closed_parent'] } })
+  const { data } = await call('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(data.error, 'blocked')
+  assert.match(data.message, /more closed child tables below it than a query can leave out/)
+  assert.equal(sentTo('task').length, 0)
+})
+
+test('sn_schema judges a table by what it extends now, not by what was read before', async () => {
+  // Read once as a table of its own. Then it is made a child table of the closed one: asked for its structure,
+  // the server reads what the table is anew, and that reading decides whether it is closed.
+  const routes: Route[] = [
+    { table: 'sys_db_object', exact: 'name=u_notes', rows: [tableRow('u_notes', 'Notes')] },
+    { table: 'sys_dictionary', query: 'nameINu_notes', rows: [column('u_notes', 'u_text')] },
+    ...dictionaryRoutes,
+    { table: 'u_notes', rows: [{ u_text: 'x' }] },
+  ]
+  const { answer, call } = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
+  assert.equal((await answer('sn_query', { table: 'u_notes', fields: ['u_text'] })).returned, 1)
+  routes.unshift({ table: 'sys_db_object', exact: 'name=u_notes', rows: [tableRow('u_notes', 'Notes', 'sys_user')] })
+  const { data } = await call('sn_schema', { table: 'u_notes' })
+  assert.equal(data.error, 'blocked')
+  assert.match(data.message, /"u_notes" is a child table of sys_user/)
+})
+
+test('a text search is refused on a table that points into a table named after records of other tables', async () => {
+  // Measured: a text search finds a record by the name behind one of its references. A captured change is named
+  // after the record it changed, so a search on a table that points to captured changes would try out those names.
+  const routes: Route[] = [
+    { table: 'sys_db_object', exact: 'name=u_review', rows: [tableRow('u_review', 'Review')] },
+    { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Customer Update')] },
+    { table: 'sys_dictionary', query: 'nameINu_review', rows: [column('u_review', 'u_note'), column('u_review', 'u_change', 'reference', 'sys_update_xml')] },
+    ...dictionaryRoutes,
+    { table: 'u_review', rows: [{ u_note: 'x' }] },
+  ]
+  const closed = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
+  const { data } = await closed.call('sn_query', { table: 'u_review', query: '123TEXTQUERY321=Abel' })
+  assert.equal(data.error, 'validation')
+  assert.match(data.message, /"u_change" points into sys_update_xml, whose rows carry the names of records of other tables/)
+  // With nothing closed, no name has to be kept back.
+  const open = await connect(routes)
+  assert.equal((await open.answer('sn_query', { table: 'u_review', query: '123TEXTQUERY321=Abel' })).returned, 1)
 })
 
 test('the text of comments and work notes is left out where the table of journal entries is closed', async () => {
@@ -2028,7 +2085,13 @@ test('the payload of a captured change is passed on without its secrets, and can
   const rows = [
     { name: 'sys_auth_profile_basic_1', payload: payload('sys_auth_profile_basic', '<name>Example</name><password>ciphertext</password>') },
     { name: 'sys_user_2', payload: payload('sys_user', '<name>Abel Tuter</name>') },
-    { name: 'sys_script_3', payload: payload('sys_script', '<name>Example rule</name><script><![CDATA[gs.info("x")]]></script>') },
+    {
+      name: 'sys_script_3',
+      payload: payload(
+        'sys_script',
+        '<name>Example rule</name><sys_created_by display_value="Beth Anglin">beth</sys_created_by><script><![CDATA[gs.info("x")]]></script><note>&lt;owner display_value=&quot;Carol Coughlin&quot;&gt;c&lt;/owner&gt;</note>',
+      ),
+    },
   ]
   const routes: Route[] = [
     { table: 'sys_db_object', query: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Customer Update')] },
@@ -2050,6 +2113,12 @@ test('the payload of a captured change is passed on without its secrets, and can
   assert.match(data.records[2].payload, /gs\.info/)
   assert.match(data.warnings.join(' '), /1 value\(s\) inside a text were withheld/)
   assert.match(data.warnings.join(' '), /1 payload\(s\) were withheld, because the record they carry is in a table that is closed/)
+
+  // A payload that is passed on names the record behind each of its references. Those names are taken out, also
+  // where the markup of a record inside it is written with entities.
+  assert.doesNotMatch(JSON.stringify(data.records[2]), /Beth Anglin|Carol Coughlin/)
+  assert.match(data.records[2].payload, /display_value="\[withheld\]"/)
+  assert.match(data.records[2].payload, /display_value=&quot;\[withheld\]&quot;/)
 
   // "Contains <password>a", "contains <password>b": searching the payload would read the secret piece by piece.
   for (const args of [{ query: 'payloadLIKE<password>a' }, { query: 'ORDERBYpayload' }, { groupBy: 'payload' }]) {
@@ -2810,6 +2879,13 @@ test('a login that is rejected in the middle of a call is passed on as that', as
   const listed = await plugins.call('sn_plugins')
   assert.equal(listed.data.error, 'auth')
   assert.doesNotMatch(JSON.stringify(listed.data), /closed on this machine/)
+  assert.equal((await plugins.call('sn_instance')).data.error, 'auth')
+  // The entries of upgrades are one more witness, and many accounts cannot read them: that is no failure. A login
+  // that is rejected there is one.
+  const witness = await connect([{ table: 'upgrade_history_task', status: 401 }, ...origin('sys_plugins', [], [])])
+  assert.equal((await witness.call('sn_origin', { sysId: ID })).data.error, 'auth')
+  const unreadable = await connect([{ table: 'upgrade_history_task', status: 403 }, ...origin('sys_plugins', [], [])])
+  assert.equal((await unreadable.answer('sn_origin', { sysId: ID })).verdict, 'out_of_box_as_captured')
 
   const attached = await connect([...['sys_script', 'sys_script_client', 'sys_ui_policy', 'sys_ui_action', 'sys_security_acl', 'sys_data_policy2'].map(rejected), ...dictionaryRoutes])
   const answer = await attached.call('sn_dependencies', { table: 'incident' })

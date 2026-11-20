@@ -366,6 +366,7 @@ test('an account that is not shown what a table extends gets no list of child ta
   const proofs: Array<[string, Route]> = [
     ['no row', { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', rows: [] }],
     ['a row without its parent', { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', rows: [{ name: 'incident' }] }],
+    ['a parent without the table it belongs to', { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', rows: [{ name: '', 'super_class.name': 'task' }] }],
     ['not readable', { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', status: 403 }],
   ]
   for (const [name, proof] of proofs) {
