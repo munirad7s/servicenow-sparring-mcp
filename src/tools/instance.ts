@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Page, Row, ServiceNowClient } from '../client.js'
-import { ServiceNowError } from '../errors.js'
+import { ServiceNowError, unlessNoConnection } from '../errors.js'
 import { assertPlainValue, isPlainValue } from '../query.js'
 import { fail, ok, rowSchema, source, sourceShape, withheldWarning } from '../result.js'
 import { traced } from '../trace.js'
@@ -182,7 +182,7 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         const probes = await mapLimit(SOURCES, 4, async ({ table }) => [table, table === opener.table ? first : await probe(sn, table)] as const)
         // The applications are rows of their parent table too. Where their own table is closed on this machine, they
         // are not read from there either.
-        const appsClosed = Boolean(await ctx.closed.reason('sys_store_app').catch(() => 'unknown'))
+        const appsClosed = Boolean(await ctx.closed.reason('sys_store_app').catch(unlessNoConnection('unknown')))
         const sources: Record<string, string> = Object.fromEntries(probes.map(([table, result]) => [table, result.status]))
         const totalOf = (table: string) => probes.find(([name]) => name === table)?.[1].total ?? null
 
@@ -326,7 +326,7 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         let apps = await attempt(sn.query<Row>({ table: 'sys_store_app', query: appQuery(), fields: appFields, limit }))
         // The applications are rows of their parent table as well: read from there where the instance does not hand out
         // the table itself. Not where the table is closed on this machine: then they are not to be read at all.
-        const appsClosed = Boolean(await ctx.closed.reason('sys_store_app').catch(() => 'unknown'))
+        const appsClosed = Boolean(await ctx.closed.reason('sys_store_app').catch(unlessNoConnection('unknown')))
         if ((!apps || hidden(apps)) && !appsClosed) {
           apps = await attempt(sn.query<Row>({ table: 'sys_scope', query: appQuery('sys_class_name=sys_store_app'), fields: appFields, limit }))
         }

@@ -1,12 +1,12 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Page, Row, ServiceNowClient } from '../client.js'
-import { quoteInstanceText, ServiceNowError, validation } from '../errors.js'
+import { noConnection, quoteInstanceText, ServiceNowError, unlessNoConnection, validation } from '../errors.js'
 import { ORIGIN_CAVEATS } from '../limitations.js'
 import { assertSysId, isGeneratedSysId, isTableName } from '../query.js'
 import { fail, labelOf, ok, rawOf, rowSchema, source, sourceShape, tidy, withheldWarning } from '../result.js'
-import { currentCall, traced } from '../trace.js'
-import { errorKind, isClosedRecord, isSystemAccount, NO_CONNECTION, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
+import { traced } from '../trace.js'
+import { errorKind, isClosedRecord, isSystemAccount, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
 import { skipCodes } from './upgrade.js'
 
 const UPDATE_NAME = /^[A-Za-z0-9_.-]{1,250}$/
@@ -258,22 +258,29 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             return await sn.query<Row>({ table, query, fields, limit, display: true })
           } catch (error) {
             // A wrong login or an unreachable instance is not a missing piece of evidence: the call fails.
-            if (NO_CONNECTION.has(errorKind(error))) throw error
+            if (noConnection(error)) throw error
             warnings.push(`${table} could not be read (${errorKind(error)}), so that part of the evidence is missing.`)
             return null
           }
         }
+        // The same for a look-up whose failure is told by its kind.
+        const kindOf = (error: unknown): string => {
+          if (noConnection(error)) throw error
+          return errorKind(error)
+        }
 
         // ---------------------------------------------------------------- the record
 
-        const found = await read('sys_metadata', sysId ? `sys_id=${sysId}` : `sys_update_name=${updateName}`, FILE_FIELDS, 1)
+        const asFile = sysId ? `sys_id=${sysId}` : `sys_update_name=${updateName}`
+        const found = await read('sys_metadata', asFile, FILE_FIELDS, 1)
         let file = found?.records[0] ? tidy(found.records[0]) : null
         const hidden = Boolean(found) && !file && (found?.total ?? 0) > 0
         // true where it could not be established whether the record exists: then "not found" is not an answer.
         let untraceable = !found || (!file && found.total === null)
-        // The application files of a closed table are left out of that answer. A record that did not come back can
-        // be one of them, so "no such record" is not established.
-        if (!file && currentCall()?.closed.rowsLeftOut) {
+        // The application files of a closed table are left out of that answer: the query that was sent says so. A
+        // record that did not come back can be one of them, so "no such record" is not established. Not where the
+        // record was asked for by its update name: that name says which table it is of, and was judged above.
+        if (!file && sysId && found && found.query !== asFile) {
           untraceable = true
           warnings.push('Application files of tables that are closed on this machine were left out of the look-up. A record that was not found can be one of them.')
         }
@@ -289,10 +296,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         if (described && updateName) {
           const own = await sn
             .query<Row>({ table: described.table, query: described.query, fields: [...FILE_FIELDS, 'name', 'element', 'language'], limit: 50, display: true })
-            .catch((error) => {
-              if (NO_CONNECTION.has(errorKind(error))) throw error
-              return errorKind(error)
-            })
+            .catch(kindOf)
           const what = (row: Row) => ({ name: rawOf(row.name), element: rawOf(row.element), language: rawOf(row.language) })
           const named = NAMED_BY_CONTENT.get(described.table)!
           // A row that stores another update name is another record, whatever its table and field spell out.
@@ -326,7 +330,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             warnings.push('This record carries no update name. Records of this kind are captured as part of another record, or not at all, so its change history cannot be looked up.')
           } else {
             const own = fileId
-              ? await sn.query<Record<string, string>>({ table: kind, query: `sys_id=${fileId}`, fields: ['name', 'element', 'language'], limit: 1 }).catch((error) => errorKind(error))
+              ? await sn.query<Record<string, string>>({ table: kind, query: `sys_id=${fileId}`, fields: ['name', 'element', 'language'], limit: 1 }).catch(kindOf)
               : 'invalid_response'
             asked = true
             describes = typeof own === 'string' ? null : (own.records[0] ?? null)
@@ -380,14 +384,11 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           // table could not be asked, or gave no total, the record can be an application file all the same, and its own
           // table says whether it carries a package.
           const noSuchFile = found?.total === 0
-          const columns = noSuchFile ? null : await ctx.dict.columnSet(tail[1]).catch(() => null)
+          const columns = noSuchFile ? null : await ctx.dict.columnSet(tail[1]).catch(unlessNoConnection(null))
           const isFile = Boolean(columns?.columns.has('sys_package'))
           const own = await sn
             .query<Row>({ table: tail[1], query: `sys_id=${tail[2]}`, fields: isFile ? FILE_FIELDS : ['sys_id', 'sys_created_on', 'sys_created_by', 'sys_updated_on', 'sys_updated_by'], limit: 1, display: true })
-            .catch((error) => {
-              if (NO_CONNECTION.has(errorKind(error))) throw error
-              return errorKind(error)
-            })
+            .catch(kindOf)
           if (typeof own !== 'string' && own.records[0]) {
             file = tidy(own.records[0])
             ownTable = tail[1]
@@ -398,6 +399,11 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             // The table exists but could not be read, or the row is hidden: "no such record" is not established.
             untraceable = true
             warnings.push(`The record could not be read from "${tail[1]}", so it is not known whether it still exists.`)
+          } else if (typeof own !== 'string' && own.query !== `sys_id=${tail[2]}`) {
+            // The table answered without the rows of its closed child tables. A record that did not come back can
+            // be one of them: an incident asked for as "task_<sys_id>" is a row of task.
+            untraceable = true
+            warnings.push(`Rows of tables that are closed on this machine were left out of the look-up in "${tail[1]}". A record that was not found can be one of them.`)
           }
         }
 
@@ -420,7 +426,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
                   limit: 10,
                   display: true,
                 })
-                .catch(() => null),
+                .catch(unlessNoConnection(null)),
             ])
           : [null, null, null]
 
@@ -446,7 +452,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           sources = {}
           for (const row of versionRows) sources[rawOf(row.source_table) || 'unknown'] = (sources[rawOf(row.source_table) || 'unknown'] ?? 0) + 1
         } else if (versions) {
-          const counted = await sn.groupCount('sys_update_version', 'source_table', `name=${name}`).catch(() => null)
+          const counted = await sn.groupCount('sys_update_version', 'source_table', `name=${name}`).catch(unlessNoConnection(null))
           sources = counted && Object.fromEntries(counted.map((group) => [group.value || 'unknown', group.count]))
         }
         const sum = (wanted: Set<string>) => (sources ? Object.entries(sources).filter(([table]) => wanted.has(table)).reduce((total, [, count]) => total + count, 0) : null)
@@ -505,7 +511,9 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           const blank = skipRecords.some((row) => !rawOf(row['upgrade_detail.disposition']))
           const why = hidesRows(skips)
             ? 'An upgrade has an entry for this record that this account cannot see'
-            : !skip && mayHaveMore(skips)
+            : skips && skips.total === null
+              ? 'The instance did not say how many entries upgrades have for this record: a newer one that this account cannot see cannot be ruled out'
+              : !skip && mayHaveMore(skips)
               ? 'Upgrades have more entries for this record than were read, and none of those read says that the record differs'
               : blank
                 ? 'An upgrade has an entry for this record, but what the upgrade did with it did not come back'
@@ -567,7 +575,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             describes = await sn
               .query<Record<string, string>>({ table: kind, query: `sys_id=${fileId}`, fields: ['name', 'element'], limit: 1 })
               .then((page) => page.records[0] ?? null)
-              .catch(() => null)
+              .catch(unlessNoConnection(null))
           }
           const table = describes?.name
           if (!describes) {
@@ -578,7 +586,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             const owner = await sn
               .query<Row>({ table: 'sys_db_object', query: `name=${table}`, fields: ['name', 'sys_package', 'sys_package.sys_class_name', 'sys_scope.scope'], limit: 1, display: true })
               .then((page) => (page.records[0] ? tidy(page.records[0]) : hidesRows(page) || mayHaveMore(page) ? 'hidden' : null))
-              .catch((error) => errorKind(error))
+              .catch(kindOf)
             if (owner && typeof owner !== 'string' && rawOf(owner['sys_package.sys_class_name'])) {
               packageClass = rawOf(owner['sys_package.sys_class_name'])
               packageName = labelOf(owner.sys_package)
@@ -602,6 +610,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         // store. Its scope tells: it carries the company's own prefix, which always begins with "x_".
         if (provenance === 'installed_application' && file && ownerScope.startsWith('x_')) {
           const prefix = await companyPrefix(sn).catch((error) => {
+            if (noConnection(error)) throw error
             warnings.push(`The company code of this instance could not be read (${errorKind(error)}), so it could not be told whether this application is one the company develops itself.`)
             return ''
           })
@@ -662,7 +671,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           capturedBy = 'unknown'
         } else if (capturedBy !== 'people' && mayHaveMore(updates)) {
           // More rows than the page shows: whether a person is on any of them is asked, not guessed.
-          const byPeople = await sn.query({ table: 'sys_update_xml', query: withPeopleOnly(`name=${name}`), fields: ['sys_id'], limit: 1 }).catch(() => null)
+          const byPeople = await sn.query({ table: 'sys_update_xml', query: withPeopleOnly(`name=${name}`), fields: ['sys_id'], limit: 1 }).catch(unlessNoConnection(null))
           capturedBy = byPeople?.total === 0 && updateRows.length ? 'system_accounts' : byPeople?.total || byPeople?.records.length ? 'people' : 'unknown'
         } else if (capturedBy === 'nobody' && currentFromCustomer) {
           // No update row is left, and the current version came from an update set: its author is who captured it.

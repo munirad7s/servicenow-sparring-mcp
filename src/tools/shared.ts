@@ -228,6 +228,13 @@ function tableCuts(name: string): string[] {
   return cuts
 }
 
+/**
+ * Tables whose records are copies of records of other tables. Measured: a linked application file is named after
+ * the record it links to. Which table that record is of, its update name does not say, so while tables are closed
+ * such a record counts as one of a closed table.
+ */
+const COPIES_OF_RECORDS = new Set(['sys_metadata_link'])
+
 /** What stands before a generated sys_id at the end of an update name: the table, without a doubt. */
 const tableBeforeId = (name: string): string | undefined => /^(.+)_[0-9a-f]{32}$/.exec(name)?.[1]
 
@@ -265,7 +272,7 @@ export async function isClosedRecord(ctx: Context, updateName: string): Promise<
   const exact = tableBeforeId(name)
   // "sys_script_include_<sys_id>" is no business rule: with a sys_id at the end only one cut is the table.
   const candidates = exact && cuts.includes(exact) ? [exact] : cuts
-  if (candidates.some((table) => ctx.sn.denies(table))) return true
+  if (candidates.some((table) => ctx.sn.denies(table) || COPIES_OF_RECORDS.has(table))) return true
   const denied = await ctx.dict.closedTables().catch(unlessNoConnection(null))
   if (!denied) return true
   if (candidates.some((table) => denied.has(table))) return true

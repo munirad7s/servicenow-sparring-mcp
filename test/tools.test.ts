@@ -1168,6 +1168,9 @@ test('an update name is taken for a record of a closed table in every way it can
   assert.equal(await isClosedRecord(noRules, 'sys_script_include_my_util'), true)
   // A name that cannot begin with a table is the record of no closed one.
   assert.equal(await isClosedRecord(noRules, `My-App_${ID}`), false)
+  // Measured: a linked application file is named after the record it links to, and its update name does not say
+  // which table that record is of. While any table is closed, it counts as a record of a closed one.
+  assert.equal(await isClosedRecord(noRules, `sys_metadata_link_${ID}`), true)
 
   // A table the deny list names counts whether or not the instance still lists it: the captured changes of a
   // table that was dropped are still there, with the names of its records.
@@ -2636,6 +2639,78 @@ test('sn_origin: the entry of a system field is judged by the table it belongs t
   const undecided = await bare.answer('sn_origin', { sysId: ID })
   assert.equal(undecided.verdict, 'unknown')
   assert.match(undecided.explanation, /belongs to no package/)
+})
+
+test('sn_origin: an entry of an upgrade that may be hidden leaves open whether the record was found changed', async () => {
+  // One entry is in view, and it was reverted. Without a total, a newer entry that this account cannot see cannot
+  // be ruled out, and that one would say that the record differs.
+  const reverted = skip('Skipped', 'Reviewed and Reverted')
+  const noTotal = await connect([{ table: 'upgrade_history_task', query: 'upgrade_detail.file_name=', rows: [reverted], noTotal: true }, ...origin('sys_plugins', [], [])])
+  const data = await noTotal.answer('sn_origin', { sysId: ID })
+  assert.equal(data.divergence, 'unknown')
+  assert.notEqual(data.verdict, 'out_of_box_as_captured')
+  assert.match(data.warnings.join(' '), /did not say how many entries upgrades have for this record/)
+  // With a total that matches what came back, the reverted entry is all there is.
+  const counted = await connect(origin('sys_plugins', [], [], {}, [reverted]))
+  assert.equal((await counted.answer('sn_origin', { sysId: ID })).verdict, 'out_of_box_as_captured')
+})
+
+test('sn_origin: a record that a table left out with the rows of its closed child tables is not "not found"', async () => {
+  // An incident is a row of task. Asked for as "task_<sys_id>" with incidents closed, the table of tasks answers
+  // without it, and "no such record" would be a statement about a record that is there.
+  const world: Route[] = [
+    closedTables(tableRow('incident', 'Incident', 'task')),
+    ...['sys_metadata', 'sys_update_xml', 'sys_update_version', 'upgrade_history_task', 'sys_upgrade_history_log', 'sys_upgrade_history', 'sys_package', 'sys_scope'].map((name): Route => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] })),
+    { table: 'sys_dictionary', query: 'nameINsys_metadata', rows: [column('sys_metadata', 'sys_package', 'reference', 'sys_package'), column('sys_metadata', 'sys_scope', 'reference', 'sys_scope'), column('sys_metadata', 'sys_class_name', 'sys_class_name')] },
+    { table: 'sys_dictionary', query: 'nameINsys_package', rows: [column('sys_package', 'sys_class_name', 'sys_class_name'), column('sys_package', 'name')] },
+    { table: 'sys_dictionary', query: 'nameINsys_scope', rows: [column('sys_scope', 'scope'), column('sys_scope', 'name')] },
+    { table: 'sys_dictionary', query: 'nameINupgrade_history_task', rows: [column('upgrade_history_task', 'upgrade_detail', 'reference', 'sys_upgrade_history_log'), column('upgrade_history_task', 'state', 'integer')] },
+    { table: 'sys_dictionary', query: 'nameINsys_upgrade_history_log', rows: [column('sys_upgrade_history_log', 'file_name'), column('sys_upgrade_history_log', 'target_name'), column('sys_upgrade_history_log', 'disposition', 'integer'), column('sys_upgrade_history_log', 'upgrade_history', 'reference', 'sys_upgrade_history')] },
+    { table: 'sys_dictionary', query: 'nameINsys_upgrade_history', rows: [column('sys_upgrade_history', 'to_version')] },
+    ...dictionaryRoutes,
+    { table: 'task', rows: [] },
+    ...origin(null, [], []),
+  ]
+  const closed = await connect(world, { tables: { allow: [], deny: ['incident'] } })
+  const data = await closed.answer('sn_origin', { updateName: `task_${ID}` })
+  assert.equal(closed.sentTo('task')[0].query, `sys_id=${ID}^sys_class_nameNOT INincident^ORsys_class_nameISEMPTY`)
+  assert.notEqual(data.verdict, 'not_found')
+  assert.match(data.warnings.join(' '), /Rows of tables that are closed on this machine were left out of the look-up in "task"/)
+  // With nothing closed, the same answer of the table means that there is no such record.
+  const open = await connect(world)
+  assert.equal((await open.answer('sn_origin', { updateName: `task_${ID}` })).verdict, 'not_found')
+
+  // A name that says which table the record is of, and that table is open with nothing closed below it: then
+  // nothing that was left out anywhere can be this record, and "no such record" stands.
+  const actions: Route[] = [{ table: 'sys_db_object', exact: 'name=sys_ui_action', rows: [tableRow('sys_ui_action', 'UI Action', 'sys_metadata')] }, { table: 'sys_ui_action', rows: [] }]
+  const precise = await connect([...actions, ...world], { tables: { allow: [], deny: ['incident'] } })
+  const none = await precise.answer('sn_origin', { updateName: `sys_ui_action_${ID}` })
+  assert.equal(none.verdict, 'not_found')
+  assert.doesNotMatch(none.warnings.join(' '), /left out of the look-up/)
+  // Asked for by its sys_id, the record can be of any table, also of one whose rows were left out.
+  const bySysId = await precise.answer('sn_origin', { sysId: ID })
+  assert.notEqual(bySysId.verdict, 'not_found')
+  assert.match(bySysId.warnings.join(' '), /Application files of tables that are closed on this machine were left out/)
+})
+
+test('a login that is rejected in the middle of a call is passed on as that', async () => {
+  // Not as "this table is closed on this machine", and not as a list of categories that could not be read.
+  const rejected = (table: string): Route => ({ table, status: 401 })
+  const plugins = await connect(
+    [{ table: 'v_plugin', rows: [{ id: 'com.example', name: 'Example', active: 'active', version: '1.0' }] }, { table: 'sys_db_object', exact: 'name=v_plugin', rows: [tableRow('v_plugin', 'Plugin')] }, { table: 'sys_db_object', exact: 'name=sys_store_app', status: 401 }, rejected('sys_store_app'), ...dictionaryRoutes],
+    { tables: { allow: [], deny: ['sys_user'] } },
+  )
+  const listed = await plugins.call('sn_plugins')
+  assert.equal(listed.data.error, 'auth')
+  assert.doesNotMatch(JSON.stringify(listed.data), /closed on this machine/)
+
+  const attached = await connect([...['sys_script', 'sys_script_client', 'sys_ui_policy', 'sys_ui_action', 'sys_security_acl', 'sys_data_policy2'].map(rejected), ...dictionaryRoutes])
+  const answer = await attached.call('sn_dependencies', { table: 'incident' })
+  assert.equal(answer.data.error, 'auth')
+  // One table that this account may not read is a category that could not be checked, and the others are answered.
+  const partly = await connect([{ table: 'sys_script', status: 403 }, { table: 'sys_script', api: 'stats', status: 403 }, ...dictionaryRoutes])
+  const some = await partly.answer('sn_dependencies', { table: 'incident', categories: ['businessRules', 'clientScripts'] })
+  assert.equal(some.categories.businessRules.status, 'not_checked')
 })
 
 test('sn_origin decides on stored codes, so the language of the account does not matter', async () => {

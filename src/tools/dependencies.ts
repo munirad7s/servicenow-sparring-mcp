@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Row } from '../client.js'
-import { ServiceNowError, validation } from '../errors.js'
+import { noConnection, ServiceNowError, unlessNoConnection, validation } from '../errors.js'
 import { DEPENDENCIES_NOT_COVERED, FIELD_DEPENDENCIES_NOT_COVERED } from '../limitations.js'
 import { assertTableName, fieldsInEncodedQuery, isPlainValue } from '../query.js'
 import { fail, labelOf, ok, rawOf, source, sourceShape, tidy } from '../result.js'
@@ -197,6 +197,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
     if (category.nearestWins && all.length > 1) {
       // Which tables of the chain have any items: the nearest of them is the one that counts.
       const perTable = await sn.groupCount(category.table, category.tableField, queryFor(category, table, all, field, activeOnly)).catch((error) => {
+        if (noConnection(error)) throw error
         uncounted = errorKind(error)
         return null
       })
@@ -270,6 +271,9 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
         rows,
       }
     } catch (error) {
+      // A login that was rejected, or an instance that does not answer, is not a category that could not be read:
+      // every one of them would say so, and the call would pass for an answer.
+      if (noConnection(error)) throw error
       return notChecked(`${category.table} could not be read (${errorKind(error)})`)
     }
   }
@@ -360,9 +364,9 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
 
         const [read, children, descendants, deepest] = await Promise.all([
           mapLimit(wanted, 4, async (category) => [category, await readCategory(category, table, chain, field, limit, activeOnly)] as const),
-          sn.query<Row>({ table: 'sys_db_object', query: `super_class.name=${table}^ORDERBYname`, fields: ['name'], limit: 50 }).catch(() => null),
-          sn.query<Row>({ table: 'sys_db_object', query: levels.join('^OR'), fields: ['sys_id'], limit: 1 }).catch(() => null),
-          sn.query<Row>({ table: 'sys_db_object', query: levels[DESCENDANT_LEVELS - 1], fields: ['sys_id'], limit: 1 }).catch(() => null),
+          sn.query<Row>({ table: 'sys_db_object', query: `super_class.name=${table}^ORDERBYname`, fields: ['name'], limit: 50 }).catch(unlessNoConnection(null)),
+          sn.query<Row>({ table: 'sys_db_object', query: levels.join('^OR'), fields: ['sys_id'], limit: 1 }).catch(unlessNoConnection(null)),
+          sn.query<Row>({ table: 'sys_db_object', query: levels[DESCENDANT_LEVELS - 1], fields: ['sys_id'], limit: 1 }).catch(unlessNoConnection(null)),
         ])
 
         const nameOf = (category: Category, row: Row) => (category.updateName ? category.updateName(row) : rawOf(row.sys_update_name))
