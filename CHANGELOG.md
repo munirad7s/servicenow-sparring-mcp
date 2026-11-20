@@ -20,7 +20,8 @@ answer; such changes are listed under "Changed".
   (`sys_db_view_table_field`): a field outside one is no field of the view, unless the instance passes that
   question for it, as it does for a few system fields a row carries beyond its list. `sn_schema` leaves the
   fields outside a list out and says how many; where the lists cannot be read, it lists every field with a
-  warning. The first query that filters a view by a field costs two more requests per field.
+  warning. The first query that filters a view by a field costs two more requests per field. The same question is
+  asked where the server cannot read whether a name stands for a table or a view.
 - **A list read page by page brought some rows twice and missed others.** Measured: where rows are equal in what
   a query sorts by, the instance gives them another place from one page to the next. `sn_delta` sorts captured
   changes by the time of their last change, and most of them share it with a neighbour (244 of 299 in a row): ten

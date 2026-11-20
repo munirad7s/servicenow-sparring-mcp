@@ -67,7 +67,8 @@ matches nothing. Both look like an answer. Five rules keep the evidence from lyi
    that table (measured: 11,759 of 11,759 rows for a value nobody has), and on some that it lists. Its
    definition does not say which, so before a view is filtered, sorted or counted by a field, the instance is
    asked for the rows where that field is empty and filled at once. Only an answer with none proves that it
-   applies a condition on the field; without it the query is refused.
+   applies a condition on the field; without it the query is refused. The same is asked where it cannot be read
+   whether a name stands for a table or a view.
 2. **A condition the instance would drop or misread is refused.** A dot-walk through a list field, a date
    condition with a missing part, an operator written the wrong way, a `LIKE` without a value. A date in a form it
    cannot read, where `>` then matches every row. `active=yes`, which returns the inactive rows.
