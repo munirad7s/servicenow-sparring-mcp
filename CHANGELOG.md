@@ -78,7 +78,11 @@ platform was measured on an instance before anything was changed; the numbers ar
   part to the instance.
 - Values the instance does not reject and answers wrongly, each measured: `NULL` behind an operator other than
   `=` and `!=`, `BETWEEN` and `ON` on a true/false field, `ON` on a number field, a day that does not exist, a
-  list of nothing but commas, a text search without a word, a condition joined to a text search with `^OR`.
+  list of nothing but commas, a text search without a word, a condition joined to a text search with `^OR`, a
+  bare time on a time-of-day field (`start_time>12:00:00` matched nothing, `<12:00:00` every row), and a word on
+  a field of the types currency, price, percent complete, order index, integer time and auto increment.
+- A refusal says where the question can be asked instead: for a related-list query, a tag, a catalog variable, a
+  dot-walk through a list field and `DYNAMIC`.
 - The warning about rows with an empty field came also where the query asked for those rows itself, and for
   `!=NULL`, which asks for the opposite. It now comes for `NSAMEAS` as well, which leaves them out too.
 - A field that holds a secret can be asked whether it is filled also as `=NULL` and `!=NULL`.

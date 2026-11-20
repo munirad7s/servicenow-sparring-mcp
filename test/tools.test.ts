@@ -435,7 +435,7 @@ test('a value of the wrong kind is refused: the instance would not reject it', a
     {
       table: 'sys_dictionary',
       query: 'nameINincident,task',
-      rows: [column('task', 'number'), column('task', 'active', 'boolean'), column('task', 'sys_created_on', 'glide_date_time'), column('task', 'due_date', 'glide_date'), column('task', 'reassignment_count', 'integer'), column('task', 'short_description'), column('task', 'business_duration', 'glide_duration')],
+      rows: [column('task', 'number'), column('task', 'active', 'boolean'), column('task', 'sys_created_on', 'glide_date_time'), column('task', 'due_date', 'glide_date'), column('task', 'reassignment_count', 'integer'), column('task', 'short_description'), column('task', 'business_duration', 'glide_duration'), column('task', 'u_cost', 'currency'), column('task', 'u_start', 'glide_time')],
     },
     ...dictionaryRoutes,
     { table: 'incident', rows: [{ number: 'INC1' }] },
@@ -473,6 +473,12 @@ test('a value of the wrong kind is refused: the instance would not reject it', a
     // "business_duration>3600" matched all 39 filled rows; the stored form is a date counted from 1970.
     ['business_duration>3600', /holds a duration.*One hour is 1970-01-01 01:00:00/],
     ['business_duration>01:00:00', /holds a duration/],
+    // Measured as numbers too: currency, price, percent complete, order index, integer time, auto increment.
+    ['u_cost=abc', /holds a number, and "abc" is not one/],
+    ['u_costLIKE1', /LIKE matches nothing on a number field/],
+    // A time of day is stored on 1970-01-01. "=08:00:00" and ">12:00:00" matched nothing, "<12:00:00" every row.
+    ['u_start=08:00:00', /holds a time of day.*1970-01-01 08:00:00/],
+    ['u_start>12:00:00', /holds a time of day/],
     // A day that does not exist.
     ['sys_created_on>2026-02-31', /holds a date/],
     ['sys_created_on>2026-04-31 10:00:00', /holds a date/],
@@ -506,7 +512,7 @@ test('a value of the wrong kind is refused: the instance would not reject it', a
     // Measured: "=NULL" and "!=NULL" are "is empty" and "is not empty" on every kind of field, an empty entry in a list is
     // skipped ("priorityIN1," matched what "priorityIN1" did), and a blank around a value is ignored.
     'sys_created_on=NULL', 'sys_created_on!=NULL', 'active!=NULL', 'reassignment_countIN1,', 'sys_created_on> 2026-03-03', 'active= true', 'sys_created_on>2024-02-29',
-    'business_duration>1970-01-01 01:00:00', 'business_durationISNOTEMPTY',
+    'business_duration>1970-01-01 01:00:00', 'business_durationISNOTEMPTY', 'u_cost>100', 'u_cost=12.50', 'u_start>1970-01-01 12:00:00', 'u_start=NULL',
     // Measured: LIKE and STARTSWITH on a date work on its stored text.
     'sys_created_onSTARTSWITH2026-0', 'sys_created_onLIKE2026',
     // On a text field any value is a value.

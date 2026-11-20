@@ -44,6 +44,7 @@ A value of the wrong kind belongs here too. The instance does not reject it:
 | `LIKE`, `NOT LIKE`, `STARTSWITH`, `ENDSWITH` or `CONTAINS` on a number field | `priorityLIKE1` | matches nothing: 0 rows where `priority=1` finds 27 | refuses |
 | The same operators on a true/false field | `activeLIKEtrue` | returns the rows where the field is false | refuses |
 | A duration written as a number or a time | `business_duration>3600`, `>01:00:00` | `>3600` matches every filled row, `>01:00:00` none: a duration is stored as a date counted from 1970-01-01 | refuses, and names the form: `1970-01-01 01:00:00` for one hour |
+| A time of day written as a time | `start_time=08:00:00`, `>12:00:00` | `=` and `>` match nothing, `<12:00:00` every row: a time of day is stored as a point in time on 1970-01-01 | refuses, and names the form: `1970-01-01 08:00:00` |
 | `BETWEEN` or `ON` on a true/false field | `activeBETWEENfoo@bar`, `activeONa@b@c` | returns the rows where the field is false: 29 of 82 | refuses: these are for dates |
 | A name in place of a sys_id behind `!=` or `NOT IN` | `assignment_group!=Service Desk` | leaves no row out: all 40 incidents with a group came back, the 12 of that group among them. By name, `assignment_group.name!=Service Desk`, it is 28 | looks the value up in the referenced table and refuses where no record has it as its sys_id. A sys_id is not always 32 hex digits: `global` and `Default view` are sys_ids |
 

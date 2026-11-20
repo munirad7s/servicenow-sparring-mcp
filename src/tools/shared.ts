@@ -547,7 +547,18 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
       )
     }
 
-    if (DURATION_TYPES.has(type)) {
+    if (type === 'glide_time') {
+      // Measured on 1,309 filled rows: a time of day is stored as a point in time on 1970-01-01. "<field>=08:00:00"
+      // matched nothing, ">12:00:00" nothing, "<12:00:00" and ">abc" every row; with the date in front it compares.
+      const odd = given.find((item) => !isDate(item))
+      if (odd !== undefined) {
+        throw validation(
+          `"${field}" holds a time of day, which is stored as a point in time on 1970-01-01, and "${odd}" is not written that way. Eight in the morning is 1970-01-01 08:00:00. ` +
+            'Measured: a bare time is not rejected, and the condition then matches nothing or every row. Nothing was sent.',
+          table,
+        )
+      }
+    } else if (DURATION_TYPES.has(type)) {
       const odd = given.find((item) => !isDate(item))
       if (odd !== undefined) {
         throw validation(
