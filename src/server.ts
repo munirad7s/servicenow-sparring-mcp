@@ -98,10 +98,11 @@ export function buildServer(sn: ServiceNowClient): McpServer {
               '1. If you have not called sn_instance in this session, call it and note the release and the last upgrades.\n' +
               `2. Call sn_upgrade_skips${upgrade ? ` with upgrade "${upgrade}"` : ''}. Read byDisposition, byType, notReviewed and laterUpgrades before you read the rows.\n` +
               '3. For the types that matter most to how the instance behaves (business rules, script includes, access controls, ' +
-              'UI actions, flows), list the entries with fileContains. "target" is the name of the record. For the ones you ' +
-              'report on, call sn_origin with the file name as updateName: it says whether a person changed the record, a ' +
-              'system account, or nobody on record. If it answers "unknown" because no record has that name, the instance ' +
-              'holds the record under another sys_id: find it by its target name with sn_query.\n' +
+              'UI actions, flows), list the entries with fileContains. "target" is the name of the record, and "capturedBy" ' +
+              'says who changed it: people, system accounts only, or nobody on record (it differs all the same, so it was ' +
+              'changed without being captured). excludeErrors leaves out the files the upgrade could not apply. For a record ' +
+              'you report on in detail, call sn_origin with the file name as updateName. If it answers "unknown" because no ' +
+              'record has that name, the instance holds the record under another sys_id: find it by its target name with sn_query.\n' +
               '4. Report: which upgrade the answer covers; how many entries per disposition; how many are "Skipped Error", ' +
               'which are failures to apply a file and not customizations; how many nobody has reviewed; the entries that ' +
               'deserve attention first, and why; upgrades applied since; and what could not be checked.\n\n' +
@@ -132,8 +133,10 @@ export function buildServer(sn: ServiceNowClient): McpServer {
             text:
               `Assess what this change touches on the live ServiceNow instance:\n\n"${change}" on the table "${table}".\n\n` +
               '1. If you have not called sn_instance in this session, call it.\n' +
-              `2. Call sn_schema for "${table}", with filter if a field is concerned. Note the kind of table, its parents, and which table defines the field.\n` +
-              `3. Call sn_dependencies for "${table}". For every category note the total, and which items carry customerUpdate true. ` +
+              `2. Call sn_schema for "${table}", with filter if a field is concerned. Note the kind of table, its parents, which table defines the field, ` +
+              'and its dictionary overrides. "mandatory" there is what the dictionary says: policies and client scripts can add to it.\n' +
+              `3. Call sn_dependencies for "${table}". For every category note the total, which items carry customerUpdate true, ` +
+              'and whether people or only system accounts captured them (capturedBy). ' +
               'If the change is about one field, call it a second time with "field": that lists what is tied to the field itself.\n' +
               '4. Read the items that can interfere with the change (business rules, client scripts, UI policies, data ' +
               'policies, access controls on the field) with sn_query, using the table and query the category names.\n' +
