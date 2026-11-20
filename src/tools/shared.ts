@@ -28,6 +28,20 @@ export const LOOKS_SECRET = /passw(or)?d|passphrase|secret|token|credential|priv
  */
 export const JOURNAL_TYPES = new Set(['journal', 'journal_input', 'journal_list'])
 
+const DATE_TYPES = new Set(['glide_date_time', 'glide_date', 'due_date', 'datetime', 'date', 'calendar_date_time'])
+const NUMBER_TYPES = new Set(['integer', 'longint', 'long', 'decimal', 'float', 'double', 'numeric'])
+/** Operators whose value is compared with what the field stores, so that its form matters. */
+const COMPARES_STORED = new Set(['=', '!=', '>', '>=', '<', '<=', 'IN', 'NOT IN', 'BETWEEN', 'ON', 'NOTON'])
+
+const isDate = (text: string) => {
+  const parts = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?Z?)?$/.exec(text.trim())
+  if (!parts) return false
+  const [month, day, hour, minute, second] = parts.slice(2).map((part) => Number(part ?? 0))
+  return month >= 1 && month <= 12 && day >= 1 && day <= 31 && hour <= 23 && minute <= 59 && second <= 59
+}
+const isNumber = (text: string) => /^\s*-?\d+(\.\d+)?\s*$/.test(text)
+const isBoolean = (text: string) => /^(true|false|1|0)$/i.test(text.trim())
+
 /** Operators that only ask whether a field is filled. They say nothing about what it holds. */
 const ASKS_IF_FILLED = new Set(['ISEMPTY', 'ISNOTEMPTY', 'ISEMPTYSTRING', 'ANYTHING'])
 /**
@@ -133,6 +147,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   refuseJournalConditions(table, parsed, check.resolved)
   warnAboutEmptyFields(parsed, check.resolved, warnings)
   await refuseChoiceLabels(ctx, table, parsed, check.resolved, warnings)
+  refuseValuesOfTheWrongKind(table, parsed, check.resolved)
 
   if (check.status === 'checked') {
     const fieldCheck = paths.length ? 'all field names verified against sys_dictionary' : 'not needed: the call names no fields'
@@ -239,6 +254,51 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
       'were left out of it, so that no secret can be found out by trying. The total does not count them.',
   )
   return withCondition(query, NO_SECRET_PROPERTIES)
+}
+
+/**
+ * A value of the wrong kind is not rejected by the instance. Measured on a table of 82 rows:
+ * - a date it cannot read ("01.01.2026", "yesterday", "2026") makes ">" match every row and "<" none;
+ * - on a true/false field, every value but "true" and "1" is read as false: "active=yes" returns the inactive rows;
+ * - on a number field, a value that is not a number matches nothing, also with "!=".
+ */
+function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved: Map<string, Column>): void {
+  for (const { field, operator, value } of parsed.conditions) {
+    const type = resolved.get(field)?.type ?? ''
+    if (!COMPARES_STORED.has(operator)) continue
+    const named = operator === 'ON' || operator === 'NOTON'
+    // ON carries a label first, then the two ends of the range.
+    const given = (named ? value.split('@').slice(1) : operator === 'BETWEEN' ? value.split('@') : operator.endsWith('IN') ? value.split(',') : [value]).filter(
+      (item) => item !== '' && item !== 'NULL',
+    )
+
+    if (DATE_TYPES.has(type)) {
+      const odd = given.find((item) => !isDate(item))
+      if (odd !== undefined) {
+        throw validation(
+          `"${field}" holds a date, and "${odd}" is not written in a form ServiceNow reads here. Write YYYY-MM-DD or YYYY-MM-DD HH:MM:SS, in UTC. ` +
+            'Measured: with a date it cannot read, the instance does not reject the condition: ">" then matches every row and "<" none. Nothing was sent.',
+          table,
+        )
+      }
+    } else if (type === 'boolean' && !named && operator !== 'BETWEEN') {
+      const odd = given.find((item) => !isBoolean(item))
+      if (odd !== undefined) {
+        throw validation(
+          `"${field}" is a true/false field. Write true or false. Measured: ServiceNow reads every other value as false, so ${field}=${odd} would return the rows where it is false. Nothing was sent.`,
+          table,
+        )
+      }
+    } else if (NUMBER_TYPES.has(type) && !named) {
+      const odd = given.find((item) => !isNumber(item))
+      if (odd !== undefined) {
+        throw validation(
+          `"${field}" holds a number, and "${odd}" is not one. Measured: ServiceNow then matches nothing, also with "!=", so the answer would be a zero that says nothing. Nothing was sent.`,
+          table,
+        )
+      }
+    }
+  }
 }
 
 /** A condition on a journal field is applied, but not as written. The entries themselves can be queried exactly. */

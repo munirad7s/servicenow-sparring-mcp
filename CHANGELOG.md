@@ -17,6 +17,10 @@ answer; such changes are listed under "Changed".
 
 ### Fixed
 
+- **A value of the wrong kind was sent, and the instance does not reject it.** Measured: with a date it cannot
+  read (`01.01.2026`, `yesterday`), `>` matches every row; `active=yes` returns the rows where the field is false;
+  a word on a number field matches nothing, also with `!=`. All three are refused, and the error says how to write
+  the value.
 - **A condition on a journal field was sent, and a journal field read without display values came back empty
   without a word.** Measured: `work_notesISEMPTY` and `work_notesISNOTEMPTY` return the same rows, and
   `work_notesLIKEa` finds more incidents than there are work notes. Such a condition is refused, with the query on

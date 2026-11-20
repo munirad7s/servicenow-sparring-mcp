@@ -34,6 +34,18 @@ return no rows instead of all rows, though not in every case. `sn_instance` repo
 `^^` is how ServiceNow writes a literal `^` inside a value. `active=false^^priority=1` is therefore one condition on
 `active`; the part about `priority` is not applied.
 
+A value of the wrong kind belongs here too. The instance does not reject it:
+
+| Form | Example | What the instance does | The server |
+|---|---|---|---|
+| A date it cannot read | `sys_created_on>01.01.2026`, `>01/01/2026`, `>yesterday`, `>2026`, `>2026-13-45 00:00:00` | `>` and `>=` match every row, `<` and `=` match none | refuses, and names the form: `YYYY-MM-DD` or `YYYY-MM-DD HH:MM:SS` |
+| A value other than `true`, `false`, `1` or `0` on a true/false field | `active=yes`, `active=on`, `active=2` | reads it as false: `active=yes` returned the 29 inactive rows, not the 53 active ones | refuses |
+| A value that is not a number on a number field | `reassignment_count=abc`, `!=abc`, `>abc`, `IN1;2;3` | matches nothing, also with `!=` | refuses |
+
+Read as dates, when measured: `2026-01-01 00:00:00`, `2026-01-01`, `2026-1-1`, `2026-01-01 00:00`,
+`2026-01-01T00:00:00` with and without a `Z`, and also `20260101` and `2026/01/01`, which the server refuses all
+the same to keep one form.
+
 ## Matches nothing: the answer is a zero that says nothing
 
 | Form | Example | The server |

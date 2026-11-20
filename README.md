@@ -62,10 +62,11 @@ matches nothing. Both look like an answer. Five rules keep the evidence from lyi
    included, are checked against the instance dictionary before anything is sent, and the error names similar
    fields. Where the dictionary cannot be used, the names are checked against a row of the table itself. Where
    neither works and the table is not empty, a filtered query is not sent.
-2. **A condition the instance would drop is refused.** A dot-walk through a list field, a date condition with a
-   missing part, an operator written the wrong way, a `LIKE` without a value.
-   [docs/encoded-queries.md](docs/encoded-queries.md) lists the forms that one live instance dropped or answered
-   with nothing, and the forms that are refused because they are documented to run script.
+2. **A condition the instance would drop or misread is refused.** A dot-walk through a list field, a date
+   condition with a missing part, an operator written the wrong way, a `LIKE` without a value. A date in a form it
+   cannot read, where `>` then matches every row. `active=yes`, which returns the inactive rows.
+   [docs/encoded-queries.md](docs/encoded-queries.md) lists the forms that one live instance dropped, misread or
+   answered with nothing, and the forms that are refused because they are documented to run script.
 3. **A value that cannot match is refused or explained.** `state=Resolved` matches nothing, because the field
    stores `6`. That query is refused, and the error names the stored value. `caller_id=Abel Tuter` matches nothing,
    because a reference is compared with a sys_id. That answer comes with the reason. `assigned_to!=<sys_id>` leaves

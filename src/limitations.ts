@@ -57,7 +57,8 @@ export const UPGRADE_NOTES = [
 export const QUERY_LIMITS = [
   'Encoded queries are parsed with a strict grammar. What cannot be checked is refused: related-list queries (RLQUERY), tag conditions, catalog variables, the shorthand operators *, % and !*, and regular expressions. GROUPBY inside a query is refused, because the Table API ignores it: use the groupBy input.',
   'DYNAMIC conditions are refused, because they run a script stored on the instance. "javascript:" values are refused for the same reason.',
-  'Date conditions need fixed values. RELATIVEGT and its siblings work with the units year, quarter, month, dayofweek, hour and minute.',
+  'Date conditions need fixed values, written YYYY-MM-DD or YYYY-MM-DD HH:MM:SS in UTC. A date in another form is refused: the instance would not reject it, and ">" would then match every row. RELATIVEGT and its siblings work with the units year, quarter, month, dayofweek, hour and minute.',
+  'A true/false field takes true or false, a number field a number. Other values are refused: the instance reads "yes" as false, and matches nothing for a word on a number field.',
   'A condition needs a value. Only "=" and "!=" may come without one: they then mean "is empty" and "is not empty". Without a value ServiceNow drops LIKE, NOT LIKE, STARTSWITH, ENDSWITH, CONTAINS and NOT IN and answers unfiltered, and IN matches nothing.',
   '"!=", "NOT IN" and "NOT LIKE" leave out the rows where the field is empty. The answer says so when one of them is used; add ^OR<field>ISEMPTY to count those rows too.',
   'Comments, work notes and other journal fields are stored as rows of sys_journal_field. A condition on such a field is refused, because the instance does not apply it as written; the field itself comes back empty unless displayValue is true.',

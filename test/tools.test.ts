@@ -194,12 +194,15 @@ test('the check of choice labels also runs for a database view and with a partly
   // A choice field reached by a dot-walk is not checked, and the answer says so.
   const walked = await connect([
     { table: 'sys_db_object', query: 'name=problem', rows: [tableRow('problem', 'Problem', 'task')] },
-    { table: 'sys_dictionary', query: 'nameINproblem,task', rows: [column('task', 'state', 'integer', '', { choice: '3' }), column('problem', 'first_incident', 'reference', 'incident')] },
+    { table: 'sys_dictionary', query: 'nameINproblem,task', rows: [column('problem', 'first_incident', 'reference', 'incident')] },
+    { table: 'sys_dictionary', query: 'nameINincident,task', rows: [column('task', 'state', 'integer', '', { choice: '3' }), column('task', 'contact_type', 'string', '', { choice: '1' })] },
     ...dictionaryRoutes,
     { table: 'problem', rows: [] },
   ])
-  const data = await walked.answer('sn_query', { table: 'problem', query: 'first_incident.state=Resolved' })
-  assert.match(data.warnings.join(' '), /"first_incident.state" is a choice field, and its values could not be checked/)
+  const data = await walked.answer('sn_query', { table: 'problem', query: 'first_incident.contact_type=Phone' })
+  assert.match(data.warnings.join(' '), /"first_incident.contact_type" is a choice field, and its values could not be checked/)
+  // On a number field a label is refused also where the choices were not looked up: a word is not a number.
+  assert.match((await walked.call('sn_query', { table: 'problem', query: 'first_incident.state=Resolved' })).data.message, /holds a number, and "Resolved" is not one/)
 })
 
 test('an empty result is explained when a value has the wrong shape', async () => {
@@ -364,6 +367,61 @@ test('a closed table gives away no names through a list of references, an unknow
   assert.match(all.warnings.join(' '), /could not be told which table these fields point to, so their display values were left out: caller_id, watch_list/)
 })
 
+test('a value of the wrong kind is refused: the instance would not reject it', async () => {
+  // Measured on a table of 82 rows, 53 of them active and 12 created in 2026.
+  const typed: Route[] = [
+    {
+      table: 'sys_dictionary',
+      query: 'nameINincident,task',
+      rows: [column('task', 'number'), column('task', 'active', 'boolean'), column('task', 'sys_created_on', 'glide_date_time'), column('task', 'due_date', 'glide_date'), column('task', 'reassignment_count', 'integer'), column('task', 'short_description')],
+    },
+    ...dictionaryRoutes,
+    { table: 'incident', rows: [{ number: 'INC1' }] },
+  ]
+  const { answer, call, sentTo } = await connect(typed)
+
+  const refused: Array<[query: string, why: RegExp]> = [
+    // ">" with a date the instance cannot read matched all 82 rows, "<" none.
+    ['sys_created_on>01.01.2026', /holds a date.*YYYY-MM-DD/],
+    ['sys_created_on>=01/01/2026', /holds a date/],
+    ['sys_created_on>yesterday', /holds a date/],
+    ['sys_created_on>2026', /holds a date/],
+    ['sys_created_on<Jan 1 2026', /holds a date/],
+    ['sys_created_on>2026-13-45 00:00:00', /holds a date/],
+    ['sys_created_onBETWEEN01.01.2026@31.12.2026', /holds a date/],
+    ['due_date=1.6.2026', /holds a date/],
+    ['sys_created_onON2026-01-15@15.01.2026 00:00:00@2026-01-15 23:59:59', /holds a date/],
+    // "active=yes" returned the 29 inactive rows.
+    ['active=yes', /true\/false field.*would return the rows where it is false/],
+    ['active=on', /true\/false field/],
+    ['activeINyes', /true\/false field/],
+    ['active!=maybe', /true\/false field/],
+    // "reassignment_count!=abc" returned no row at all.
+    ['reassignment_count=abc', /holds a number, and "abc" is not one/],
+    ['reassignment_count!=abc', /holds a number/],
+    ['reassignment_count>abc', /holds a number/],
+    ['reassignment_countIN1;2;3', /holds a number/],
+    ['reassignment_countBETWEEN1@many', /holds a number/],
+  ]
+  for (const [query, why] of refused) {
+    const { data } = await call('sn_query', { table: 'incident', query, fields: ['number'] })
+    assert.equal(data.error, 'validation', query)
+    assert.match(data.message, why, query)
+  }
+  assert.equal(sentTo('incident').length, 0)
+
+  // Every one of these was applied as written when measured.
+  const accepted = [
+    'sys_created_on>=2026-01-01 00:00:00', 'sys_created_on>=2026-01-01', 'sys_created_on>=2026-1-1', 'sys_created_on>=2026-01-01T00:00:00Z', 'sys_created_on>=2026-01-01 00:00',
+    'sys_created_onBETWEEN2026-01-01@2026-12-31', 'sys_created_on=', 'due_date!=', 'sys_created_onON2026-01-15@2026-01-15 00:00:00@2026-01-15 23:59:59',
+    'active=true', 'active=TRUE', 'active=1', 'active=0', 'active!=false', 'activeINtrue,false',
+    'reassignment_count=1', 'reassignment_count= 1', 'reassignment_count>=0', 'reassignment_countIN1, 2', 'reassignment_count=1.0', 'reassignment_countBETWEEN2@4', 'reassignment_count=NULL',
+    // On a text field any value is a value.
+    'short_description=yes', 'short_descriptionLIKE01.01.2026',
+  ]
+  for (const query of accepted) assert.equal((await answer('sn_query', { table: 'incident', query, fields: ['number'] })).returned, 1, query)
+})
+
 test('journal fields: a condition on one is refused, and an empty value is explained', async () => {
   // Measured: the entries are in sys_journal_field. "Is empty" and "is not empty" on the field return the same rows.
   const withNotes: Route[] = [
@@ -405,9 +463,14 @@ test('sn_query says what it could not check about choices, and what "is not" lea
   assert.match(unchecked.warnings.join(' '), /could not be checked whether state is a choice field/)
 
   // Some of the choices are hidden from the account: a label among them would not be recognised.
-  const partial = await connect([{ table: 'sys_choice', query: 'element=state', rows: [{ name: 'incident', value: '1', label: 'New' }, null] }, ...dictionaryRoutes, { table: 'incident', rows: [] }])
-  const hidden = await partial.answer('sn_query', { table: 'incident', query: 'state=Resolved' })
-  assert.match(hidden.warnings.join(' '), /"state" is a choice field, and its values could not be checked/)
+  const partial = await connect([
+    { table: 'sys_dictionary', query: 'nameINincident,task', rows: [column('task', 'number'), column('incident', 'category', 'string', '', { choice: '1' })] },
+    { table: 'sys_choice', query: 'element=category', rows: [{ name: 'incident', value: 'inquiry', label: 'Inquiry / Help' }, null] },
+    ...dictionaryRoutes,
+    { table: 'incident', rows: [] },
+  ])
+  const hidden = await partial.answer('sn_query', { table: 'incident', query: 'category=Hardware' })
+  assert.match(hidden.warnings.join(' '), /"category" is a choice field, and its values could not be checked/)
 
   // Measured: "is not" leaves out rows where the field is empty. A boolean is never empty, and "!=" without a value means "is not empty".
   const { answer } = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
