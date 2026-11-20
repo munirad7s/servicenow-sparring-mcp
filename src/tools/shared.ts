@@ -249,8 +249,8 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
 
   let sent = await keepSecretsOutOfReach(ctx, table, query, parsed, check.resolved, warnings)
   // And the other way round: a query on a parent answers with the rows of its child tables, closed ones included.
-  const classes = ctx.sn.restricted ? ctx.sn.classFilter() : null
-  if (classes && (await ctx.dict.columnSet(table).catch(() => null))?.columns.has('sys_class_name')) {
+  const classes = ctx.sn.restricted ? await closedClasses(ctx, table) : null
+  if (classes) {
     sent = withCondition(sent, classes)
     warnings.push('Tables are closed on this machine. Rows that belong to a closed child table of this one were left out by a condition on sys_class_name, and the total does not count them.')
   }
@@ -300,6 +300,36 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
     )
   }
   return { fieldCheck: `not possible: ${why}, and no row of the table is visible to check against`, query: sent, parsed, resolved: check.resolved, owners: check.owners, warnings }
+}
+
+/**
+ * The condition on sys_class_name that keeps the rows of closed child tables out of what a parent table answers.
+ * null where no closed table is below this one, so that an answer about incidents carries no note about users.
+ *
+ * With a deny list the closed tables below are named one by one: the tables on the list, the tables its patterns
+ * match, and their own child tables, which are closed under whatever name. With a list of the only tables that may
+ * be read, every other class is left out, and that needs a field to filter on.
+ */
+async function closedClasses(ctx: Context, table: string): Promise<string | null> {
+  const parts: string[] = []
+  const below = [...(await ctx.dict.closedTables())].filter(([name, chain]) => name !== table && chain.includes(table)).map(([name]) => name)
+  // Rows without a class stay in: measured, "NOT IN" alone would drop them.
+  if (below.length) parts.push(`sys_class_nameNOT IN${below.sort().join(',')}^ORsys_class_nameISEMPTY`)
+
+  const open = ctx.sn.openClasses()
+  if (open) {
+    const columns = await ctx.dict.columnSet(table).catch(() => null)
+    if (!columns || columns.partial || columns.columns.has('sys_class_name')) parts.push(open)
+  }
+  const filter = parts.join('^')
+  if (filter.length > 6_000) {
+    throw new ServiceNowError(
+      `"${table}" has ${below.length} child tables that are closed on this machine, more than a query can leave out. Query one of its open child tables instead. Nothing was sent.`,
+      'blocked',
+      table,
+    )
+  }
+  return filter || null
 }
 
 /**

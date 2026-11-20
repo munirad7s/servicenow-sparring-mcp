@@ -101,6 +101,7 @@ export class Dictionary {
   private readonly archiveCounts = new Map<string, Entry<{ count: number; query: string } | null>>()
   private readonly rotations = new Map<string, Entry<{ rotations: number; days: number } | null>>()
   private readonly settings = new Map<string, Entry<boolean | null>>()
+  private readonly closedSets = new Map<string, Entry<Map<string, string[]>>>()
 
   constructor(
     private readonly sn: ServiceNowClient,
@@ -289,6 +290,51 @@ export class Dictionary {
       return records
         .filter((row) => row.name === owner && typeof row.value === 'string')
         .map((row) => ({ value: row.value, label: String(row.label ?? ''), language: String(row.language ?? '') }))
+    })
+  }
+
+  /**
+   * Every table the deny list of this machine closes, each with its parents: the tables it names, the tables its
+   * patterns match, and the child tables of all of them, whatever they are called. A child table holds rows of its
+   * parent, so a query on a grandparent answers with them. Looks eight levels down. Empty without a deny list.
+   *
+   * Fails if the list cannot be trusted: a table missing from it would not be kept out. The query asks for the row
+   * of sys_db_object itself as well. Where that row does not come back, the instance did not apply the query as
+   * written, and where a row comes back that matches none of the names, it ignored the conditions.
+   */
+  closedTables(): Promise<Map<string, string[]>> {
+    const { names, prefixes } = this.sn.denied
+    const wanted = prefixes.filter(Boolean)
+    if (!names.length && !wanted.length) return Promise.resolve(new Map())
+
+    return this.cached(this.closedSets, 'deny', async () => {
+      const SENTINEL = 'sys_db_object'
+      const untrusted = (why: string) =>
+        new ServiceNowError(`Tables are closed on this machine, and the list of their child tables could not be established (${why}). Nothing was sent.`, 'blocked', SENTINEL)
+      const terms = ['name', ...PARENT_FIELDS].flatMap((path) => [names.length ? `${path}IN${names.join(',')}` : '', ...wanted.map((prefix) => `${path}STARTSWITH${prefix}`)].filter(Boolean))
+      // A long deny list is asked for in several requests, so that no query grows beyond what a URL carries.
+      const queries: string[][] = [[]]
+      for (const term of terms) {
+        if (queries.at(-1)!.join('^OR').length + term.length > 2_500 && queries.at(-1)!.length) queries.push([])
+        queries.at(-1)!.push(term)
+      }
+
+      const closed = new Map<string, string[]>()
+      const isClosed = (name: string) => names.includes(name) || wanted.some((prefix) => name.startsWith(prefix))
+      for (const part of queries) {
+        const query = `${part.join('^OR')}^ORname=${SENTINEL}`
+        const { records, total, complete } = await this.sn.all<Record<string, string>>({ table: SENTINEL, query, fields: ['name', ...PARENT_FIELDS] }, 2_000).catch((error) => {
+          throw untrusted(`sys_db_object could not be read: ${error instanceof ServiceNowError ? error.kind : 'unknown'}`)
+        })
+        if (!complete || (total !== null && records.length < total)) throw untrusted('sys_db_object could not be read completely')
+        if (!records.some((row) => row.name === SENTINEL)) throw untrusted('the instance did not answer the query as written')
+        for (const row of records) {
+          const chain = [row.name, ...PARENT_FIELDS.map((field) => row[field])].filter((name): name is string => typeof name === 'string' && name !== '')
+          if (chain.some(isClosed)) closed.set(row.name, chain)
+          else if (row.name !== SENTINEL) throw untrusted('the instance ignored the conditions of the query')
+        }
+      }
+      return closed
     })
   }
 

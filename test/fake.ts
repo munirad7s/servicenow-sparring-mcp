@@ -144,11 +144,20 @@ export const tableRow = (name: string, label: string, ...parents: string[]) => (
   ...Object.fromEntries(parents.map((parent, i) => [`${'super_class.'.repeat(i + 1)}name`, parent])),
 })
 
+/**
+ * What an instance answers when it is asked which tables a deny list closes: the tables given, which are the closed
+ * ones and their child tables, and always the row of its own table of tables, which the question asks for as proof
+ * that it was understood.
+ */
+export const closedTables = (...rows: Row[]): Route => ({ table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [...rows, tableRow('sys_db_object', 'Table')] })
+
 /** Dictionary of a small world: incident extends task; both point to sys_user. */
 export const dictionaryRoutes: Route[] = [
   { table: 'sys_db_object', query: 'name=incident', rows: [tableRow('incident', 'Incident', 'task')] },
   { table: 'sys_db_object', query: 'name=task', rows: [tableRow('task', 'Task')] },
   { table: 'sys_db_object', query: 'name=sys_user', rows: [tableRow('sys_user', 'User')] },
+  // No table of this small world is a child of a closed one, unless a test says so with a route of its own.
+  closedTables(),
   { table: 'sys_db_object', rows: [] },
   { table: 'sys_db_view', rows: [] },
   {

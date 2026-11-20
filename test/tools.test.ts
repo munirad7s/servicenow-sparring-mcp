@@ -6,7 +6,7 @@ import type { InstanceConfig } from '../src/config.js'
 import { buildServer } from '../src/server.js'
 import { queryByContent } from '../src/tools/origin.js'
 import { LOOKS_SECRET, scrubSecrets } from '../src/tools/shared.js'
-import { column, dictionaryRoutes, fakeInstance, labelled, tableRow, type Route } from './fake.js'
+import { closedTables, column, dictionaryRoutes, fakeInstance, labelled, tableRow, type Route } from './fake.js'
 
 type Data = Record<string, any>
 
@@ -533,20 +533,61 @@ test('a closed table is reached neither through its child tables nor through its
     assert.match(data.message, /"customer_contact" is a child table of sys_user/)
   }
   assert.equal(noUsers.sentTo('customer_contact').length + noUsers.sentTo('incident').length, 0)
+  // No closed table is below task, so its answer is not filtered and carries no note about closed tables.
+  const plain = await noUsers.answer('sn_query', { table: 'task', query: 'numberSTARTSWITHTASK', fields: ['number'] })
+  assert.equal(noUsers.sentTo('task')[0].query, 'numberSTARTSWITHTASK')
+  assert.deepEqual(plain.warnings, [])
 
-  // And "task" holds every incident: with incident closed, its rows are kept out of what the parent answers.
-  const noIncidents = await connect(family, { tables: { allow: [], deny: ['incident', 'sc_*'] } })
-  const LEFT_OUT = 'sys_class_nameNOT INincident^ORsys_class_nameISEMPTY^sys_class_nameNOT LIKEsc_^ORsys_class_nameISEMPTY'
+  // And "task" holds every incident: with incident closed, its rows are kept out of what the parent answers. So are
+  // the rows of the tables below a closed one, which are closed under whatever name, and those a pattern matches.
+  const below = closedTables(
+    tableRow('incident', 'Incident', 'task'),
+    tableRow('u_major_incident', 'Major incident', 'incident', 'task'),
+    tableRow('sc_req_item', 'Requested item', 'task'),
+    tableRow('u_special_request', 'Special request', 'sc_req_item', 'task'),
+    tableRow('sc_cat_item', 'Catalog item', 'sys_metadata'),
+  )
+  const noIncidents = await connect([below, ...family], { tables: { allow: [], deny: ['incident', 'sc_*'] } })
+  const LEFT_OUT = 'sys_class_nameNOT INincident,sc_req_item,u_major_incident,u_special_request^ORsys_class_nameISEMPTY'
   const data = await noIncidents.answer('sn_query', { table: 'task', query: 'numberSTARTSWITHTASK^NQnumberSTARTSWITHINC', fields: ['number'] })
   assert.equal(noIncidents.sentTo('task')[0].query, `numberSTARTSWITHTASK^${LEFT_OUT}^NQnumberSTARTSWITHINC^${LEFT_OUT}`)
   assert.match(data.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
   await noIncidents.answer('sn_query', { table: 'task', groupBy: 'sys_class_name' })
   assert.equal(noIncidents.sentTo('task', 'stats')[0].query, LEFT_OUT)
+  // The list of closed tables is asked for once, by every level of parents, and for the table of tables as proof.
+  const asked = noIncidents.sentTo('sys_db_object').filter((call) => call.query.includes('^ORname=sys_db_object'))
+  assert.equal(asked.length, 1)
+  assert.match(asked[0].query, /^nameINincident\^ORnameSTARTSWITHsc_\^ORsuper_class\.nameINincident\^ORsuper_class\.nameSTARTSWITHsc_\^ORsuper_class\.super_class\.nameINincident/)
 
   // With a list of the only tables that may be read, the rows of every other child table are left out.
   const onlyTasks = await connect(family, { tables: { allow: ['task', 'sys_*'], deny: [] } })
   await onlyTasks.answer('sn_query', { table: 'task', fields: ['number'] })
   assert.equal(onlyTasks.sentTo('task')[0].query, 'sys_class_nameINtask^ORsys_class_nameSTARTSWITHsys_^ORsys_class_nameISEMPTY')
+})
+
+test('where the child tables of a closed table cannot be listed, nothing is sent', async () => {
+  const world = (answer: Route): Route[] => [
+    answer,
+    { table: 'sys_dictionary', query: 'nameINtask', rows: [column('task', 'number'), column('task', 'sys_class_name', 'sys_class_name')] },
+    ...dictionaryRoutes,
+    { table: 'task', rows: [{ number: 'TASK1' }] },
+  ]
+  const cases: Array<[string, Route, RegExp]> = [
+    // An instance that answers a query it cannot use with no rows would show no closed table at all.
+    ['no row at all', { table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [] }, /did not answer the query as written/],
+    // An instance that drops the conditions answers with tables that match none of them.
+    ['a row that matches nothing', closedTables(tableRow('problem', 'Problem', 'task')), /ignored the conditions/],
+    ['rows hidden from the account', { ...closedTables(tableRow('incident', 'Incident', 'task')), total: 9 }, /could not be read completely/],
+    ['not readable', { table: 'sys_db_object', query: '^ORname=sys_db_object', status: 403 }, /could not be read: acl/],
+  ]
+  for (const [name, route, why] of cases) {
+    const { call, sentTo } = await connect(world(route), { tables: { allow: [], deny: ['incident'] } })
+    const { data } = await call('sn_query', { table: 'task', fields: ['number'] })
+    assert.equal(data.error, 'blocked', name)
+    assert.match(data.message, /the list of their child tables could not be established/, name)
+    assert.match(data.message, why, name)
+    assert.equal(sentTo('task').length, 0, name)
+  }
 })
 
 test('a text search is not a way to probe a field that holds a secret', async () => {

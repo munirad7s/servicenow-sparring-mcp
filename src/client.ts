@@ -399,25 +399,27 @@ export class ServiceNowClient {
     return !deny.some(matches) && (!allow.length || allow.some(matches))
   }
 
-  /**
-   * A query on a parent table answers with the rows of its child tables too: "task" holds every incident. Where
-   * tables are closed on this machine, this condition on sys_class_name keeps their rows out. Rows without a
-   * class stay in: measured, "NOT IN" alone would drop them. null if no table is closed.
-   */
-  classFilter(): string | null {
-    const { allow, deny } = this.config.tables
-    const exact = (patterns: string[]) => patterns.filter((pattern) => !pattern.endsWith('*'))
-    const prefixes = (patterns: string[]) => patterns.filter((pattern) => pattern.endsWith('*')).map((pattern) => pattern.slice(0, -1))
-    const orEmpty = '^ORsys_class_nameISEMPTY'
-    const parts: string[] = []
-    if (exact(deny).length) parts.push(`sys_class_nameNOT IN${exact(deny).join(',')}${orEmpty}`)
-    // There is no "does not start with". "Does not contain" leaves out a little more, never less.
-    for (const prefix of prefixes(deny)) if (prefix) parts.push(`sys_class_nameNOT LIKE${prefix}${orEmpty}`)
-    if (allow.length) {
-      const open = [exact(allow).length ? `sys_class_nameIN${exact(allow).join(',')}` : '', ...prefixes(allow).map((prefix) => (prefix ? `sys_class_nameSTARTSWITH${prefix}` : 'sys_class_nameISNOTEMPTY'))].filter(Boolean)
-      parts.push(`${open.join('^OR')}${orEmpty}`)
+  /** The deny list of this machine: the plain table names on it, and the prefixes of its patterns ("sys_user_*"). */
+  get denied(): { names: string[]; prefixes: string[] } {
+    const { deny } = this.config.tables
+    return {
+      names: deny.filter((pattern) => !pattern.endsWith('*')),
+      prefixes: deny.filter((pattern) => pattern.endsWith('*')).map((pattern) => pattern.slice(0, -1)),
     }
-    return parts.length ? parts.join('^') : null
+  }
+
+  /**
+   * A query on a parent table answers with the rows of its child tables too: "task" holds every incident. With a
+   * list of the only tables that may be read, this condition on sys_class_name keeps the rows of every other class
+   * out. Rows without a class stay in: measured, "IN" alone would drop them. null without such a list.
+   */
+  openClasses(): string | null {
+    const { allow } = this.config.tables
+    if (!allow.length) return null
+    const names = allow.filter((pattern) => !pattern.endsWith('*'))
+    const prefixes = allow.filter((pattern) => pattern.endsWith('*')).map((pattern) => pattern.slice(0, -1))
+    const open = [names.length ? `sys_class_nameIN${names.join(',')}` : '', ...prefixes.map((prefix) => (prefix ? `sys_class_nameSTARTSWITH${prefix}` : 'sys_class_nameISNOTEMPTY'))].filter(Boolean)
+    return `${open.join('^OR')}^ORsys_class_nameISEMPTY`
   }
 
   private assertAllowed(table: string): void {

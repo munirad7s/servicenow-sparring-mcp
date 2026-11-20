@@ -127,8 +127,10 @@ provider, the data leaves your network. Five things limit what can go that way:
   payload can be read, but not searched.
 - **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
   away from the server. It does not ask for them. A query cannot reach them through a dot-walk or a database view.
-  A child table of a closed table is closed too, because its rows are rows of that table. A query on a parent
-  table leaves the rows of a closed child out. The names behind references into a closed table are left out, for
+  A child table of a closed table is closed too, because its rows are rows of that table, and so is a child of
+  that child, under whatever name. A query on a parent table leaves the rows of all of them out: the server asks
+  the instance once which tables are below the closed ones, eight levels down, and sends nothing where it cannot
+  establish that list. The names behind references into a closed table are left out, for
   single references and for lists, and such a reference can be compared with a sys_id, but not with text and not
   sorted by, because both work on the names. The payload of a captured change is withheld where it carries a
   record of a closed table. Where the type of a field cannot be read, its display value is left out as well.

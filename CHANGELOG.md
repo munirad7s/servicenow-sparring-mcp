@@ -5,6 +5,18 @@ answer; such changes are listed under "Changed".
 
 ## 0.3.2 (2026-11-20)
 
+### Security
+
+- **A query on a parent table returned rows of the child tables of a closed table.** With `cmdb_ci_server` on the
+  deny list, a query on `cmdb_ci` left out the rows of the class `cmdb_ci_server` and nothing else: the Linux and
+  Windows servers, which are rows of that table as well, came back. Measured on one instance: 19 rows were left out
+  where 41 belong to the closed table. The server now asks the instance once which tables are below the closed
+  ones, by name or by pattern, eight levels down, and leaves the rows of all of them out. The question checks
+  itself: it also asks for the row of the table of tables, and where that row does not come back, or a row comes
+  back that matches nothing, no query on a parent is sent. Since 0.3.0. With an allow list the gap did not exist.
+- A query on a table that has no closed table below it is no longer given a condition on `sys_class_name` and a
+  note about closed tables.
+
 ### Added
 
 - **A choice label is refused behind a dot-walk too.** `parent_incident.category=Inquiry / Help` was answered with
