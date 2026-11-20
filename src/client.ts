@@ -444,7 +444,7 @@ export class ServiceNowClient {
     if (path.length > MAX_REQUEST_LENGTH) {
       throw validation(
         `This request would be ${path.length} characters long, and an instance takes about ${MAX_REQUEST_LENGTH}: measured, a longer one is answered with HTTP 414. ` +
-          'A caret, a comma and an equals sign each take three characters. Shorten the query, or name fewer fields. Nothing was sent.',
+          'A caret, a comma and an equals sign each take three characters. Shorten the query, or name fewer fields. The request was not sent.',
         table,
       )
     }
@@ -669,7 +669,7 @@ export class ServiceNowClient {
 
   private assertAllowed(table: string): void {
     if (!this.allows(table)) {
-      throw new ServiceNowError(`Table "${table}" is closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY). Nothing was sent.`, 'blocked', table)
+      throw new ServiceNowError(`Table "${table}" is closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY). The request was not sent.`, 'blocked', table)
     }
   }
 

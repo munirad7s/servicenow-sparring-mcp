@@ -48,6 +48,28 @@ test('the first row is always shown, however large: reading on would otherwise n
   assert.match(warnings.join(' '), /Only the first 1 of 2 fetched rows are shown/)
 })
 
+test('a first row of many texts that are each short enough is cut to what an answer carries', () => {
+  // Eighty fields of 2,000 characters: none of them is a long value, and together they are 160,000.
+  const row = Object.fromEntries(Array.from({ length: 80 }, (_, index) => [`u_text_${index}`, 'x'.repeat(2_000)]))
+  const warnings: string[] = []
+  const shown = clip([row, row], warnings)
+  assert.equal(shown.length, 1)
+  assert.ok(JSON.stringify(shown).length < 70_000, String(JSON.stringify(shown).length))
+  // Each text is cut from what it was, so the note in it counts what is missing of the whole.
+  assert.match(String(shown[0].u_text_0), /^x{600} … \[cut here: 1400 more characters\]$/)
+  assert.match(warnings.join(' '), /The first row is larger than one answer carries by itself: 80 of its values were cut to about 600 characters/)
+  // A long value among them is cut once, not twice.
+  const mixed = { ...row, payload: 'y'.repeat(300_000) }
+  const again = clip([mixed], [])
+  assert.equal((String(again[0].payload).match(/cut here/g) ?? []).length, 1)
+  // And from what it was: the note counts what is missing of the whole value.
+  assert.match(String(again[0].payload), /^y{592} … \[cut here: 299408 more characters\]$/)
+  assert.ok(JSON.stringify(again).length < 70_000)
+  // A row that fits is left alone.
+  const small = { a: 'x'.repeat(1_000) }
+  assert.deepEqual(clip([small], []), [small])
+})
+
 test('when rows are dropped, reading on continues right behind the last row shown', () => {
   const warnings: string[] = []
   const fetched = Array.from({ length: 200 }, (_, index) => ({ number: `INC${index}`, text: 'y'.repeat(1_500) }))

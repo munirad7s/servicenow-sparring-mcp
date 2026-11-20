@@ -28,6 +28,8 @@ export interface SkipCodes {
   reverted: Set<string>
   /** Review states that mean nobody has decided yet. */
   notReviewed: Set<string>
+  /** Which of the three are the codes of a new instance, because this one did not list its own. */
+  builtIn: string[]
 }
 
 const codeCache = new WeakMap<ServiceNowClient, { at: number; codes: Promise<SkipCodes> }>()
@@ -44,6 +46,7 @@ export function skipCodes(sn: ServiceNowClient): Promise<SkipCodes> {
     skipped: new Set(Object.entries(FALLBACK_SKIPPED).filter(([, label]) => !/error/i.test(label)).map(([code]) => code)),
     reverted: new Set(FALLBACK_REVERTED),
     notReviewed: new Set(FALLBACK_NOT_REVIEWED),
+    builtIn: ['skipped', 'reverted', 'not reviewed'],
   })
   const entry = { at: Date.now(), codes: Promise.resolve(fallback()) }
   entry.codes = sn
@@ -65,6 +68,7 @@ export function skipCodes(sn: ServiceNowClient): Promise<SkipCodes> {
         skipped: skipped.size ? skipped : fallback().skipped,
         reverted: reverted.size ? reverted : fallback().reverted,
         notReviewed: notReviewed.size ? notReviewed : fallback().notReviewed,
+        builtIn: [...(skipped.size ? [] : ['skipped']), ...(reverted.size ? [] : ['reverted']), ...(notReviewed.size ? [] : ['not reviewed'])],
       }
     })
     .catch(() => {

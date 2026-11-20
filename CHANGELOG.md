@@ -96,6 +96,24 @@ answer; such changes are listed under "Changed".
 - With tables closed, an answer that called the table of field lists of views a view itself made the server read
   that table to find out what it is, and the read waited for its own answer: the call never came back. No
   instance answers that way; the tables a view is defined in are not taken for views now.
+- **`sn_origin`, asked by a sys_id, said "not found" without looking everywhere.** Where no record answered and
+  no captured change ended in the sys_id, the verdict was `not_found`, though a version or an entry of an upgrade
+  can be left under it: an update row goes with its update set, the version stays. Both are asked for by the
+  sys_id now, one request each (measured: 0.2 seconds on 49,263 versions). Where the versions cannot be read, the
+  verdict is `unknown`; entries of upgrades that cannot be read are a missing witness, and the answer says so.
+- `sn_origin` reads the entries of upgrades by their codes. Where the instance did not list which code means
+  "skipped" or "reverted", it used the codes of a new instance without a word. The answer says so now, as
+  `sn_upgrade_skips` did.
+- **One row could be larger than an answer.** Long values are cut and rows are dropped from the end, but the first
+  row is always shown, and eighty fields of 2,000 characters are 160,000 with no long value among them. The
+  texts of such a row are cut to what fits, and the answer says so.
+- A refusal said "Nothing was sent" where the look-ups that led to it had been sent: what a table is, which
+  fields it has, whether a value exists. It says "The request was not sent" now, which is what was meant.
+- The doctor lists `sys_table_rotation_schedule` among the tables the server reads.
+- `npm run compare`: a count per class that stopped after its first groups was still counted as passed, a count
+  that failed could take back a row of a closed table that an earlier count had found, and a read that the server
+  failed was passed over without asking whether the instance answers it. The first two are no pass now, and the
+  third is a difference where the instance answers when asked directly.
 - **A request that the instance ended because it ran too long was reported as an unknown failure.** Measured: a
   count per value of a text field of a table of 3.5 million rows came back after 61 seconds with HTTP 500 and
   "Transaction cancelled: maximum execution time exceeded". That is a request that ran out of time, and it is

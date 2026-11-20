@@ -84,7 +84,7 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
         for (const member of before?.members ?? []) ctx.dict.forget(member.table)
         // A table that is closed on this machine is not described either: its fields, its labels, its overrides.
         const closed = await ctx.closed.reason(table)
-        if (closed) throw new ServiceNowError(`${closed[0].toUpperCase()}${closed.slice(1)}. Nothing was sent.`, 'blocked', table)
+        if (closed) throw new ServiceNowError(`${closed[0].toUpperCase()}${closed.slice(1)}. The request was not sent.`, 'blocked', table)
         const info = await ctx.dict.table(table)
         if (!info) {
           throw new ServiceNowError(`"${table}" is neither a table in sys_db_object nor a database view on this instance.`, 'not_found', table)

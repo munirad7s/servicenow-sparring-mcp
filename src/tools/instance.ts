@@ -54,6 +54,7 @@ export const SOURCES: Array<{ table: string; usedBy: string }> = [
   { table: 'sys_ui_list_element', usedBy: 'sn_dependencies for one field (lists)' },
   { table: 'sys_archive', usedBy: 'sn_query (whether records of a table are archived)' },
   { table: 'sys_table_rotation', usedBy: 'sn_query (whether old rows of a table are dropped)' },
+  { table: 'sys_table_rotation_schedule', usedBy: 'the parts of rotated tables, which are closed with their table' },
 ]
 
 

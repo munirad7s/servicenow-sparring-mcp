@@ -1001,7 +1001,7 @@ export async function requireProofOnView(ctx: Context, view: string, paths: stri
  */
 export async function guardFields(ctx: Context, table: string, query: string, fields: string[] = [], groupBy?: string): Promise<Guard> {
   if (!ctx.sn.allows(table)) {
-    throw new ServiceNowError(`Table "${table}" is closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY). Nothing was sent.`, 'blocked', table)
+    throw new ServiceNowError(`Table "${table}" is closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY). The request was not sent.`, 'blocked', table)
   }
   const named = groupBy ? [...fields, groupBy] : fields
   named.forEach((field) => assertFieldPath(field, table))
@@ -1018,7 +1018,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   // A child table of a closed table holds its rows. Refused before its fields are looked at: a hint about a
   // misspelled field would name them.
   const closed = await ctx.closed.reason(table)
-  if (closed) throw new ServiceNowError(`${closed[0].toUpperCase()}${closed.slice(1)}. Nothing was sent.`, 'blocked', table)
+  if (closed) throw new ServiceNowError(`${closed[0].toUpperCase()}${closed.slice(1)}. The request was not sent.`, 'blocked', table)
 
   const check = await ctx.dict.checkFields(table, paths)
 
@@ -1026,7 +1026,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   // a misspelled field would name fields of that table.
   for (const name of check.reached) {
     const why = await ctx.closed.reason(name)
-    if (why) throw new ServiceNowError(`This query reads from ${name} through a dot-walk or a database view, and ${why}. Nothing was sent.`, 'blocked', name)
+    if (why) throw new ServiceNowError(`This query reads from ${name} through a dot-walk or a database view, and ${why}. The request was not sent.`, 'blocked', name)
   }
   if (check.unknown.length) {
     const details = check.unknown
@@ -1035,14 +1035,14 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
     // For a field of a view the instance was asked whether it applies a condition on it: that question went out.
     const asked = check.unknown.some((item) => item.asked)
     throw validation(
-      `Unknown field. ${details}. ServiceNow ignores a condition on an unknown field and answers unfiltered, so ${asked ? 'the query was not sent' : 'nothing was sent'}.`,
+      `Unknown field. ${details}. ServiceNow ignores a condition on an unknown field and answers unfiltered, so ${asked ? 'the query was not sent' : 'the request was not sent'}.`,
       table,
     )
   }
 
   if (ctx.sn.restricted && check.status !== 'checked') {
     throw new ServiceNowError(
-      `Tables are closed on this machine, and it could not be established which tables this query reads from (${check.reason ?? 'the dictionary could not be used'}). Nothing was sent.`,
+      `Tables are closed on this machine, and it could not be established which tables this query reads from (${check.reason ?? 'the dictionary could not be used'}). The request was not sent.`,
       'blocked',
       table,
     )
@@ -1069,7 +1069,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   if (parsed.textSearch && shape.kind === 'view') {
     throw validation(
       `A text search (123TEXTQUERY321) on the database view "${table}" finds nothing: measured, a view answers such a search with no rows, also where the table it joins finds some. ` +
-        `Search the table instead (${(shape.info?.members ?? []).map((member) => member.table).join(', ')}), or filter the view by a field. Nothing was sent.`,
+        `Search the table instead (${(shape.info?.members ?? []).map((member) => member.table).join(', ')}), or filter the view by a field. The request was not sent.`,
       table,
     )
   }
@@ -1121,7 +1121,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   if (parsed.fields.length || groupBy) {
     throw new ServiceNowError(
       `The field names in this ${groupBy && !parsed.fields.length ? 'call' : 'query'} could not be verified: ${why}, and no row of "${table}" is visible to check against. ` +
-        'A misspelled field would be ignored and the answer would be unfiltered, so nothing was sent.',
+        'A misspelled field would be ignored and the answer would be unfiltered, so the request was not sent.',
       'acl',
       table,
     )
@@ -1169,7 +1169,7 @@ async function keepSecretsOutOfReach(
             : 'a table that cannot be told, and tables are closed on this machine'
       throw new ServiceNowError(
         `"${field}" points into ${where}. Comparing it with text or sorting by it works on the names of the records there, ` +
-          'so those names could be found out by trying. Compare it with a sys_id (=, IN) or ask whether it is filled. Nothing was sent.',
+          'so those names could be found out by trying. Compare it with a sys_id (=, IN) or ask whether it is filled. The request was not sent.',
         'blocked',
         table,
       )
@@ -1183,7 +1183,7 @@ async function keepSecretsOutOfReach(
     if (named) {
       throw new ServiceNowError(
         `"${named}" holds the readable names of records of other tables, and tables are closed on this machine. It can be read, without the names of records in closed tables, ` +
-          'but not compared or sorted by: those names could be found out by trying. Filter on the update name instead. Nothing was sent.',
+          'but not compared or sorted by: those names could be found out by trying. Filter on the update name instead. The request was not sent.',
         'blocked',
         table,
       )
@@ -1192,7 +1192,7 @@ async function keepSecretsOutOfReach(
   // A text search looks into fields the query does not name. Where one of them holds a secret, it is a way to probe it.
   if (parsed.textSearch) {
     const columns = await ctx.dict.columnSet(table).catch(unlessNoConnection(null))
-    const refuse = (why: string) => validation(`A text search looks into the fields of "${table}" without naming them, and ${why}. Filter on named fields instead. Nothing was sent.`, table)
+    const refuse = (why: string) => validation(`A text search looks into the fields of "${table}" without naming them, and ${why}. Filter on named fields instead. The request was not sent.`, table)
     // Without the full list of fields there is no telling what the search would look into.
     if (!columns || columns.partial) throw refuse('the fields of this table could not be read completely, so it cannot be told whether one of them holds a secret')
     const all = [...columns.columns.values()]
@@ -1207,7 +1207,7 @@ async function keepSecretsOutOfReach(
     }
     if (ctx.sn.restricted) {
       // Refused because of a closed table, so it is reported, and written to the audit log, as that.
-      const closed = (why: string) => new ServiceNowError(`A text search looks into the fields of "${table}" without naming them, and ${why}. Tables are closed on this machine. Filter on named fields instead. Nothing was sent.`, 'blocked', table)
+      const closed = (why: string) => new ServiceNowError(`A text search looks into the fields of "${table}" without naming them, and ${why}. Tables are closed on this machine. Filter on named fields instead. The request was not sent.`, 'blocked', table)
       // Some tables carry the names of records of other tables in a field of their own, and a search reads it.
       const ownChain = (await shapeOf(ctx, table)).info?.chain
       const own = all.find((column) => recordNameKey(table, column.name, column, undefined, ownChain))
@@ -1230,7 +1230,7 @@ async function keepSecretsOutOfReach(
   if (whole) {
     throw validation(
       `"${whole}" holds whole records as text, with everything in them, secrets included. It can be read, with secrets taken out, but not searched or sorted by: ` +
-        'the number of matches would give a value away piece by piece. Filter on the name, the type or the date of the row instead. Nothing was sent.',
+        'the number of matches would give a value away piece by piece. Filter on the name, the type or the date of the row instead. The request was not sent.',
       table,
     )
   }
@@ -1242,7 +1242,7 @@ async function keepSecretsOutOfReach(
     if (holdsSecret(column, field)) {
       throw validation(
         `"${field}" holds a secret${column?.type ? '' : ' (judged by its name, because its type could not be read)'}. It can be neither compared nor sorted by: ` +
-          'the number of matches would give its value away piece by piece. Asking whether it is filled works: ISEMPTY, ISNOTEMPTY. Nothing was sent.',
+          'the number of matches would give its value away piece by piece. Asking whether it is filled works: ISEMPTY, ISNOTEMPTY. The request was not sent.',
         table,
       )
     }
@@ -1254,7 +1254,7 @@ async function keepSecretsOutOfReach(
             ? `"${field}" can be the value of a system property: the instance lists "${table}" as no table, and which tables it joins as a database view this account may not read. Some properties hold secrets. `
             : `"${field}" can be the value of a system property: what "${table}" is, or what it is built on, could not be read, so a table below sys_properties or a view of it is not ruled out. Some properties hold secrets. `
           : `"${field}" is the value of a system property, and some properties hold secrets. `) +
-          'Through a database view or a reference it cannot be compared or sorted by, because the properties that hold secrets cannot be left out there. Query sys_properties itself. Nothing was sent.',
+          'Through a database view or a reference it cannot be compared or sorted by, because the properties that hold secrets cannot be left out there. Query sys_properties itself. The request was not sent.',
         table,
       )
     }
@@ -1290,8 +1290,8 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
     if (COMPARES_TEXT.has(operator) && (NUMBER_TYPES.has(type) || type === 'boolean')) {
       throw validation(
         type === 'boolean'
-          ? `"${field}" is a true/false field, and ${operator} does not compare text on it. Measured: ${field}LIKEtrue returns the rows where it is false. Write ${field}=true or ${field}=false. Nothing was sent.`
-          : `"${field}" holds a number, and ${operator} matches nothing on a number field. Measured: priorityLIKE1 gave no row where priority=1 gave 27. Compare with =, >, <, IN or BETWEEN. Nothing was sent.`,
+          ? `"${field}" is a true/false field, and ${operator} does not compare text on it. Measured: ${field}LIKEtrue returns the rows where it is false. Write ${field}=true or ${field}=false. The request was not sent.`
+          : `"${field}" holds a number, and ${operator} matches nothing on a number field. Measured: priorityLIKE1 gave no row where priority=1 gave 27. Compare with =, >, <, IN or BETWEEN. The request was not sent.`,
         table,
       )
     }
@@ -1307,7 +1307,7 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
       .filter((item) => item !== '')
     if (given.includes('NULL')) {
       throw validation(
-        `NULL stands for "empty" only behind = and !=. Behind ${operator} it is a value, and measured it matches nothing. To ask for empty fields write ${field}ISEMPTY, also joined with ^OR. Nothing was sent.`,
+        `NULL stands for "empty" only behind = and !=. Behind ${operator} it is a value, and measured it matches nothing. To ask for empty fields write ${field}ISEMPTY, also joined with ^OR. The request was not sent.`,
         table,
       )
     }
@@ -1315,7 +1315,7 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
     if ((type === 'boolean' && (named || operator === 'BETWEEN')) || (NUMBER_TYPES.has(type) && named)) {
       throw validation(
         `${operator} is for dates, and "${field}" ${type === 'boolean' ? 'is a true/false field' : 'holds a number'}. Measured: the instance does not reject it and answers with the wrong rows or with none. ` +
-          `Compare with ${type === 'boolean' ? '=true or =false' : '=, >, <, IN or BETWEEN'}. Nothing was sent.`,
+          `Compare with ${type === 'boolean' ? '=true or =false' : '=, >, <, IN or BETWEEN'}. The request was not sent.`,
         table,
       )
     }
@@ -1327,7 +1327,7 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
       if (odd !== undefined) {
         throw validation(
           `"${field}" holds a time of day, which is stored as a point in time on 1970-01-01, and "${odd}" is not written that way. Eight in the morning is 1970-01-01 08:00:00. ` +
-            'Measured: a bare time is not rejected, and the condition then matches nothing or every row. Nothing was sent.',
+            'Measured: a bare time is not rejected, and the condition then matches nothing or every row. The request was not sent.',
           table,
         )
       }
@@ -1336,7 +1336,7 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
       if (odd !== undefined) {
         throw validation(
           `"${field}" holds a duration, which is stored as a point in time counted from 1970-01-01 00:00:00, and "${odd}" is not written that way. ` +
-            'One hour is 1970-01-01 01:00:00, two days are 1970-01-03 00:00:00. Measured: a number of seconds is not rejected, and ">" then matches every filled row. Nothing was sent.',
+            'One hour is 1970-01-01 01:00:00, two days are 1970-01-03 00:00:00. Measured: a number of seconds is not rejected, and ">" then matches every filled row. The request was not sent.',
           table,
         )
       }
@@ -1345,7 +1345,7 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
       if (odd !== undefined) {
         throw validation(
           `"${field}" holds a date, and "${odd}" is not written in a form ServiceNow reads here. Write YYYY-MM-DD or YYYY-MM-DD HH:MM:SS, in UTC. ` +
-            'Measured: with a date it cannot read, the instance does not reject the condition: ">" then matches every row and "<" none. Nothing was sent.',
+            'Measured: with a date it cannot read, the instance does not reject the condition: ">" then matches every row and "<" none. The request was not sent.',
           table,
         )
       }
@@ -1353,7 +1353,7 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
       const odd = given.find((item) => !isBoolean(item))
       if (odd !== undefined) {
         throw validation(
-          `"${field}" is a true/false field. Write true or false. Measured: ServiceNow reads every other value as false, so "${odd}" would be compared as false. Nothing was sent.`,
+          `"${field}" is a true/false field. Write true or false. Measured: ServiceNow reads every other value as false, so "${odd}" would be compared as false. The request was not sent.`,
           table,
         )
       }
@@ -1361,7 +1361,7 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
       const odd = given.find((item) => !isNumber(item))
       if (odd !== undefined) {
         throw validation(
-          `"${field}" holds a number, and "${odd}" is not one. Measured: ServiceNow then matches nothing, also with "!=", so the answer would be a zero that says nothing. Nothing was sent.`,
+          `"${field}" holds a number, and "${odd}" is not one. Measured: ServiceNow then matches nothing, also with "!=", so the answer would be a zero that says nothing. The request was not sent.`,
           table,
         )
       }
@@ -1400,7 +1400,7 @@ async function refuseNamesInPlaceOfIds(ctx: Context, table: string, parsed: Pars
     const refuse = (item: string) =>
       validation(
         `"${field}" is a reference to ${target} and stores a sys_id, and no record there has the sys_id ${shown(item)}. With a name, "${operator}" leaves no row out: ` +
-          `measured, the answer then counts the rows it was meant to exclude. ${how(item)} Nothing was sent.`,
+          `measured, the answer then counts the rows it was meant to exclude. ${how(item)} The request was not sent.`,
         table,
       )
     const notLookedUp = (item: string, why: string) =>
@@ -1466,7 +1466,7 @@ function refuseJournalConditions(table: string, parsed: ParsedQuery, resolved: M
   throw validation(
     `"${journal}" is a journal field. Its entries are stored in the table sys_journal_field, and a condition on the field itself does not do what it says: ` +
       'measured, "is empty" and "is not empty" return the same rows, and LIKE also finds text of the other journal fields of a record. ' +
-      `Query sys_journal_field instead, for example element=${element}^valueLIKE<text>: "element_id" is the sys_id of the record, "name" its table. Nothing was sent.`,
+      `Query sys_journal_field instead, for example element=${element}^valueLIKE<text>: "element_id" is the sys_id of the record, "name" its table. The request was not sent.`,
     table,
   )
 }
@@ -1530,7 +1530,7 @@ async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQue
       if (meant) {
         throw validation(
           `"${field}" stores the value of a choice, not its label: "${given}" is the label of "${quoteInstanceText(meant.value, 80)}". ` +
-            `Write ${quoteInstanceText(meant.value, 80)} instead. With the label ServiceNow does not compare what was meant, and the answer would mislead. Nothing was sent.`,
+            `Write ${quoteInstanceText(meant.value, 80)} instead. With the label ServiceNow does not compare what was meant, and the answer would mislead. The request was not sent.`,
           table,
         )
       }
@@ -1540,7 +1540,7 @@ async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQue
         const closest = near.length === 1 ? ` The label that contains it belongs to the value ${quoteInstanceText(near[0].value, 80)}.` : ''
         throw validation(
           `"${field}" stores the value of a choice, a number, and "${quoteInstanceText(given, 60)}" is neither one of its values nor one of its labels.${closest} ` +
-            `Its values: ${describeChoices(choices)}. Nothing was sent.`,
+            `Its values: ${describeChoices(choices)}. The request was not sent.`,
           table,
         )
       }

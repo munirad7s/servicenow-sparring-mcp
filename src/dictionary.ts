@@ -631,7 +631,7 @@ export class Dictionary {
     return this.cached(this.closedSets, 'deny', async () => {
       const SENTINEL = 'sys_db_object'
       const untrusted = (why: string) =>
-        new ServiceNowError(`Tables are closed on this machine, and the list of their child tables could not be established (${why}). Nothing was sent.`, 'blocked', SENTINEL)
+        new ServiceNowError(`Tables are closed on this machine, and the list of their child tables could not be established (${why}). The request was not sent.`, 'blocked', SENTINEL)
       const closed = new Map<string, string[]>()
       const usable = await this.parentsUsable(wanted.length > 0).catch(unlessNoConnection(false))
       if (!usable) throw untrusted('the instance did not show this account which table a table extends, or did not filter by it (sys_db_object.super_class)')

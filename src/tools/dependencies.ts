@@ -329,7 +329,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
         assertTableName(table)
         // What is attached to a table that is closed on this machine is not listed either.
         const closed = await ctx.closed.reason(table)
-        if (closed) throw new ServiceNowError(`${closed[0].toUpperCase()}${closed.slice(1)}. Nothing was sent.`, 'blocked', table)
+        if (closed) throw new ServiceNowError(`${closed[0].toUpperCase()}${closed.slice(1)}. The request was not sent.`, 'blocked', table)
         const info = await dict.table(table)
         if (!info || info.kind === 'database_view') {
           throw new ServiceNowError(

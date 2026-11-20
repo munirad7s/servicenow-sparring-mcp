@@ -173,23 +173,31 @@ export function clip<T>(records: T[], warnings: string[]): T[] {
   if (sizeOf(records) <= MAX_ANSWER_CHARS) return records
 
   const longValues = records.reduce((count, record) => count + countLong(record), 0)
+  const cutTo = (cap: number, counted: () => void) => (text: string) => {
+    if (text.length <= cap) return text
+    counted()
+    return `${text.slice(0, cap)} … [cut here: ${text.length - cap} more characters]`
+  }
   let shown = records
+  const cap = longValues ? Math.max(LONG_VALUE_CHARS, Math.floor((MAX_ANSWER_CHARS * 0.8) / longValues)) : Infinity
   if (longValues) {
-    const cap = Math.max(LONG_VALUE_CHARS, Math.floor((MAX_ANSWER_CHARS * 0.8) / longValues))
     let cut = 0
-    shown = records.map((record) =>
-      mapStrings(record, (text) => {
-        if (text.length <= cap) return text
-        cut++
-        return `${text.slice(0, cap)} … [cut here: ${text.length - cap} more characters]`
-      }),
-    )
+    shown = records.map((record) => mapStrings(record, cutTo(cap, () => cut++)))
     if (cut) {
       warnings.push(
         `${cut} long value(s) were cut to about ${cap} characters, because the answer would be too large. To read more of ` +
           'one, ask for that field alone with limit 1. A value longer than one answer can carry cannot be read completely.',
       )
     }
+  }
+  // One row can be more than an answer carries by itself: a hundred texts that are each short enough. The first
+  // row is always shown, so its texts are cut to what fits, each from what it was.
+  if (records.length && sizeOf([shown[0]]) > MAX_ANSWER_CHARS) {
+    const texts = Math.max(countTexts(records[0]), 1)
+    const narrow = Math.min(cap, Math.max(40, Math.floor((MAX_ANSWER_CHARS * 0.8) / texts)))
+    let cut = 0
+    shown = [mapStrings(records[0], cutTo(narrow, () => cut++)), ...shown.slice(1)]
+    warnings.push(`The first row is larger than one answer carries by itself: ${cut} of its values were cut to about ${narrow} characters. Ask for fewer fields.`)
   }
 
   let size = 0
@@ -204,6 +212,12 @@ export function clip<T>(records: T[], warnings: string[]): T[] {
     }
   }
   return shown
+}
+
+function countTexts(value: unknown): number {
+  if (typeof value === 'string') return 1
+  if (value && typeof value === 'object') return Object.values(value).reduce<number>((count, item) => count + countTexts(item), 0)
+  return 0
 }
 
 function countLong(value: unknown): number {
@@ -280,7 +294,7 @@ function hintFor(kind: string, about: string | undefined, message: string): stri
   const named = about ? `"${about}"` : 'the table that was asked for'
   switch (kind) {
     case 'validation':
-      return 'Nothing was sent to the instance. Correct the input and call again.'
+      return 'What was asked for was not sent to the instance. Correct the input and call again.'
     case 'config':
       return 'The server is not configured correctly. This is for the person who set it up, not something to work around.'
     case 'blocked':

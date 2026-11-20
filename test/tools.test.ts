@@ -3710,6 +3710,8 @@ function origin(packageClass: string | null, changes: Data[], versions: Data[], 
     { table: 'sys_update_version', rows: versions },
     stats('sys_update_version', bySource),
     { table: 'upgrade_history_task', query: 'upgrade_detail.file_name=', rows: skips },
+    // Asked for by the sys_id at the end of a file name, where nothing else is recorded under it.
+    { table: 'upgrade_history_task', query: 'upgrade_detail.file_nameENDSWITH_', rows: skips.map((entry) => ({ ...entry, 'upgrade_detail.file_name': NAME })) },
   ]
 }
 
@@ -4359,7 +4361,33 @@ test('sn_origin: a record that is gone', async () => {
   assert.equal((await deleted.answer('sn_origin', { updateName: NAME })).verdict, 'deleted_here')
 
   const missing = await connect(origin(null, [], []))
-  assert.equal((await missing.answer('sn_origin', { sysId: ID })).verdict, 'not_found')
+  const nothing = await missing.answer('sn_origin', { sysId: ID })
+  assert.equal(nothing.verdict, 'not_found')
+  assert.deepEqual(nothing.warnings, [])
+  // "Nothing is recorded" is said after the versions and the entries of upgrades were asked for that sys_id too.
+  assert.deepEqual(
+    [missing.sentTo('sys_update_version')[0].query, missing.sentTo('upgrade_history_task')[0].query],
+    [`nameENDSWITH_${ID}^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`, `upgrade_detail.file_nameENDSWITH_${ID}^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`],
+  )
+
+  // A version is left where the update row went with its update set: the record is known here, by that name.
+  const versioned = await connect(origin(null, [], [{ ...version('previous', 'sys_update_set', '2026-03-01 10:00:00', 'abel'), name: NAME }]))
+  const known = await versioned.answer('sn_origin', { sysId: ID })
+  assert.equal(known.verdict, 'unknown')
+  assert.match(known.warnings.join(' '), /Update rows or versions exist under this name, but the record itself is not readable/)
+  // An upgrade has an entry for a file that ends in the sys_id, and nothing else is recorded.
+  const skipped = await connect(origin(null, [], [], {}, [skip('Skipped Manual Merge')]))
+  const byUpgrade = await skipped.answer('sn_origin', { sysId: ID })
+  assert.equal(byUpgrade.verdict, 'unknown')
+  assert.match(byUpgrade.warnings.join(' '), /An upgrade has an entry for a file of this name, but no record answers to it/)
+  // Versions that cannot be read: then it is not established that nothing is recorded.
+  const blind = await connect(origin(null, [], []).map((route) => (route.table === 'sys_update_version' ? { ...route, status: 403, rows: undefined } : route)))
+  assert.equal((await blind.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
+  // The entries of upgrades are one more witness, which many accounts cannot read: the verdict stands without it.
+  const noWitness = await connect(origin(null, [], []).map((route) => (route.table === 'upgrade_history_task' ? { table: 'upgrade_history_task', status: 403 } : route)))
+  const without = await noWitness.answer('sn_origin', { sysId: ID })
+  assert.equal(without.verdict, 'not_found')
+  assert.match(without.warnings.join(' '), /upgrade_history_task could not be read \(acl\)/)
 })
 
 test('sn_origin: a file an upgrade skipped, held here under another sys_id, is not reported as missing', async () => {
@@ -4676,6 +4704,14 @@ test('sn_origin: what an upgrade entry means is decided by the codes the instanc
   assert.equal(await judged({ ...skip('Skipped'), state: labelled('5', 'Reviewed and Reverted') }), 'out_of_box_as_captured')
   assert.equal(await judged({ ...skip('Skipped'), state: labelled('7', 'Reviewed, Not Reverted') }), 'customized')
   assert.equal(await judged({ ...skip('Skipped'), state: labelled('8', 'Revert Failed') }), 'customized')
+
+  // An instance that lists its codes: the answer has nothing to add. One that does not list them, or not those
+  // that say "skipped": the codes of a new instance are used, and the answer says so, because the set differs
+  // between releases.
+  const warned = async (...first: Route[]) => (await (await connect([...first, ...origin('sys_plugins', [], [], {}, [skip('Skipped')])])).answer('sn_origin', { sysId: ID })).warnings.join(' ')
+  assert.doesNotMatch(await warned(codes), /codes of a new instance/)
+  assert.match(await warned({ table: 'sys_choice', status: 403 }), /did not list its codes for "skipped" and "reverted" \(sys_choice\), so the entries of upgrades were read with the codes of a new instance/)
+  assert.match(await warned({ ...codes, rows: codes.rows!.filter((row) => row !== null && row.element === 'state') }), /did not list its codes for "skipped" \(sys_choice\)/)
 })
 
 test('sn_origin sends no request whose answer it would not use', async () => {

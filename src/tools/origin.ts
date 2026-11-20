@@ -271,7 +271,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         }
         // The update name says which table the record is in. Nothing about a record of a closed table is read.
         if (updateName && (await isClosedRecord(ctx, updateName))) {
-          throw new ServiceNowError('This update name stands for a record in a table that is closed on this machine, or may stand for one. Nothing was sent.', 'blocked', 'sys_metadata')
+          throw new ServiceNowError('This update name stands for a record in a table that is closed on this machine, or may stand for one. The request was not sent.', 'blocked', 'sys_metadata')
         }
 
         const warnings: string[] = []
@@ -412,6 +412,21 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             if (trace?.records.length && !name) {
               untraceable = true
               warnings.push('A captured change ends in this sys_id, but its name did not come back in a usable form, so the history of the record could not be read.')
+            }
+            // No captured change is left under it. A version can be, where the update row went with its update
+            // set, and an entry of an upgrade: "nothing is recorded" is said only after both were asked.
+            for (const [table, field, order] of [
+              ['sys_update_version', 'name', 'sys_created_on'],
+              ['upgrade_history_task', 'upgrade_detail.file_name', 'sys_created_on'],
+            ] as const) {
+              if (name || untraceable) break
+              const kept = await read(table, `${field}ENDSWITH_${sysId}^ORDERBYDESC${order}`, [field], 1)
+              // The entries of upgrades are one more witness, and many accounts cannot read them: the verdict
+              // stands without it, and the warning of the read says what was not looked for.
+              if (!kept && table === 'upgrade_history_task') continue
+              const keptName = kept?.records[0] ? rawOf(tidy(kept.records[0])[field]) : ''
+              if (UPDATE_NAME.test(keptName)) name = keptName
+              if (!kept || (!kept.records.length && kept.total !== 0) || (kept.records.length && !name)) untraceable = true
             }
           } else {
             // A word like "category" at the end of a name would match the update rows of other records.
@@ -559,6 +574,14 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         // The decision is made on the stored codes: the labels come in the language of the account.
         const skipRecords = skips?.records.map(tidy) ?? []
         const codes = divergence === 'no_customer_changes_captured' && skipRecords.length ? await skipCodes(sn) : null
+        // The entries of an upgrade are read by their codes. Where the instance did not list which code means what,
+        // the codes of a new instance are used, and the set differs between releases: the answer says so.
+        if (codes?.builtIn.some((kind) => kind !== 'not reviewed')) {
+          warnings.push(
+            `The instance did not list its codes for ${codes.builtIn.filter((kind) => kind !== 'not reviewed').map((kind) => `"${kind}"`).join(' and ')} (sys_choice), so the entries of upgrades were read with the codes of a new instance. ` +
+              'The set of codes differs between releases: check the labels in evidence.upgradeSkips.',
+          )
+        }
         // A record of a table that is closed on this machine does not get this far: it is refused by its update name,
         // above, before anything about it is read.
         const skipRows = skipRecords.map((row) => ({

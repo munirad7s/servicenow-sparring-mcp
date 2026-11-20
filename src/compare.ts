@@ -388,6 +388,14 @@ const READS: Array<[string, string, string[], boolean]> = [
   ['discovery_credentials', '', ['name', 'type', 'user_name', 'password'], false],
 ]
 const STORED_TIME = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?$/
+/**
+ * true where the server answers a read with an error and the instance, asked directly, answers it. A refusal on
+ * purpose is none of that: the server says "validation" or "blocked" where it will not send what was asked.
+ */
+async function failsAlone(error: Data, directly: () => Promise<{ status: number }>): Promise<boolean> {
+  if (error.error === 'validation' || error.error === 'blocked') return false
+  return (await directly()).status === 200
+}
 const cells = new Map<string, number>()
 const altered: string[] = []
 let compared = 0
@@ -395,7 +403,9 @@ for (const [table, query, names, display] of READS) {
   const mine = await call('sn_query', { table, query, fields: names, limit: 15, ...(display ? { displayValue: true } : {}) })
   if (mine.isError) {
     // A table or a field this instance lacks, or one this account may not read, is no finding about the server.
-    cells.set('reads left out: the table or a field is not there, or not readable', (cells.get('reads left out: the table or a field is not there, or not readable') ?? 0) + 1)
+    // A read the server fails where the instance answers is one.
+    if (await failsAlone(mine.data, () => get(table, { sysparm_query: query, sysparm_fields: names.join(','), sysparm_limit: 1 }))) altered.push(`${table}: the server answers "${mine.data.error}" where the instance answers when asked directly`)
+    else cells.set('reads left out: the table or a field is not there, or not readable', (cells.get('reads left out: the table or a field is not there, or not readable') ?? 0) + 1)
     continue
   }
   // Asked directly with the query the answer names, so that both ways read the same rows.
@@ -447,16 +457,25 @@ const miscounted: string[] = []
 for (const [table, groupBy, query] of COUNTS) {
   const first = await call('sn_query', { table, groupBy, query, limit: 100 })
   if (first.isError) {
-    skipped++
+    if (await failsAlone(first.data, () => get(table, { sysparm_count: 'true', sysparm_group_by: groupBy, ...(query ? { sysparm_query: query } : {}) }, 'stats'))) miscounted.push(`${table} per ${groupBy}: the server answers "${first.data.error}" where the instance counts when asked directly`)
+    else skipped++
     continue
   }
   const groups = [...(first.data.groups as Data[])]
   // Read on by pages, as an agent would: every group has to come once.
+  let stopped = ''
   for (let page = first.data; page.truncated && typeof page.nextOffset === 'number'; ) {
     const next = await call('sn_query', { table, groupBy, query, limit: 100, offset: page.nextOffset })
-    if (next.isError) break
+    if (next.isError) {
+      stopped = String(next.data.error)
+      break
+    }
     groups.push(...(next.data.groups as Data[]))
     page = next.data
+  }
+  if (stopped) {
+    miscounted.push(`${table} per ${groupBy}: the groups stopped coming after ${groups.length}, with "${stopped}"`)
+    continue
   }
   const theirs = await get(table, { sysparm_count: 'true', sysparm_group_by: groupBy, ...(query ? { sysparm_query: query } : {}) }, 'stats')
   // Measured: a table without rows can answer with one group of no rows. That is no group, here as for the server.
@@ -500,9 +519,15 @@ const pagesOf = async (table: string, query: string, columns: string[], pages: n
   }
   return { keys, warned }
 }
+let pagesLeftOut = 0
 for (const [table, query] of SORTED) {
   const read = await pagesOf(table, query, ['sys_id'], 5)
-  if (!read) continue
+  if (!read) {
+    // Not readable here, for the server and for a direct read alike, is no finding. Readable directly, it is one.
+    if ((await get(table, { sysparm_query: query, sysparm_fields: 'sys_id', sysparm_limit: 1 })).status === 200) twice.push(`${table} with ${query}: the server did not answer a page that the instance answers when asked directly`)
+    else pagesLeftOut++
+    continue
+  }
   readByPages++
   rowsByPages += read.keys.length
   if (new Set(read.keys).size !== read.keys.length) twice.push(`${table} with ${query}: ${read.keys.length - new Set(read.keys).size} of ${read.keys.length} rows came twice`)
@@ -520,7 +545,13 @@ for (const view of ((await get('sys_db_view', { sysparm_fields: 'name', sysparm_
   const sortBy = described.isError ? undefined : (described.data.columns as Data[]).find((column) => !column.inactive && !String(column.name).endsWith('sys_id'))?.name
   if (!ids.length || !sortBy) continue
   const read = await pagesOf(view, `ORDERBY${sortBy}`, ids, 3)
-  if (!read) continue
+  if (!read) {
+    // The view answers when asked directly, as the lines above saw: a sorted read of it that the server does not
+    // answer is passed over only where the instance does not answer it either.
+    if ((await get(view, { sysparm_query: `ORDERBY${sortBy}`, sysparm_fields: ids.join(','), sysparm_limit: 1 })).status === 200) twice.push(`${view} sorted by ${sortBy}: the server did not answer a page that the instance answers when asked directly`)
+    else pagesLeftOut++
+    continue
+  }
   viewsByPages++
   rowsByPages += read.keys.length
   // A view that does not carry the sys_id of one of its tables cannot be read by pages without a repeat: the
@@ -530,6 +561,7 @@ for (const view of ((await get('sys_db_view', { sysparm_fields: 'name', sysparm_
 }
 console.log(`\nSorted reads by pages: ${readByPages} of tables and ${viewsByPages} of database views, ${rowsByPages} rows`)
 if (warnedViews) console.log(`  ${String(warnedViews).padStart(5)}  view(s) whose answer says that its rows cannot all be told apart`)
+if (pagesLeftOut) console.log(`  ${String(pagesLeftOut).padStart(5)}  left out: not readable here, also when asked directly`)
 console.log(`  ${String(twice.length).padStart(5)}  difference(s)`)
 for (const line of twice) console.log(`         ${line}`)
 
@@ -538,6 +570,7 @@ for (const line of twice) console.log(`         ${line}`)
 // Views that carry a field list first: those are the ones that drop conditions.
 const withList = [...new Set(((await get('sys_db_view_table_field', { sysparm_fields: 'view_table.view.name', sysparm_limit: 3_000 })).rows ?? []).map((row) => row['view_table.view.name']).filter(Boolean))]
 const droppedFields: string[] = []
+const undescribed: string[] = []
 let viewsTried = 0
 let applied = 0
 let refusedByInstance = 0
@@ -546,7 +579,11 @@ for (const view of withList) {
   if (viewsTried >= 12) break
   if (Number((await get(view, { sysparm_fields: 'sys_id', sysparm_limit: 1 })).total ?? 0) < 1) continue
   const described = await call('sn_schema', { table: view })
-  if (described.isError) continue
+  if (described.isError) {
+    // The view has rows, as the line above saw. A view the server cannot describe is said, not passed over.
+    undescribed.push(`${view}: sn_schema answers "${described.data.error}" for a view that has rows`)
+    continue
+  }
   viewsTried++
   for (const column of (described.data.columns as Data[]).filter((item) => !item.inactive).slice(0, 12)) {
     const asked = await get(view, { sysparm_query: `${column.name}ISEMPTY^${column.name}ISNOTEMPTY`, sysparm_fields: 'sys_id', sysparm_limit: 1 })
@@ -560,12 +597,14 @@ for (const view of withList) {
     else droppedFields.push(`${view}.${column.name}: the instance drops a condition on it, and the server sends one`)
   }
 }
-console.log(`\nDatabase views with a field list: ${viewsTried} tried`)
+console.log(`\nDatabase views with a field list: ${viewsTried} tried, up to 12 of the fields each lists`)
 console.log(`  ${String(applied).padStart(5)}  listed field(s) on which the instance applies a condition, and the server sends it`)
 if (refusedByServer) console.log(`  ${String(refusedByServer).padStart(5)}  listed field(s) on which the instance drops a condition, and the server refuses it`)
 if (refusedByInstance) console.log(`  ${String(refusedByInstance).padStart(5)}  listed field(s) the instance refuses a condition on, with an error, or answers without a total`)
 console.log(`  ${String(droppedFields.length).padStart(5)}  difference(s)`)
 for (const line of droppedFields.slice(0, 40)) console.log(`         ${line}`)
+if (undescribed.length) console.log(`  ${String(undescribed.length).padStart(5)}  view(s) with rows that sn_schema did not describe: not tried, and no finding`)
+for (const line of undescribed.slice(0, 10)) console.log(`         ${line}`)
 
 console.log(`\n${sn.requestCount + direct} requests, all GET: ${sn.requestCount} by the server, ${direct} directly.`)
 process.exit(differences.length || wrong.length || altered.length || miscounted.length || twice.length || droppedFields.length ? 1 : 0)
@@ -647,10 +686,19 @@ async function closedTables(names: string[]): Promise<number> {
         if (refused(read, 'a query on a table above is refused')) continue
         const ids = (read.data.records as Data[]).map((row) => String(row.sys_id ?? '')).filter(Boolean)
         const shown = (read.data.records as Data[]).filter((row) => family.includes(String(row.sys_class_name))).length
+        // What a count finds stays found, whatever a later count does: one that fails is a check that could not
+        // be run, and takes nothing back.
         let closedRows = 0
-        for (let at = 0; at < ids.length; at += 40) for (const part of await inFamily(`sys_idIN${ids.slice(at, at + 40).join(',')}^sys_class_nameIN<family>`)) closedRows += await rowsThatMatch(parent, part, true)
-        if (shown || closedRows) finding(`${parent} with "${masked(query)}": ${Math.max(shown, closedRows || 0)} of ${ids.length} rows are rows of the closed table`)
-        else if (!Number.isNaN(closedRows)) good('rows read through a table above hold none of the closed table')
+        let allCounted = true
+        for (let at = 0; at < ids.length; at += 40) {
+          for (const part of await inFamily(`sys_idIN${ids.slice(at, at + 40).join(',')}^sys_class_nameIN<family>`)) {
+            const matching = await rowsThatMatch(parent, part, true)
+            if (Number.isNaN(matching)) allCounted = false
+            else closedRows += matching
+          }
+        }
+        if (shown || closedRows) finding(`${parent} with "${masked(query)}": ${Math.max(shown, closedRows)} of ${ids.length} rows are rows of the closed table`)
+        else if (allCounted) good('rows read through a table above hold none of the closed table')
         const whole = await rowsThatMatch(parent, query, true)
         let closedInAll = 0
         for (const part of await inFamily([query.split('^ORDERBY')[0], 'sys_class_nameIN<family>'].filter(Boolean).join('^'))) closedInAll += await rowsThatMatch(parent, part, true)
@@ -662,18 +710,20 @@ async function closedTables(names: string[]): Promise<number> {
       }
       const perClass = await ask('sn_query', { table: parent, groupBy: 'sys_class_name', limit: 200 })
       if (refused(perClass, 'a count per class on a table above is refused')) continue
-      // Every group, read on as an agent would.
+      // Every group, read on as an agent would. Groups that did not come prove nothing about themselves.
+      let everyGroup = true
       for (let page = perClass.data; page.truncated && typeof page.nextOffset === 'number'; ) {
         const next = await ask('sn_query', { table: parent, groupBy: 'sys_class_name', limit: 200, offset: page.nextOffset })
         if (next.isError) {
           unrun(`a count per class on a table above stopped after its first groups: "${next.data.error}"`)
+          everyGroup = false
           break
         }
         ;(perClass.data.groups as Data[]).push(...(next.data.groups as Data[]))
         page = next.data
       }
       if ((perClass.data.groups as Data[]).some((group) => family.includes(String(group.value)))) finding(`${parent} counted per class shows a class of the closed table`)
-      else good('a count per class through a table above shows no closed class')
+      else if (everyGroup) good('a count per class through a table above shows no closed class')
     }
 
     // 3. Fields of open tables that point into the family, where they are filled.

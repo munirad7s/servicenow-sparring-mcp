@@ -275,7 +275,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
       throw validation(`"${groupBy}" is a journal field. Its entries are stored in sys_journal_field, and the field itself holds nothing to count by. Count there instead: element=${column?.sourceField ?? groupBy.split('.').at(-1)}, grouped by element_id.`, table)
     }
     if (ctx.sn.restricted && recordNameKey(table, groupBy, column, guard.owners.get(groupBy)?.table, (await shapeOf(ctx, table)).info?.chain)) {
-      throw new ServiceNowError(`"${groupBy}" holds the readable names of records of other tables, and tables are closed on this machine: its values are not listed as groups. Nothing was sent.`, 'blocked', table)
+      throw new ServiceNowError(`"${groupBy}" holds the readable names of records of other tables, and tables are closed on this machine: its values are not listed as groups. The request was not sent.`, 'blocked', table)
     }
 
     // A view is asked first whether it applies a condition on the field: one that it drops would count every row

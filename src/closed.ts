@@ -105,7 +105,7 @@ const tableNames = (names: Array<string | undefined>, but: string): string[] => 
 export const holdsRowsOf = (name: string): string[] => tableNames([archiveOf(name), ...partOfByName(name)], name)
 
 export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTables {
-  const blocked = (message: string, table: string) => new ServiceNowError(`${message} Nothing was sent.`, 'blocked', table)
+  const blocked = (message: string, table: string) => new ServiceNowError(`${message} The request was not sent.`, 'blocked', table)
   const childOf = (table: string, parent: string) => `"${table}" is a child table of ${parent}, which is closed on this machine: its rows are rows of that table`
   /**
    * What a table is and which fields it has is read from sys_db_object and sys_dictionary, without these rules:

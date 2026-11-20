@@ -14,9 +14,9 @@ rules that filter, archive or rotate it.
 ```json
 {
   "error": "validation",
-  "message": "Unknown field. actve: \"actve\" is not a field of \"incident\" (similar: active). ServiceNow ignores a condition on an unknown field and answers unfiltered, so nothing was sent.",
+  "message": "Unknown field. actve: \"actve\" is not a field of \"incident\" (similar: active). ServiceNow ignores a condition on an unknown field and answers unfiltered, so the request was not sent.",
   "table": "incident",
-  "hint": "Nothing was sent to the instance. Correct the input and call again."
+  "hint": "What was asked for was not sent to the instance. Correct the input and call again."
 }
 ```
 
@@ -31,9 +31,9 @@ Sent as it is, the instance would have answered with every incident.
 ```json
 {
   "error": "validation",
-  "message": "\"state\" stores the value of a choice, not its label: \"Resolved\" is the label of \"6\". Write 6 instead. With the label ServiceNow does not compare what was meant, and the answer would mislead. Nothing was sent.",
+  "message": "\"state\" stores the value of a choice, not its label: \"Resolved\" is the label of \"6\". Write 6 instead. With the label ServiceNow does not compare what was meant, and the answer would mislead. The request was not sent.",
   "table": "incident",
-  "hint": "Nothing was sent to the instance. Correct the input and call again."
+  "hint": "What was asked for was not sent to the instance. Correct the input and call again."
 }
 ```
 
@@ -50,7 +50,7 @@ Sent as it is, the instance would have answered "0 incidents".
   "error": "validation",
   "message": "Cannot check the query term \"short_descriptionLIKE\": LIKE needs a value. Without one ServiceNow drops the condition or matches nothing; to ask for empty fields use ISEMPTY or ISNOTEMPTY. Supported: …",
   "table": "incident",
-  "hint": "Nothing was sent to the instance. Correct the input and call again."
+  "hint": "What was asked for was not sent to the instance. Correct the input and call again."
 }
 ```
 
@@ -66,9 +66,9 @@ builds it from a variable that turned out empty.
 ```json
 {
   "error": "validation",
-  "message": "\"user_password\" holds a secret. It can be neither compared nor sorted by: the number of matches would give its value away piece by piece. Asking whether it is filled works: ISEMPTY, ISNOTEMPTY. Nothing was sent.",
+  "message": "\"user_password\" holds a secret. It can be neither compared nor sorted by: the number of matches would give its value away piece by piece. Asking whether it is filled works: ISEMPTY, ISNOTEMPTY. The request was not sent.",
   "table": "sys_user",
-  "hint": "Nothing was sent to the instance. Correct the input and call again."
+  "hint": "What was asked for was not sent to the instance. Correct the input and call again."
 }
 ```
 
@@ -163,9 +163,9 @@ user" returns 49.
 ```json
 {
   "error": "validation",
-  "message": "\"assignment_group\" is a reference to sys_user_group and stores a sys_id, and no record there has the sys_id \"Service Desk\". With a name, \"!=\" leaves no row out: measured, the answer then counts the rows it was meant to exclude. To leave out a record by one of its fields write assignment_group.<field>!=…, for example assignment_group.name!=Service Desk. If \"Service Desk\" is a sys_id after all, write assignment_group.sys_id!=Service Desk. Nothing was sent.",
+  "message": "\"assignment_group\" is a reference to sys_user_group and stores a sys_id, and no record there has the sys_id \"Service Desk\". With a name, \"!=\" leaves no row out: measured, the answer then counts the rows it was meant to exclude. To leave out a record by one of its fields write assignment_group.<field>!=…, for example assignment_group.name!=Service Desk. If \"Service Desk\" is a sys_id after all, write assignment_group.sys_id!=Service Desk. The request was not sent.",
   "table": "incident",
-  "hint": "Nothing was sent to the instance. Correct the input and call again."
+  "hint": "What was asked for was not sent to the instance. Correct the input and call again."
 }
 ```
 
