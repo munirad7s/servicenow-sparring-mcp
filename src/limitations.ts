@@ -37,6 +37,15 @@ export const DEPENDENCIES_NOT_COVERED = [
   'anything on a child table (child tables are counted and listed by name only)',
 ]
 
+export const FIELD_DEPENDENCIES_NOT_COVERED = [
+  'conditions and scripts that mention the field: business rule conditions, UI policy conditions, flows, script includes',
+  'access controls with a wildcard (table.*, *.field), which apply to the field as well',
+  'reports, filters, notifications and templates that use the field',
+  'reference qualifiers and calculated values of other fields that read it',
+  'the same field on child tables, where it can have its own overrides, choices and layouts',
+  'integrations and import maps that write the field',
+]
+
 export const UPGRADE_NOTES = [
   'A skipped record is one the upgrade did not overwrite. It needs a review; it is not a prediction that something will break.',
   'Only records with a review entry are listed. Records an upgrade updated or left unchanged without review are not.',
@@ -125,6 +134,9 @@ ${ORIGIN_CAVEATS.map((caveat) => `- ${caveat}`).join('\n')}
 
 Not covered:
 ${DEPENDENCIES_NOT_COVERED.map((item) => `- ${item}`).join('\n')}
+
+With "field", not covered:
+${FIELD_DEPENDENCIES_NOT_COVERED.map((item) => `- ${item}`).join('\n')}
 
 ## Upgrade skips (sn_upgrade_skips)
 

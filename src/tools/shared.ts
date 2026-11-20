@@ -95,28 +95,32 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   return { fieldCheck: `not possible: ${why}, and no row of the table is visible to check against`, parsed, resolved: check.resolved, warnings }
 }
 
+/** Operators that compare a field with the values given. For these a label in place of a stored value is a mistake. */
+const COMPARES_VALUES = new Set(['=', '!=', 'IN', 'NOT IN'])
+
 /**
- * "state=Resolved" matches nothing, because a choice field stores "6". The answer
- * would be a correct-looking zero. Where the value is plainly a label, the query
- * is refused and the stored value is named.
+ * "state=Resolved" matches nothing, because a choice field stores "6", and
+ * "state!=Resolved" matches nothing either where the stored value is a number.
+ * The answer would be a correct-looking zero. Where the value is plainly a label,
+ * the query is refused and the stored value is named.
  */
 async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQuery, resolved: Map<string, Column>): Promise<void> {
   for (const { field, operator, value } of parsed.conditions) {
     const column = resolved.get(field)
     // A dot-walked field belongs to another table, and its choices can differ per child table. Those are left alone.
-    if (!column?.choice || field.includes('.') || (operator !== '=' && operator !== 'IN')) continue
+    if (!column?.choice || field.includes('.') || !COMPARES_VALUES.has(operator)) continue
 
     const choices = await ctx.dict.choices(table, field).catch(() => [])
     if (!choices.length) continue
     const stored = new Set(choices.map((choice) => choice.value.toLowerCase()))
 
-    for (const given of operator === 'IN' ? value.split(',') : [value]) {
+    for (const given of operator.endsWith('IN') ? value.split(',') : [value]) {
       if (given === '' || given === 'NULL' || stored.has(given.toLowerCase())) continue
       const meant = choices.find((choice) => choice.label.toLowerCase() === given.toLowerCase())
       if (meant) {
         throw validation(
           `"${field}" stores the value of a choice, not its label: "${given}" is the label of "${meant.value}". ` +
-            `Write ${meant.value} instead. With the label ServiceNow matches nothing, and the answer would be a misleading 0. Nothing was sent.`,
+            `Write ${meant.value} instead. With the label ServiceNow does not compare what was meant, and the answer would mislead. Nothing was sent.`,
           table,
         )
       }

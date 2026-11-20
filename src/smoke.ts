@@ -130,6 +130,14 @@ check('sn_dependencies covers incident and its parent', !deps.isError && deps.da
 check('every category names its table and query', Object.values(categories).every((category) => category.table && typeof category.query === 'string' && category.query.length > 0))
 console.log(`     totals: ${Object.entries(categories).map(([key, category]) => `${key}=${category.total ?? category.status}`).join(' ')}`)
 
+const fieldUse = await call('sn_dependencies', { table: 'incident', field: 'category', limit: 2 })
+const fieldParts: Record<string, Data> = fieldUse.data.categories ?? {}
+check(
+  'sn_dependencies lists what is tied to one field',
+  !fieldUse.isError && fieldUse.data.field === 'category' && Object.values(fieldParts).filter((part) => part.status === 'checked').length >= 7,
+  Object.entries(fieldParts).map(([key, part]) => `${key}=${part.total ?? part.status}`).join(' '),
+)
+
 const skips = await call('sn_upgrade_skips', { limit: 3 })
 check(
   'sn_upgrade_skips answers for the latest family upgrade',
@@ -141,8 +149,8 @@ check('sn_upgrade_skips counts per disposition for the whole filter', skips.data
 const resource = await client.readResource({ uri: 'servicenow-sparring://limitations' })
 check('the limitations resource is served', String((resource.contents[0] as Data).text).includes('read-only promise'))
 
-const prompt = await client.getPrompt({ name: 'verify_claim', arguments: { claim: 'test' } })
-check('the verify_claim prompt is served', prompt.messages.length === 1)
+const prompts = (await client.listPrompts()).prompts.map((item) => item.name).sort()
+check('three prompts are served', JSON.stringify(prompts) === JSON.stringify(['assess_change', 'review_upgrade', 'verify_claim']))
 
 check('every request was a GET', methods.size === 1 && methods.has('GET'), `${sn.requestCount} requests`)
 check('only the two read endpoints were called', [...paths].every((path) => path === '/api/now/table' || path === '/api/now/stats'), [...paths].join(', '))

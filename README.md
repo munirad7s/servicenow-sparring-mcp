@@ -21,10 +21,11 @@ eight functions that read the instance and return evidence a person can run agai
 | `sn_plugins` | Which plugins and applications are installed? |
 | `sn_delta` | What was changed on this instance, by whom and when? |
 | `sn_origin` | Is this record out-of-the-box, customized, or customer-created? |
-| `sn_dependencies` | What configuration is attached to this table? |
+| `sn_dependencies` | What configuration is attached to this table, or to this field? |
 | `sn_upgrade_skips` | What did the upgrade skip, and still needs a review? |
 
-It also serves one MCP prompt, `verify_claim`, and one resource, `servicenow-sparring://limitations`.
+It also serves three MCP prompts, `verify_claim`, `review_upgrade` and `assess_change`, and one resource,
+`servicenow-sparring://limitations`.
 
 ## Evidence you can run again
 
@@ -261,9 +262,9 @@ What follows from that:
   tracked, the files of an installed application, cascading field changes, and some Flow changes. Every answer lists
   the gaps. It counts rows, and one record can have several. Say "captured customizations", never "all
   customizations".
-- `sn_dependencies` lists configuration attached to a table and its parents. It does not see scripts that only name
-  the table in code, the flow behind a record trigger, wildcard access controls, reports or integrations. The answer
-  lists what is not covered.
+- `sn_dependencies` lists configuration attached to a table and its parents, or to one field. It does not see
+  scripts and conditions that only name the table or field, the flow behind a record trigger, wildcard access
+  controls, reports or integrations. The answer lists what is not covered.
 - `sn_upgrade_skips` lists records an upgrade did not overwrite and that have a review entry. Each one needs a
   review. It is not a prediction that something breaks, and it describes only the instance that answered.
 - Encoded queries are parsed with a strict grammar. Related-list queries (`RLQUERY`), tag conditions, catalog

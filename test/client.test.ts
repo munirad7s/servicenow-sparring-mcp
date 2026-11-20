@@ -17,7 +17,6 @@ const failure = async (run: () => Promise<unknown>): Promise<ServiceNowError> =>
 const kindOf = async (run: () => Promise<unknown>) => (await failure(run)).kind
 const json = (body: unknown, status = 200, headers: Record<string, string> = {}) =>
   new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
-const noSleep = { sleep: async () => undefined }
 
 test('a query is one GET to the Table API with the expected parameters', async () => {
   const { sn, calls } = fakeInstance([{ table: 'incident', rows: [{ number: 'INC1' }], total: 42 }])
@@ -36,6 +35,9 @@ test('a query is one GET to the Table API with the expected parameters', async (
   assert.equal(call.params.get('sysparm_exclude_reference_link'), 'true')
   assert.equal(call.headers.Authorization, 'Basic ' + Buffer.from('reader:secret').toString('base64'))
   assert.match(call.headers['User-Agent'], /^servicenow-sparring\/\d+\.\d+\.\d+$/)
+  assert.equal(call.origin, 'https://example.service-now.com')
+  assert.equal(call.pathname, '/api/now/table/incident')
+  assert.equal(call.body, undefined)
   assert.equal(page.total, 42)
 })
 
@@ -150,14 +152,14 @@ test('a missing total is reported as unknown', async () => {
   assert.equal((await sn.query({ table: 'incident' })).total, null)
 })
 
-test('paging follows the server total, because access rules can leave pages short', async () => {
-  const rows = Array.from({ length: 5 }, (_, index) => ({ n: String(index) }))
-  // The instance says 12 rows match but this account only ever sees 5 of them.
-  const { sn, calls } = fakeInstance([{ table: 'incident', rows, total: 12 }])
+test('paging follows the server total, because access rules can leave pages short or empty', async () => {
+  // Twelve rows match. This account sees two of them, and none on the first page.
+  const rows = [null, null, null, null, { n: '4' }, null, null, null, { n: '8' }, null, null, null]
+  const { sn, calls } = fakeInstance([{ table: 'incident', rows }])
   const result = await sn.all({ table: 'incident' }, 100, 4)
 
   assert.equal(calls.length, 3)
-  assert.equal(result.records.length, 5)
+  assert.deepEqual(result.records, [{ n: '4' }, { n: '8' }])
   assert.equal(result.total, 12)
   assert.equal(result.complete, true)
 })
@@ -170,6 +172,14 @@ test('paging stops at the row limit and says that it is not complete', async () 
   assert.equal(result.records.length, 10)
   assert.equal(result.complete, false)
   assert.deepEqual(calls.map((call) => call.params.get('sysparm_limit')), ['4', '4', '2'])
+
+  // One row more than the limit: the last, shortened page must not be taken for the end.
+  const edge = fakeInstance([{ table: 'incident', rows: Array.from({ length: 11 }, (_, index) => ({ n: String(index) })) }])
+  const partial = await edge.sn.all({ table: 'incident' }, 10, 4)
+  assert.deepEqual({ rows: partial.records.length, total: partial.total, complete: partial.complete }, { rows: 10, total: 11, complete: false })
+
+  const exact = fakeInstance([{ table: 'incident', rows: Array.from({ length: 10 }, (_, index) => ({ n: String(index) })) }])
+  assert.equal((await exact.sn.all({ table: 'incident' }, 10, 4)).complete, true)
 })
 
 test('without a total, a list can never be called complete', async () => {
@@ -227,14 +237,37 @@ test('a renewed token is picked up after a rejected login', async () => {
   assert.deepEqual(seen, ['Bearer old', 'Bearer new'])
 })
 
-test('a rate limit is waited out once', async () => {
+test('a rate limit is waited out once, and never for long', async () => {
+  const slept: number[] = []
+  const recorded = { sleep: async (ms: number) => void slept.push(ms) }
+
   let attempts = 0
-  const sn = new ServiceNowClient(config, async () => (++attempts === 1 ? json({ error: { message: 'Too Many Requests' } }, 429, { 'retry-after': '1' }) : json({ result: [] })), noSleep)
+  const sn = new ServiceNowClient(config, async () => (++attempts === 1 ? json({ error: { message: 'Too Many Requests' } }, 429, { 'retry-after': '86400' }) : json({ result: [] })), recorded)
   await sn.query({ table: 'incident' })
   assert.equal(attempts, 2)
 
-  const always = new ServiceNowClient(config, async () => json({ error: { message: 'Too Many Requests' } }, 429), noSleep)
+  const always = new ServiceNowClient(config, async () => json({ error: { message: 'Too Many Requests' } }, 429), recorded)
   assert.equal(await kindOf(() => always.query({ table: 'incident' })), 'rate_limited')
+  // A day asked for is capped at five seconds; without a number it is half a second.
+  assert.deepEqual(slept, [5_000, 500])
+})
+
+test('a rejected login is retried only with credentials that changed, and only once', async () => {
+  const count = (reloadAuth: () => { kind: 'bearer'; token: string }) => {
+    let requests = 0
+    const sn = new ServiceNowClient({ ...config, auth: { kind: 'bearer', token: 'old' }, reloadAuth }, async () => {
+      requests++
+      return json({ error: { message: 'User Not Authenticated' } }, 401)
+    })
+    return kindOf(() => sn.query({ table: 'incident' })).then((kind) => ({ kind, requests }))
+  }
+  assert.deepEqual(await count(() => ({ kind: 'bearer', token: 'old' })), { kind: 'auth', requests: 1 })
+  assert.deepEqual(await count(() => ({ kind: 'bearer', token: 'also rejected' })), { kind: 'auth', requests: 2 })
+})
+
+test('an error inside a successful HTTP answer is an error', async () => {
+  const sn = new ServiceNowClient(config, async () => json({ error: { message: 'Operation Failed', detail: 'ACL Exception Read Failed' } }, 200))
+  assert.equal(await kindOf(() => sn.query({ table: 'incident' })), 'acl')
 })
 
 test('tables can be closed on the machine that runs the server', async () => {

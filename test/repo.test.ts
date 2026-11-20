@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { VERSION } from '../src/version.js'
@@ -11,7 +11,7 @@ const posix = (path: string) => path.replaceAll('\\', '/')
 
 /** Every file under a folder, with forward slashes on every platform. */
 const walk = (folder: string): string[] =>
-  (readdirSync(join(root, folder), { recursive: true }) as string[]).map((path) => posix(join(folder, path)))
+  (readdirSync(join(root, folder), { recursive: true }) as string[]).map((path) => posix(join(folder, path))).filter((path) => statSync(join(root, path)).isFile())
 
 const sourceFiles = walk('src').filter((path) => path.endsWith('.ts'))
 const TEXT = /\.(ts|js|json|md|yml|yaml|txt|example)$|^\.gitignore$|^LICENSE$/
@@ -22,26 +22,36 @@ function trackedFiles(): string[] {
     return execFileSync('git', ['ls-files'], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean).map(posix)
   }
   const top = readdirSync(root).filter((name) => !['node_modules', 'dist', '.git'].includes(name))
-  return top.flatMap((name) => (existsSync(join(root, name)) && !name.includes('.') ? walk(name) : [name]))
+  return top.flatMap((name) => (statSync(join(root, name)).isDirectory() ? walk(name) : [name]))
 }
 const textFiles = trackedFiles().filter((path) => TEXT.test(path) && path !== 'package-lock.json' && existsSync(join(root, path)))
+
+// These three tests guard against a change that breaks the promise by accident. They read the source as text
+// and can be got around on purpose; the test in tools.test.ts that records every request is the second line.
 
 test('the source contains exactly one HTTP method, and it is GET', () => {
   const methods = sourceFiles.flatMap((path) => [...read(path).matchAll(/\bmethod\s*:\s*([^,}\n]+)/g)].map((match) => `${path}: ${match[1].trim()}`))
   assert.deepEqual(methods, ["src/client.ts: 'GET'"])
+
+  // Other ways to name a method: a quoted verb, a quoted key, an assignment, a shorthand property, a Request object.
+  const otherways = /['"`](POST|PUT|PATCH)['"`]|['"`]method['"`]\s*:|\.method\s*=|[{,]\s*method\s*[,}]|\bnew\s+Request\s*\(/
+  assert.deepEqual(sourceFiles.filter((path) => otherways.test(read(path))), [])
 })
 
 test('only the client talks to the network, and only through fetch', () => {
-  const callers = sourceFiles.filter((path) => /\bfetch\(/.test(read(path)))
+  const callers = sourceFiles.filter((path) => /\bfetch\b/.test(read(path).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')))
   assert.deepEqual(callers.sort(), ['src/client.ts', 'src/smoke.ts'])
 
-  const otherWays = /['"](node:)?(http|https|http2|net|tls|dgram|child_process|worker_threads)['"]|['"]undici['"]|XMLHttpRequest|WebSocket|EventSource|\beval\(|new Function\(/
+  const otherWays =
+    /['"`](node:)?(http|https|http2|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|inspector)['"`]|['"`]undici['"`]|sdk\/client\/(sse|streamableHttp|stdio|websocket)|XMLHttpRequest|WebSocket|EventSource|\beval\s*\(|\bFunction\s*\(|\bimport\s*\(|\brequire\s*\(/
   assert.deepEqual(sourceFiles.filter((path) => otherWays.test(read(path))), [])
 })
 
 test('the only file the server writes is the audit log', () => {
-  const writers = sourceFiles.filter((path) => /\b(writeFile|appendFile|createWriteStream|rmSync|unlink|mkdir)\w*\(/.test(read(path)))
-  assert.deepEqual(writers, ['src/audit.ts'])
+  const usesFiles = sourceFiles.filter((path) => /['"`](node:)?fs(\/promises)?['"`]/.test(read(path))).sort()
+  assert.deepEqual(usesFiles, ['src/audit.ts', 'src/config.ts'])
+  assert.match(read('src/audit.ts'), /^import \{ appendFile \} from 'node:fs'$/m)
+  assert.match(read('src/config.ts'), /^import \{ readFileSync, statSync \} from 'node:fs'$/m)
 })
 
 test('the version is the same everywhere', () => {

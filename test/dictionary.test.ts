@@ -45,6 +45,15 @@ test('fields are inherited and say where they are defined', async () => {
   assert.equal(columns?.get('number')?.choice, false)
 })
 
+test('a field defined again on the child table wins over the parent\'s definition', async () => {
+  const { sn } = fakeInstance([
+    { table: 'sys_dictionary', query: 'nameINincident,task', rows: [column('incident', 'short_description', 'string', '', { max_length: '160' }), column('task', 'short_description', 'string', '', { max_length: '40' })] },
+    ...dictionaryRoutes,
+  ])
+  const field = (await new Dictionary(sn).columns('incident'))?.get('short_description')
+  assert.deepEqual({ definedOn: field?.definedOn, maxLength: field?.maxLength }, { definedOn: 'incident', maxLength: 160 })
+})
+
 test('an unknown field is found, with suggestions', async () => {
   const { sn } = fakeInstance(dictionaryRoutes)
   const check = await new Dictionary(sn).checkFields('incident', ['short_descripton', 'active'])
@@ -179,4 +188,9 @@ test('choices come from the nearest table that defines any', async () => {
   assert.deepEqual(await dict.choices('incident', 'state'), [{ value: '1', label: 'New' }, { value: '6', label: 'Resolved' }])
   assert.deepEqual(await dict.choices('task', 'state'), [{ value: '1', label: 'Open' }])
   assert.deepEqual(await dict.choices('incident', 'category'), [])
+})
+
+test('choices defined only on a parent table apply to the child', async () => {
+  const { sn } = fakeInstance([{ table: 'sys_choice', query: 'element=priority', rows: [{ name: 'task', value: '1', label: 'Critical' }] }, ...dictionaryRoutes])
+  assert.deepEqual(await new Dictionary(sn).choices('incident', 'priority'), [{ value: '1', label: 'Critical' }])
 })

@@ -5,7 +5,10 @@ export interface Route {
   table: string
   /** Text the sysparm_query must contain. Omit to match any query. */
   query?: string
-  rows?: Row[]
+  /** The sysparm_group_by a request to the Aggregate API must carry. Omit to match any. */
+  groupBy?: string
+  /** A null stands for a row that matches but is hidden from the account: counted in the total, never returned. */
+  rows?: Array<Row | null>
   /** Value of X-Total-Count. Defaults to the number of rows. */
   total?: number
   /** true leaves the X-Total-Count header out. */
@@ -18,6 +21,9 @@ export interface Route {
 
 export interface Call {
   method: string
+  origin: string
+  pathname: string
+  body: unknown
   api: string
   table: string
   query: string
@@ -58,10 +64,14 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     const parsed = new URL(url)
     const [, , , api, table] = parsed.pathname.split('/')
     const query = parsed.searchParams.get('sysparm_query') ?? ''
-    calls.push({ method: String(init.method), api, table, query, params: parsed.searchParams, headers: init.headers as Record<string, string> })
+    calls.push({ method: String(init.method), origin: parsed.origin, pathname: parsed.pathname, body: init.body, api, table, query, params: parsed.searchParams, headers: init.headers as Record<string, string> })
 
     const route = routes.find(
-      (candidate) => candidate.table === table && (candidate.api ?? 'table') === api && (candidate.query === undefined || query.includes(candidate.query)),
+      (candidate) =>
+        candidate.table === table &&
+        (candidate.api ?? 'table') === api &&
+        (candidate.query === undefined || query.includes(candidate.query)) &&
+        (candidate.groupBy === undefined || parsed.searchParams.get('sysparm_group_by') === candidate.groupBy),
     )
     const json = (body: unknown, status: number, headers: Record<string, string> = {}) =>
       new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
@@ -79,7 +89,8 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     const fields = parsed.searchParams.get('sysparm_fields')?.split(',')
     const display = parsed.searchParams.get('sysparm_display_value') === 'all'
 
-    const page = rows.slice(offset, offset + limit).map((row) => {
+    const visible = rows.slice(offset, offset + limit).filter((row): row is Row => row !== null)
+    const page = visible.map((row) => {
       const kept = fields ? Object.fromEntries(Object.entries(row).filter(([key]) => fields.includes(key))) : row
       if (!display) return Object.fromEntries(Object.entries(kept).map(([key, value]) => [key, isPair(value) ? value.value : value]))
       return Object.fromEntries(Object.entries(kept).map(([key, value]) => [key, isPair(value) ? value : { value, display_value: value }]))

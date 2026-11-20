@@ -59,6 +59,21 @@ test('rows withheld by access rules are counted', () => {
   assert.match(warnings.join(' '), /4 matching row\(s\)/)
 })
 
+test('a page that was both cut and thinned by access rules warns that rows can repeat', () => {
+  const warnings: string[] = []
+  const answer = listing(sn, page(rows(10, 10), 20, 20), warnings, 5)
+  assert.equal(answer.nextOffset, 5)
+  assert.match(warnings.join(' '), /10 matching row\(s\)/)
+  assert.match(warnings.join(' '), /can repeat a few rows/)
+})
+
+test('without a total, a full page means "there may be more"', () => {
+  const full = listing(sn, page(rows(20, 10), null, 20))
+  assert.deepEqual({ truncated: full.truncated, nextOffset: full.nextOffset }, { truncated: true, nextOffset: 20 })
+  const short = listing(sn, page(rows(5, 10), null, 20))
+  assert.deepEqual({ truncated: short.truncated, nextOffset: short.nextOffset }, { truncated: false, nextOffset: undefined })
+})
+
 test('display values are kept where they say more than the stored value', () => {
   const tidied = tidy({
     state: { value: '6', display_value: 'Resolved' },

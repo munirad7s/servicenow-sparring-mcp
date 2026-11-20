@@ -55,7 +55,9 @@ measurements.
 - `sn_delta` counts the rows captured under system accounts, and `peopleOnly` leaves them out.
 - `sn_dependencies` covers seven more kinds of configuration (workspace actions, data filters, assignment rules,
   data lookups, record producers, related lists, database views), names the table and query behind every category,
-  counts descendants, and takes a `categories` list. It needs about half the requests it did.
+  counts descendants, and takes a `categories` list. It needs about half the requests it did. With `field` it lists
+  what is tied to one field: UI policy actions, client scripts, data policy rules, access controls, overrides,
+  choices, the forms and lists that show it, and the fields that depend on it.
 - `sn_upgrade_skips` gives exact counts per disposition and per type, the number of entries nobody reviewed, and the
   upgrades applied since the one it covers.
 - `sn_schema` and the field check understand database views. `sn_schema` names remote tables, which run a script
@@ -68,6 +70,7 @@ measurements.
 - A renewed token is read again from the env file after a rejected login.
 - `servicenow-sparring doctor`, `--version` and `--help`. The doctor command checks the Aggregate API, the release
   property and the account's roles, not only the tables.
+- Two more prompts: `review_upgrade` and `assess_change`.
 - `npm run call` runs one tool from the shell. `npm run origin-check` measures `sn_origin` on your instance.
 
 ### Changed

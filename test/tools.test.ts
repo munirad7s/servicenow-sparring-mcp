@@ -33,10 +33,11 @@ async function connect(routes: Route[], overrides: Partial<InstanceConfig> = {})
 
 const ID = '0123456789abcdef0123456789abcdef'
 const NAME = `sys_script_${ID}`
-const stats = (table: string, groups: Record<string, number>, query?: string): Route => ({
+const stats = (table: string, groups: Record<string, number>, query?: string, groupBy?: string): Route => ({
   table,
   api: 'stats',
   query,
+  groupBy,
   rows: Object.entries(groups).map(([value, count]) => ({ stats: { count: String(count) }, groupby_fields: [{ value }] })),
 })
 
@@ -140,6 +141,9 @@ test('a choice label in place of the stored value is refused, with the value to 
   assert.equal(refused.data.error, 'validation')
   assert.match(refused.data.message, /"Resolved" is the label of "6"/)
   assert.equal((await call('sn_query', { table: 'incident', query: 'stateIN1,New' })).data.error, 'validation')
+  // Measured: with a label, "is not" matches nothing either where the stored value is a number.
+  assert.equal((await call('sn_query', { table: 'incident', query: 'state!=Resolved' })).data.error, 'validation')
+  assert.equal((await call('sn_query', { table: 'incident', query: 'stateNOT INNew,Resolved' })).data.error, 'validation')
   assert.equal(sentTo('incident').length, 0)
 
   assert.equal((await answer('sn_query', { table: 'incident', query: 'state=6' })).returned, 1)
@@ -189,7 +193,9 @@ test('fields that hold secrets are withheld', async () => {
     { table: 'sys_user', rows: [{ ...user, name: 'Abel' }] },
     { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] },
     { table: 'sys_dictionary', query: 'nameINsys_properties', rows: [column('sys_properties', 'name'), column('sys_properties', 'value'), column('sys_properties', 'type')] },
+    { table: 'sys_properties', query: 'name=glide.smtp.pw', rows: [{ name: 'glide.smtp.pw', value: labelled('ciphertext', '********'), type: labelled('password2', 'Password (2 Way Encrypted)') }] },
     { table: 'sys_properties', rows: [{ name: 'glide.smtp.pw', value: 'ciphertext', type: 'password2' }, { name: 'glide.war', value: 'glide-zurich', type: 'string' }] },
+    { table: 'incident', rows: [{ number: 'INC1', 'caller_id.user_password': labelled('$s$hash', '********') }] },
   ])
 
   const named = await answer('sn_query', { table: 'sys_user', fields: ['name', 'user_password'] })
@@ -197,6 +203,11 @@ test('fields that hold secrets are withheld', async () => {
   const all = await answer('sn_query', { table: 'sys_user' })
   assert.equal(all.records[0].user_password, '[withheld: this field holds a secret]')
   assert.match(all.warnings.join(' '), /user_password/)
+
+  const walked = await answer('sn_query', { table: 'incident', fields: ['number', 'caller_id.user_password'], displayValue: true })
+  assert.equal(walked.records[0]['caller_id.user_password'], '[withheld: this field holds a secret]')
+  const shown = await answer('sn_query', { table: 'sys_properties', query: 'name=glide.smtp.pw', fields: ['name', 'value', 'type'], displayValue: true })
+  assert.deepEqual(shown.records[0], { name: 'glide.smtp.pw', value: '[withheld: this field holds a secret]', type: { value: 'password2', display: 'Password (2 Way Encrypted)' } })
 
   const properties = await answer('sn_query', { table: 'sys_properties', fields: ['name', 'value'] })
   assert.deepEqual(properties.records, [{ name: 'glide.smtp.pw', value: '[withheld: this field holds a secret]' }, { name: 'glide.war', value: 'glide-zurich' }])
@@ -256,6 +267,31 @@ test('sn_schema is honest about a table it cannot describe', async () => {
 
   const partial = await connect(dictionaryRoutes.map((route) => (route.query === 'nameINincident,task' ? { ...route, total: 40 } : route)))
   assert.match((await partial.answer('sn_schema', { table: 'incident' })).warnings.join(' '), /only partly readable/)
+})
+
+test('sn_schema describes database views and remote tables, and says what it could not read', async () => {
+  const { answer } = await connect([
+    { table: 'sys_db_object', query: 'name=incident_sla', rows: [] },
+    { table: 'sys_db_view', query: 'name=incident_sla', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_sla', label: 'Incident SLA' }] },
+    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }, { table: 'sys_user', variable_prefix: 'usr' }] },
+    { table: 'sys_db_object', query: 'name=v_remote', rows: [{ ...tableRow('v_remote', 'Remote'), scriptable_table: 'true' }] },
+    { table: 'sys_dictionary', query: 'nameINv_remote', rows: Array.from({ length: 500 }, (_, index) => column('v_remote', `f_${String(index).padStart(3, '0')}`, 'string', '', { column_label: 'x'.repeat(120) })) },
+    { table: 'sys_dictionary_override', query: 'nameINv_remote', status: 403 },
+    ...dictionaryRoutes,
+  ])
+
+  const view = await answer('sn_schema', { table: 'incident_sla', filter: 'email' })
+  assert.deepEqual(view.table, { name: 'incident_sla', label: 'Incident SLA', kind: 'database_view', extends: [], joins: [{ table: 'incident', prefix: 'inc' }, { table: 'sys_user', prefix: 'usr' }] })
+  assert.deepEqual(view.columns.map((item: Data) => `${item.name} from ${item.definedOn}`), ['usr_email from sys_user'])
+
+  const remote = await answer('sn_schema', { table: 'v_remote' })
+  assert.equal(remote.table.kind, 'remote_table')
+  assert.equal(remote.fieldCount, 500)
+  assert.ok(remote.returned < 500)
+  const warnings = remote.warnings.join(' ')
+  assert.match(warnings, /remote table/)
+  assert.match(warnings, /sys_dictionary_override could not be read completely/)
+  assert.match(warnings, new RegExp(`Only the first ${remote.returned} of 500 fields`))
 })
 
 // --------------------------------------------------------------- sn_origin
@@ -360,6 +396,34 @@ test('sn_origin: the evidence can be run again', async () => {
   )
   assert.equal(evidence.versions.table, 'sys_update_version')
   assert.equal(evidence.versions.query, `name=${NAME}^ORDERBYstate^ORDERBYDESCsys_created_on`)
+})
+
+test('sn_origin: with more update rows than one page, the first capture is asked for', async () => {
+  const many = Array.from({ length: 20 }, (_, index) => change({ sys_created_on: `2026-03-${String(index + 2).padStart(2, '0')} 00:00:00` }))
+  const routes = origin('sys_store_app', many, [version('current', 'sys_update_set', '2026-03-21 00:00:00', 'abel')], { sys_created_on: '2026-03-01 00:00:00' })
+  const { answer, sentTo } = await connect([
+    { table: 'sys_update_xml', query: 'ORDERBYsys_created_on', rows: [{ sys_created_on: '2026-03-01 00:00:00' }] },
+    { table: 'sys_update_xml', rows: many, total: 25 },
+    ...routes,
+  ])
+  const data = await answer('sn_origin', { sysId: ID })
+
+  assert.equal(data.evidence.customerUpdates.firstCapturedOn, '2026-03-01 00:00:00')
+  assert.equal(data.created, 'here')
+  assert.equal(data.verdict, 'customer_created')
+  assert.ok(sentTo('sys_update_xml').some((entry) => entry.query === `name=${NAME}^ORDERBYsys_created_on`))
+})
+
+test('sn_origin abstains when the versions cannot be counted', async () => {
+  const { answer } = await connect([
+    { table: 'sys_metadata', rows: [file('sys_plugins')] },
+    { table: 'sys_update_xml', rows: [] },
+    { table: 'sys_update_version', rows: [version('current', 'sys_upgrade_history', '2026-03-01 00:00:00')] },
+    { table: 'sys_update_version', api: 'stats', status: 403 },
+  ])
+  const data = await answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ verdict: data.verdict, divergence: data.divergence, bySource: data.evidence.versions.bySource }, { verdict: 'unknown', divergence: 'unknown', bySource: null })
+  assert.match(data.warnings.join(' '), /Aggregate API/)
 })
 
 test('sn_origin: a record created inside an installed application is customer-created, not customized', async () => {
@@ -512,21 +576,25 @@ test('sn_origin refuses input it cannot use, and never puts an unchecked name in
 // ---------------------------------------------------------------- sn_delta
 
 test('sn_delta lists updates, exact counts per type, system accounts, and its own gaps', async () => {
+  const filter = 'sys_created_by=abel^ORsys_updated_by=abel^sys_updated_on>=2026-01-01 00:00:00^type=Business Rule'
   const { answer, call, sentTo } = await connect([
     { table: 'sys_update_xml', query: 'sys_created_byINsystem', rows: [], total: 4 },
     { table: 'sys_update_xml', rows: [{ name: 'sys_script_1', type: 'Business Rule', action: 'INSERT_OR_UPDATE', sys_updated_on: '2026-02-01 00:00:00' }], total: 9 },
-    stats('sys_update_xml', { Dictionary: 2, 'Business Rule': 7 }),
+    stats('sys_update_xml', { 'Business Rule': 9 }, filter, 'type'),
   ])
   const data = await answer('sn_delta', { type: 'Business Rule', since: '2026-01-01', changedBy: 'abel', limit: 1 })
 
   assert.equal(data.total, 9)
   assert.equal(data.truncated, true)
-  assert.deepEqual(data.byType, [{ type: 'Business Rule', count: 7 }, { type: 'Dictionary', count: 2 }])
+  assert.deepEqual(data.byType, [{ type: 'Business Rule', count: 9 }])
+  // Both counts are taken under the same filter as the list.
+  assert.equal(sentTo('sys_update_xml', 'stats')[0].query, filter)
+  assert.equal(sentTo('sys_update_xml')[1].query, `${filter}^sys_created_byINsystem,guest^ORsys_created_byLIKE@snc.`)
   assert.equal(data.capturedBySystemAccounts, 4)
   assert.match(data.warnings.join(' '), /4 of the 9 rows were captured under system accounts/)
   assert.ok(data.notCaptured.length >= 5)
   // A change is found by when it was last made, not by when the row was first written.
-  assert.equal(sentTo('sys_update_xml')[0].query, 'sys_created_by=abel^ORsys_updated_by=abel^sys_updated_on>=2026-01-01 00:00:00^type=Business Rule^ORDERBYDESCsys_updated_on')
+  assert.equal(sentTo('sys_update_xml')[0].query, `${filter}^ORDERBYDESCsys_updated_on`)
   assert.equal((await call('sn_delta', { nameContains: 'a^ORb=c' })).data.error, 'validation')
 })
 
@@ -601,7 +669,10 @@ const upgradeRoutes: Route[] = [
     ],
     total: 110,
   },
-  stats('upgrade_history_task', { '4': 42, '10': 37, '9': 31 }, undefined),
+  stats('upgrade_history_task', { '4': 42, '10': 37, '9': 31 }, undefined, 'upgrade_detail.disposition'),
+  stats('upgrade_history_task', { 'System Property': 70, 'Business Rule': 40 }, undefined, 'upgrade_detail.type'),
+  stats('upgrade_history_task', { '1': 60, '4': 50 }, undefined, 'state'),
+  stats('upgrade_history_task', { [UP.patch]: 5, [UP.family]: 110 }, undefined, 'upgrade_detail.upgrade_history'),
 ]
 
 test('sn_upgrade_skips covers the latest change of family, not the patch after it', async () => {
@@ -629,7 +700,36 @@ test('sn_upgrade_skips counts the whole filter, and separates failures from cust
 
   assert.equal(data.total, 110)
   assert.deepEqual(data.byDisposition, [{ name: 'Skipped', count: 42 }, { name: 'Skipped Manual Merge', count: 37 }, { name: 'Skipped Error', count: 31 }])
+  assert.deepEqual(data.byType, [{ name: 'System Property', count: 70 }, { name: 'Business Rule', count: 40 }])
+  assert.equal(data.notReviewed, 60)
   assert.match(data.notes.join(' '), /31 of the entries are "Skipped Error"/)
+  assert.deepEqual(data.laterUpgrades.map((item: Data) => item.entries), [5])
+})
+
+test('sn_upgrade_skips counts each thing under the right filter', async () => {
+  const { answer, sentTo } = await connect(upgradeRoutes)
+  await answer('sn_upgrade_skips', { fileContains: 'sys_script', unreviewedOnly: true })
+  const asked = Object.fromEntries(sentTo('upgrade_history_task', 'stats').map((entry) => [entry.params.get('sysparm_group_by'), entry.query]))
+  const shared = 'upgrade_detail.dispositionIN4,9,10^upgrade_detail.file_nameLIKEsys_script^state=1'
+
+  // The counts of the covered upgrade carry its filter. The count per upgrade must not, or every later upgrade would show 0.
+  assert.equal(asked['upgrade_detail.disposition'], `upgrade_detail.upgrade_history=${UP.family}^${shared}`)
+  assert.equal(asked['upgrade_detail.type'], `upgrade_detail.upgrade_history=${UP.family}^${shared}`)
+  assert.equal(asked.state, `upgrade_detail.upgrade_history=${UP.family}^${shared}`)
+  assert.equal(asked['upgrade_detail.upgrade_history'], shared)
+})
+
+test('sn_upgrade_skips without a change of family covers the most recent upgrade, and can be asked for one by name', async () => {
+  const onlyPatch: Route = { table: 'sys_upgrade_history', rows: [upgradeRoutes[0].rows![0]] }
+  const { answer, sentTo } = await connect([onlyPatch, ...upgradeRoutes.slice(1)])
+
+  const data = await answer('sn_upgrade_skips', {})
+  assert.equal(data.upgrade.kind, 'patch')
+  assert.deepEqual(data.laterUpgrades, [])
+  assert.match(data.warnings.join(' '), /No change of release family/)
+
+  await answer('sn_upgrade_skips', { upgrade: 'zurich', onlySkipped: false, unreviewedOnly: true, fileContains: 'sys_script' })
+  assert.equal(sentTo('upgrade_history_task').at(-1)?.query, 'upgrade_detail.upgrade_history.to_versionLIKEzurich^upgrade_detail.file_nameLIKEsys_script^state=1^ORDERBYDESCsys_created_on')
 })
 
 test('sn_upgrade_skips says what it could not establish', async () => {
@@ -677,6 +777,57 @@ test('sn_dependencies lists what is attached, with the query behind every catego
   assert.deepEqual(data.childTables, { direct: 1, descendants: 3, names: ['incident_child'], truncated: false })
   assert.ok(data.notCovered.length > 0)
   assert.equal(sentTo('sys_update_xml', 'stats').length, 1, 'one grouped lookup for all items')
+  assert.equal(sentTo('sys_update_xml', 'stats')[0].query, 'nameINsys_script_a1,sys_script_a2,sys_script_client_c1,sys_security_acl_acl1')
+})
+
+test('sn_dependencies follows how each kind of configuration reaches a child table', async () => {
+  const { answer } = await connect(dictionaryRoutes)
+  const data = await answer('sn_dependencies', { table: 'incident' })
+  const query = (key: string) => data.categories[key].query
+
+  // Always: logic on the parent runs for the child.
+  assert.equal(query('businessRules'), 'collectionINincident,task^active=true')
+  assert.equal(query('uiActions'), 'tableINincident,task^active=true')
+  // Only when the item says so.
+  assert.equal(query('uiPolicies'), 'table=incident^active=true^NQtableINtask^inherit=true^active=true')
+  assert.equal(query('dataPolicies'), 'model_table=incident^active=true^NQmodel_tableINtask^inherit=true^active=true')
+  assert.equal(query('flowRecordTriggers'), 'table=incident^active=true^NQtableINtask^run_on_extended=true^active=true')
+  // Never: these create or fill records of exactly the table they name.
+  assert.equal(query('transformMaps'), 'target_table=incident^active=true')
+  assert.equal(query('inboundEmailActions'), 'table=incident^active=true')
+  assert.equal(query('recordProducers'), 'table_name=incident^active=true')
+  assert.equal(query('databaseViews'), 'table=incident^active=true')
+  assert.equal(query('workflows'), 'tableINincident,task^published=true^active=true')
+  assert.equal(query('referencedBy'), 'referenceINincident,task^internal_typeINreference,glide_list^active=true')
+  assert.equal(Object.keys(data.categories).length, 21)
+})
+
+test('sn_dependencies looks up customer updates in chunks, and never with a name it cannot trust', async () => {
+  const { answer, call, sentTo } = await connect([
+    { table: 'sys_db_object', query: 'name=incident_sla', rows: [] },
+    { table: 'sys_db_view', query: 'name=incident_sla', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_sla', label: 'Incident SLA' }] },
+    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }] },
+    ...dictionaryRoutes,
+    { table: 'sys_script', rows: Array.from({ length: 50 }, (_, index) => rule(`r${index}`, 'incident')) },
+    {
+      table: 'sys_ui_action',
+      rows: [
+        { sys_id: 'u1', sys_name: 'Odd', sys_update_name: 'a^ORb=1', table: 'incident', active: 'true' },
+        { sys_id: 'u2', sys_name: 'Fine', sys_update_name: 'sys_ui_action_u2', table: 'incident', active: 'true' },
+      ],
+    },
+    stats('sys_update_xml', { sys_script_r0: 1, sys_ui_action_u2: 1 }),
+  ])
+  const data = await answer('sn_dependencies', { table: 'incident', categories: ['businessRules', 'uiActions'], limit: 50 })
+
+  const lookups = sentTo('sys_update_xml', 'stats').map((entry) => entry.query)
+  assert.equal(lookups.length, 2, '51 names in chunks of 50')
+  assert.ok(lookups.every((query) => !query.includes('a^ORb=1')))
+  const [odd, fine] = data.categories.uiActions.items
+  assert.equal('customerUpdate' in odd, false)
+  assert.equal(fine.customerUpdate, true)
+
+  assert.equal((await call('sn_dependencies', { table: 'incident_sla' })).data.error, 'validation')
 })
 
 test('sn_dependencies marks a category it cannot vouch for, instead of listing unfiltered rows', async () => {
@@ -707,6 +858,38 @@ test('sn_dependencies leaves the customer-update flag out when it cannot tell', 
   assert.equal(data.categories.businessRules.query, 'collectionINincident^active=true')
   assert.equal('customerUpdate' in data.categories.businessRules.items[0], false)
   assert.match(data.warnings.join(' '), /Customer updates could not be looked up \(acl\)/)
+})
+
+test('sn_dependencies with a field lists what is tied to that one field', async () => {
+  const { answer, call } = await connect([
+    { table: 'sys_ui_policy_action', rows: [{ sys_id: 'p1', sys_update_name: 'sys_ui_policy_action_p1', table: 'incident', field: 'category', ui_policy: labelled('u1', 'Lock on close'), 'ui_policy.active': 'true', mandatory: labelled('ignore', 'Leave alone'), disabled: labelled('true', 'True') }] },
+    { table: 'sys_script_client', rows: [] },
+    { table: 'sys_security_acl', rows: [] },
+    { table: 'sys_choice', query: 'element=category', rows: [{ sys_id: 'c1', name: 'incident', element: 'category', label: 'Hardware', value: 'hardware', inactive: 'false', language: 'en' }], total: 7 },
+    { table: 'sys_ui_element', rows: [{ sys_id: 'e1', element: 'category', 'sys_ui_section.name': 'incident', 'sys_ui_section.view_name': '', 'sys_ui_section.caption': 'Notes' }] },
+    { table: 'sys_dictionary', query: 'dependent_on_field=category', rows: [{ sys_id: 'd1', name: 'incident', element: 'subcategory', dependent_on_field: 'category', active: 'true' }] },
+    stats('sys_update_xml', {}),
+    ...dictionaryRoutes,
+  ])
+  const data = await answer('sn_dependencies', { table: 'incident', field: 'category', limit: 1 })
+
+  assert.equal(data.field, 'category')
+  assert.deepEqual(Object.keys(data.categories), ['uiPolicyActions', 'clientScripts', 'dataPolicyRules', 'accessControls', 'dictionaryOverrides', 'choices', 'formSections', 'listLayouts', 'dependentFields'])
+  assert.equal(data.categories.uiPolicyActions.query, 'tableINincident,task^field=category^ui_policy.active=true')
+  assert.deepEqual(data.categories.uiPolicyActions.items[0], { name: 'Lock on close', sysId: 'p1', definedOn: 'incident', customerUpdate: false, details: { mandatory: 'Leave alone', disabled: 'True' } })
+  assert.equal(data.categories.clientScripts.query, 'table=incident^field=category^active=true^NQtableINtask^applies_extended=true^field=category^active=true')
+  assert.equal(data.categories.accessControls.query, 'nameINincident.category,task.category^active=true')
+  assert.deepEqual({ total: data.categories.choices.total, truncated: data.categories.choices.truncated, item: data.categories.choices.items[0].name }, { total: 7, truncated: true, item: 'Hardware' })
+  assert.equal(data.categories.formSections.items[0].name, 'default view')
+  assert.equal(data.categories.dependentFields.items[0].name, 'incident.subcategory')
+  // A table this instance does not have is "could not be checked".
+  assert.equal(data.categories.dataPolicyRules.status, 'not_checked')
+  assert.match(data.notCovered.join(' '), /conditions and scripts that mention the field/)
+
+  assert.match((await call('sn_dependencies', { table: 'incident', field: 'categry' })).data.message, /similar: category/)
+  assert.equal((await call('sn_dependencies', { table: 'incident', field: 'caller_id.email' })).data.error, 'validation')
+  assert.match((await call('sn_dependencies', { table: 'incident', field: 'category', categories: ['businessRules'] })).data.message, /not available for a field/)
+  assert.match((await call('sn_dependencies', { table: 'incident', categories: ['choices'] })).data.message, /not available without "field"/)
 })
 
 test('sn_dependencies needs a real table', async () => {
@@ -751,7 +934,29 @@ test('sn_instance says so when the release property is hidden', async () => {
   const data = await answer('sn_instance')
   assert.equal(data.release.build, null)
   assert.match(data.warnings.join(' '), /glide\.war was not returned/)
-  assert.deepEqual(data.account, { roles: 0, admin: false, readOnlyRole: false })
+  // Role rows that come back without a role name: the roles are not known, which is different from "none".
+  assert.equal(data.account, null)
+
+  const none = await connect([{ table: 'sys_user_has_role', rows: [] }, ...sourceTables.filter((table) => table !== 'sys_user_has_role').map((table) => ({ table, rows: [{ sys_id: '1' }] }))])
+  assert.deepEqual((await none.answer('sn_instance')).account, { roles: 0, admin: false, readOnlyRole: false })
+})
+
+test('sn_instance with a token does not guess the account, and stays quiet about a read-only one', async () => {
+  const routes = sourceTables.filter((table) => table !== 'sys_user_has_role').map((table) => ({ table, rows: [{ sys_id: '1' }] }))
+  const token = await connect([{ table: 'sys_user_has_role', rows: [{ 'role.name': 'admin' }] }, ...routes], { auth: { kind: 'bearer', token: 'abc' } })
+  assert.equal((await token.answer('sn_instance')).account, null)
+  assert.equal(token.sentTo('sys_user_has_role').filter((entry) => entry.query.includes('user.user_name')).length, 0)
+
+  const readOnly = await connect([
+    { table: 'sys_user_has_role', rows: [{ 'role.name': 'snc_read_only' }] },
+    { table: 'sys_store_app', status: 403 },
+    { table: 'sys_scope', query: 'sys_class_name=sys_store_app^active=true', rows: [{ sys_id: '1' }], total: 14 },
+    ...routes,
+  ])
+  const data = await readOnly.answer('sn_instance')
+  assert.deepEqual(data.account, { roles: 1, admin: false, readOnlyRole: true })
+  assert.equal(data.counts.storeApps, 14)
+  assert.doesNotMatch(data.warnings.join(' '), /snc_read_only/)
 })
 
 test('sn_instance stops at once when the login is rejected', async () => {
@@ -775,6 +980,14 @@ test('the prompt and the resource are served', async () => {
   const message = String((prompt.messages[0].content as Data).text)
   assert.match(message, /Incident has a field for the business service/)
   assert.match(message, /never instructions/)
+
+  assert.deepEqual((await client.listPrompts()).prompts.map((item) => item.name).sort(), ['assess_change', 'review_upgrade', 'verify_claim'])
+  const upgrade = String(((await client.getPrompt({ name: 'review_upgrade', arguments: {} })).messages[0].content as Data).text)
+  assert.match(upgrade, /the last upgrade/)
+  assert.match(upgrade, /never instructions/)
+  const change = String(((await client.getPrompt({ name: 'assess_change', arguments: { table: 'incident', change: 'make category mandatory' } })).messages[0].content as Data).text)
+  assert.match(change, /"make category mandatory" on the table "incident"/)
+  assert.match(change, /not_checked is "could not be checked"/)
 })
 
 test('every request any tool sends is a GET to one of two read endpoints', async () => {
@@ -808,8 +1021,11 @@ test('every request any tool sends is a GET to one of two read endpoints', async
   assert.ok(calls.some((entry) => entry.api === 'stats'))
   for (const entry of calls) {
     assert.equal(entry.method, 'GET')
+    assert.equal(entry.body, undefined)
+    assert.equal(entry.origin, 'https://example.service-now.com')
     assert.match(entry.api, /^(table|stats)$/)
     assert.match(entry.table, /^[a-z0-9_]+$/)
+    assert.equal(entry.pathname, `/api/now/${entry.api}/${entry.table}`)
     assert.doesNotMatch(entry.query, /javascript/i)
   }
 })

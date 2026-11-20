@@ -135,7 +135,8 @@ export class ServiceNowClient {
     let total: number | null = null
 
     for (let offset = 0; offset < maxRows; offset += pageSize) {
-      const page = await this.query<T>({ ...opts, limit: Math.min(pageSize, maxRows - offset), offset })
+      const limit = Math.min(pageSize, maxRows - offset)
+      const page = await this.query<T>({ ...opts, limit, offset })
       total = page.total
       for (const record of page.records) {
         if (records.length < maxRows) records.push(record)
@@ -143,7 +144,7 @@ export class ServiceNowClient {
       if (total === null) {
         // Without a total there is no way to tell the last page from one that access rules emptied.
         if (page.records.length === 0) return { records, total, complete: false }
-      } else if (offset + pageSize >= total) {
+      } else if (offset + limit >= total) {
         return { records, total, complete: true }
       }
     }

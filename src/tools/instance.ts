@@ -76,6 +76,8 @@ export async function accountRoles(sn: ServiceNowClient): Promise<{ roles: numbe
     )
     if (!complete || (total !== null && records.length < total)) return null
     const names = new Set(records.map((row) => row['role.name']).filter(Boolean))
+    // Rows without a role name: the name is hidden from this account, so the roles are not known.
+    if (records.length && !names.size) return null
     return { roles: names.size, admin: names.has('admin'), readOnlyRole: names.has('snc_read_only') }
   } catch {
     return null
