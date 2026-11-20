@@ -373,7 +373,7 @@ test('a value of the wrong kind is refused: the instance would not reject it', a
     {
       table: 'sys_dictionary',
       query: 'nameINincident,task',
-      rows: [column('task', 'number'), column('task', 'active', 'boolean'), column('task', 'sys_created_on', 'glide_date_time'), column('task', 'due_date', 'glide_date'), column('task', 'reassignment_count', 'integer'), column('task', 'short_description')],
+      rows: [column('task', 'number'), column('task', 'active', 'boolean'), column('task', 'sys_created_on', 'glide_date_time'), column('task', 'due_date', 'glide_date'), column('task', 'reassignment_count', 'integer'), column('task', 'short_description'), column('task', 'business_duration', 'glide_duration')],
     },
     ...dictionaryRoutes,
     { table: 'incident', rows: [{ number: 'INC1' }] },
@@ -402,6 +402,15 @@ test('a value of the wrong kind is refused: the instance would not reject it', a
     ['reassignment_count>abc', /holds a number/],
     ['reassignment_countIN1;2;3', /holds a number/],
     ['reassignment_countBETWEEN1@many', /holds a number/],
+    // "priorityLIKE1" gave no row where "priority=1" gave 27, and "activeLIKEtrue" gave the 29 inactive rows.
+    ['reassignment_countLIKE1', /LIKE matches nothing on a number field/],
+    ['reassignment_countSTARTSWITH1', /STARTSWITH matches nothing on a number field/],
+    ['reassignment_countNOT LIKE1', /NOT LIKE matches nothing on a number field/],
+    ['activeLIKEtrue', /true\/false field, and LIKE does not compare text/],
+    ['activeSTARTSWITHt', /true\/false field/],
+    // "business_duration>3600" matched all 39 filled rows; the stored form is a date counted from 1970.
+    ['business_duration>3600', /holds a duration.*One hour is 1970-01-01 01:00:00/],
+    ['business_duration>01:00:00', /holds a duration/],
   ]
   for (const [query, why] of refused) {
     const { data } = await call('sn_query', { table: 'incident', query, fields: ['number'] })
@@ -416,6 +425,9 @@ test('a value of the wrong kind is refused: the instance would not reject it', a
     'sys_created_onBETWEEN2026-01-01@2026-12-31', 'sys_created_on=', 'due_date!=', 'sys_created_onON2026-01-15@2026-01-15 00:00:00@2026-01-15 23:59:59',
     'active=true', 'active=TRUE', 'active=1', 'active=0', 'active!=false', 'activeINtrue,false',
     'reassignment_count=1', 'reassignment_count= 1', 'reassignment_count>=0', 'reassignment_countIN1, 2', 'reassignment_count=1.0', 'reassignment_countBETWEEN2@4', 'reassignment_count=NULL',
+    'business_duration>1970-01-01 01:00:00', 'business_durationISNOTEMPTY',
+    // Measured: LIKE and STARTSWITH on a date work on its stored text.
+    'sys_created_onSTARTSWITH2026-0', 'sys_created_onLIKE2026',
     // On a text field any value is a value.
     'short_description=yes', 'short_descriptionLIKE01.01.2026',
   ]

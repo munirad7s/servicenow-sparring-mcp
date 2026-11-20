@@ -215,6 +215,11 @@ test('a condition can be added to every part of a query', () => {
   assert.equal(withCondition('a=1', 'x=1'), 'a=1^x=1')
   assert.equal(withCondition('a=1^ORb=2^ORDERBYc', 'x=1'), 'a=1^ORb=2^ORDERBYc^x=1')
   assert.equal(withCondition('a=1^NQb=2^NQc=3', 'x=1'), 'a=1^x=1^NQb=2^x=1^NQc=3^x=1')
+  // A query may begin with NQ. In front of it there is nothing to add the condition to: on its own it would be a
+  // part that matches every row the condition allows.
+  assert.equal(withCondition('NQa=1', 'x=1'), 'NQa=1^x=1')
+  assert.equal(withCondition('^NQa=1^NQb=2', 'x=1'), 'NQa=1^x=1^NQb=2^x=1')
+  assert.equal(withCondition('a=1^', 'x=1'), 'a=1^x=1')
   // A literal ^ inside a value stays one.
   assert.equal(withCondition('aLIKEp^^q^NQb=2', 'x=1'), 'aLIKEp^^q^x=1^NQb=2^x=1')
   assert.deepEqual(fieldsInEncodedQuery(withCondition('aLIKEp^^q^NQb=2', 'x=1')), ['a', 'x', 'b'])

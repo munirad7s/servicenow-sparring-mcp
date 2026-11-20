@@ -281,12 +281,22 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
  */
 export function withCondition(query: string, condition: string): string {
   const terms: string[] = []
+  // Whether the part being read holds anything yet. A query may begin with NQ: in front of that there is no part
+  // to add the condition to, and adding it there would make a part of its own that matches everything else.
+  let open = false
   for (const term of splitTerms(query)) {
-    if (term.startsWith('NQ')) terms.push(condition)
+    if (term === '') continue
+    if (term.startsWith('NQ')) {
+      if (open) terms.push(condition)
+      // The part that begins here may be empty too ("NQ" alone, or "NQ" right before another one).
+      open = term.length > 2
+    } else {
+      open = true
+    }
     terms.push(term.replaceAll('^', '^^'))
   }
-  terms.push(condition)
-  return terms.filter(Boolean).join('^')
+  if (open || !terms.length) terms.push(condition)
+  return terms.join('^')
 }
 
 /**

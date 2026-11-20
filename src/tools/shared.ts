@@ -30,6 +30,10 @@ export const JOURNAL_TYPES = new Set(['journal', 'journal_input', 'journal_list'
 
 const DATE_TYPES = new Set(['glide_date_time', 'glide_date', 'due_date', 'datetime', 'date', 'calendar_date_time'])
 const NUMBER_TYPES = new Set(['integer', 'longint', 'long', 'decimal', 'float', 'double', 'numeric'])
+/** A duration is stored as a point in time counted from 1970-01-01 00:00:00: eight hours are "1970-01-01 08:00:00". */
+const DURATION_TYPES = new Set(['glide_duration', 'timer'])
+/** Operators that compare text. */
+const COMPARES_TEXT = new Set(['LIKE', 'NOT LIKE', 'STARTSWITH', 'ENDSWITH', 'CONTAINS'])
 /** Operators whose value is compared with what the field stores, so that its form matters. */
 const COMPARES_STORED = new Set(['=', '!=', '>', '>=', '<', '<=', 'IN', 'NOT IN', 'BETWEEN', 'ON', 'NOTON'])
 
@@ -260,11 +264,22 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
  * A value of the wrong kind is not rejected by the instance. Measured on a table of 82 rows:
  * - a date it cannot read ("01.01.2026", "yesterday", "2026") makes ">" match every row and "<" none;
  * - on a true/false field, every value but "true" and "1" is read as false: "active=yes" returns the inactive rows;
- * - on a number field, a value that is not a number matches nothing, also with "!=".
+ * - on a number field, a value that is not a number matches nothing, also with "!=";
+ * - LIKE and its relatives match nothing on a number field ("priorityLIKE1" gave 0 where "priority=1" gave 27),
+ *   and on a true/false field they return the rows where it is false;
+ * - a duration is compared as a date counted from 1970: "business_duration>3600" matched every filled row.
  */
 function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved: Map<string, Column>): void {
   for (const { field, operator, value } of parsed.conditions) {
     const type = resolved.get(field)?.type ?? ''
+    if (COMPARES_TEXT.has(operator) && (NUMBER_TYPES.has(type) || type === 'boolean')) {
+      throw validation(
+        type === 'boolean'
+          ? `"${field}" is a true/false field, and ${operator} does not compare text on it. Measured: ${field}LIKEtrue returns the rows where it is false. Write ${field}=true or ${field}=false. Nothing was sent.`
+          : `"${field}" holds a number, and ${operator} matches nothing on a number field. Measured: priorityLIKE1 gave no row where priority=1 gave 27. Compare with =, >, <, IN or BETWEEN. Nothing was sent.`,
+        table,
+      )
+    }
     if (!COMPARES_STORED.has(operator)) continue
     const named = operator === 'ON' || operator === 'NOTON'
     // ON carries a label first, then the two ends of the range.
@@ -272,7 +287,16 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
       (item) => item !== '' && item !== 'NULL',
     )
 
-    if (DATE_TYPES.has(type)) {
+    if (DURATION_TYPES.has(type)) {
+      const odd = given.find((item) => !isDate(item))
+      if (odd !== undefined) {
+        throw validation(
+          `"${field}" holds a duration, which is stored as a point in time counted from 1970-01-01 00:00:00, and "${odd}" is not written that way. ` +
+            'One hour is 1970-01-01 01:00:00, two days are 1970-01-03 00:00:00. Measured: a number of seconds is not rejected, and ">" then matches every filled row. Nothing was sent.',
+          table,
+        )
+      }
+    } else if (DATE_TYPES.has(type)) {
       const odd = given.find((item) => !isDate(item))
       if (odd !== undefined) {
         throw validation(

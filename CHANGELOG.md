@@ -17,10 +17,14 @@ answer; such changes are listed under "Changed".
 
 ### Fixed
 
+- **A query on the value of system properties that begins with `NQ` came back unfiltered.** The condition that
+  keeps secrets out was put in front of the first part of the query, where it formed a part of its own that
+  matched every property without a secret. Found by review; 0.3.0 has this defect.
 - **A value of the wrong kind was sent, and the instance does not reject it.** Measured: with a date it cannot
   read (`01.01.2026`, `yesterday`), `>` matches every row; `active=yes` returns the rows where the field is false;
-  a word on a number field matches nothing, also with `!=`. All three are refused, and the error says how to write
-  the value.
+  a word on a number field matches nothing, also with `!=`; `LIKE` on a number field matches nothing where `=`
+  finds rows; a duration compared with a number of seconds matches every filled row. All of these are refused,
+  and the error says how to write the value.
 - **A condition on a journal field was sent, and a journal field read without display values came back empty
   without a word.** Measured: `work_notesISEMPTY` and `work_notesISNOTEMPTY` return the same rows, and
   `work_notesLIKEa` finds more incidents than there are work notes. Such a condition is refused, with the query on
