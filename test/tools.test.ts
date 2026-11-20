@@ -1330,7 +1330,7 @@ test('a text search is refused on a table that points into a table named after r
   ]
   const closed = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
   const { data } = await closed.call('sn_query', { table: 'u_review', query: '123TEXTQUERY321=Abel' })
-  assert.equal(data.error, 'validation')
+  assert.equal(data.error, 'blocked')
   assert.match(data.message, /"u_change" points into sys_update_xml, whose rows carry the names of records of other tables/)
   // With nothing closed, no name has to be kept back.
   const open = await connect(routes)
@@ -1574,7 +1574,8 @@ test('a text search is not a way to probe a field that holds a secret', async ()
   // closed, it would be a way to try out their names.
   const closed = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }], { tables: { allow: [], deny: ['sys_user'] } })
   const probing = await closed.call('sn_query', { table: 'incident', query: '123TEXTQUERY321=Abel', fields: ['number'] })
-  assert.equal(probing.data.error, 'validation')
+  // Refused because of a closed table, and reported as that.
+  assert.equal(probing.data.error, 'blocked')
   assert.match(probing.data.message, /finds records by the names behind their references: "assigned_to" points into a table that is closed/)
   assert.equal(closed.sentTo('incident').length, 0)
 })
@@ -1742,6 +1743,9 @@ test('sn_query says what it could not check about choices, and what "is not" lea
   }
   // Measured: "is different from another field" leaves the empty rows out as well, those of either field.
   assert.match((await answer('sn_query', { table: 'incident', query: 'assigned_toNSAMEAScaller_id' })).warnings.join(' '), /"NSAMEAS" leaves out rows where the field is empty \(assigned_to, caller_id\)/)
+  // Asking for the empty rows of one of the two brings those back, and not the rows where the other is empty.
+  assert.match((await answer('sn_query', { table: 'incident', query: 'assigned_toNSAMEAScaller_id^ORassigned_toISEMPTY' })).warnings.join(' '), /"NSAMEAS" leaves out rows where the field is empty \(caller_id\)/)
+  assert.deepEqual((await answer('sn_query', { table: 'incident', query: 'assigned_toNSAMEAScaller_id^ORassigned_toISEMPTY^ORcaller_idISEMPTY' })).warnings, [])
 })
 
 test('a name where a reference needs a sys_id is refused when it is to be left out', async () => {
@@ -2284,6 +2288,8 @@ test('the payload of a captured change is passed on without its secrets, and can
         '<name>Example rule</name><sys_created_by display_value="Beth Anglin">beth</sys_created_by><script><![CDATA[gs.info("x")]]></script><note>&lt;owner display_value=&quot;Carol Coughlin&quot;&gt;c&lt;/owner&gt;</note>',
       ),
     },
+    // A linked application file is a copy of a record of another table. This one does not say of which.
+    { name: 'sys_metadata_link_4', payload: payload('sys_metadata_link', '<directory>update</directory><payload>Dora Example</payload>') },
   ]
   const routes: Route[] = [
     { table: 'sys_db_object', query: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Customer Update')] },
@@ -2304,7 +2310,9 @@ test('the payload of a captured change is passed on without its secrets, and can
   assert.equal(data.records[1].payload, '[withheld: the record is in a table closed on this machine]')
   assert.match(data.records[2].payload, /gs\.info/)
   assert.match(data.warnings.join(' '), /1 value\(s\) inside a text were withheld/)
-  assert.match(data.warnings.join(' '), /1 payload\(s\) were withheld, because the record they carry is in a table that is closed/)
+  // A copy of a record, and nothing says of which table: that cannot be told, so it is not passed on.
+  assert.equal(data.records[3].payload, '[withheld: the record is in a table closed on this machine]')
+  assert.match(data.warnings.join(' '), /2 payload\(s\) were withheld, because the record they carry is in a table that is closed/)
 
   // A payload that is passed on names the record behind each of its references. Those names are taken out, also
   // where the markup of a record inside it is written with entities.
@@ -2319,7 +2327,7 @@ test('the payload of a captured change is passed on without its secrets, and can
     assert.match(refused.message, /holds whole records as text/)
   }
   assert.equal(sentTo('sys_update_xml').length, 1)
-  assert.equal((await answer('sn_query', { table: 'sys_update_xml', query: 'payloadISNOTEMPTY^nameSTARTSWITHsys_script', fields: ['name'] })).returned, 3)
+  assert.equal((await answer('sn_query', { table: 'sys_update_xml', query: 'payloadISNOTEMPTY^nameSTARTSWITHsys_script', fields: ['name'] })).returned, 4)
 })
 
 test('a linked application file does not give away the record it links to', async () => {
@@ -2485,6 +2493,12 @@ test('names of records of other tables are kept back on the tables that are know
   const picked = await closed.answer('sn_query', { table: 'sys_ui_recent_selection', fields: ['display_value', 'field'] })
   assert.deepEqual(picked.records, [{ display_value: WITHHELD, field: 'caller_id' }])
   assert.equal((await closed.call('sn_query', { table: 'sys_ui_recent_selection', query: 'display_valueSTARTSWITHAbel' })).data.error, 'blocked')
+  // A text search reads the field that holds those names without naming it.
+  for (const table of ['sys_ui_recent_selection', 'sys_scope_privilege']) {
+    const searched = await closed.call('sn_query', { table, query: '123TEXTQUERY321=Abel' })
+    assert.equal(searched.data.error, 'blocked', table)
+    assert.match(searched.data.message, /holds the readable names of records of other tables, which a search would find out by trying/, table)
+  }
 
   const open = await connect(world)
   assert.deepEqual((await open.answer('sn_query', { table: 'sys_scope_privilege', fields: ['target_name'] })).records.map((row: Data) => row.target_name), ['PayrollUtils', 'GlideRecord', 'incident', 'Something'])
@@ -2697,6 +2711,12 @@ test('sn_schema describes database views and remote tables, and says what it cou
   const view = await answer('sn_schema', { table: 'incident_sla', filter: 'email' })
   assert.deepEqual(view.table, { name: 'incident_sla', label: 'Incident SLA', kind: 'database_view', extends: [], joins: [{ table: 'incident', prefix: 'inc' }, { table: 'sys_user', prefix: 'usr' }] })
   assert.deepEqual(view.columns.map((item: Data) => `${item.name} from ${item.definedOn}`), ['usr_email from sys_user'])
+  // A field the joined table inherits: the dictionary entry is one of the parent, and that is the table an update
+  // name is built from ("sys_dictionary_task_number"). The joined table is named beside it.
+  const inherited = await answer('sn_schema', { table: 'incident_sla', filter: 'inc_number' })
+  assert.deepEqual(inherited.columns.map((item: Data) => ({ name: item.name, definedOn: item.definedOn, joinedFrom: item.joinedFrom, sourceField: item.sourceField })), [{ name: 'inc_number', definedOn: 'task', joinedFrom: 'incident', sourceField: 'number' }])
+  // What a view does not apply is said: an agent would otherwise take the label of the parent for the one on the table.
+  assert.match(inherited.warnings.join(' '), /This is a database view\. Its fields are listed as the joined tables define them/)
 
   const remote = await answer('sn_schema', { table: 'v_remote' })
   assert.equal(remote.table.kind, 'remote_table')
@@ -3125,7 +3145,10 @@ test('a login that is rejected in the middle of a call is passed on as that', as
   const witness = await connect([{ table: 'upgrade_history_task', status: 401 }, ...origin('sys_plugins', [], [])])
   assert.equal((await witness.call('sn_origin', { sysId: ID })).data.error, 'auth')
   const unreadable = await connect([{ table: 'upgrade_history_task', status: 403 }, ...origin('sys_plugins', [], [])])
-  assert.equal((await unreadable.answer('sn_origin', { sysId: ID })).verdict, 'out_of_box_as_captured')
+  const unseen = await unreadable.answer('sn_origin', { sysId: ID })
+  assert.equal(unseen.verdict, 'out_of_box_as_captured')
+  // The answer says what was not looked for: a change nobody captured shows only in those entries.
+  assert.match(unseen.warnings.join(' '), /entries of upgrades could not be read \(upgrade_history_task: acl\)/)
 
   const attached = await connect([...['sys_script', 'sys_script_client', 'sys_ui_policy', 'sys_ui_action', 'sys_security_acl', 'sys_data_policy2'].map(rejected), ...dictionaryRoutes])
   const answer = await attached.call('sn_dependencies', { table: 'incident' })

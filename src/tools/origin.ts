@@ -410,6 +410,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
 
         // -------------------------------------------------------------- the evidence
 
+        let skipsUnread = ''
         const updatesQuery = `name=${name}^ORDERBYDESCsys_updated_on`
         const versionsQuery = `name=${name}^ORDERBYstate^ORDERBYDESCsys_created_on`
         const skipsQuery = `upgrade_detail.file_name=${name}^ORDERBYDESCsys_created_on`
@@ -418,7 +419,8 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
               read('sys_update_xml', updatesQuery, ['name', 'action', 'type', 'update_set', 'replace_on_upgrade', 'sys_created_by', 'sys_created_on', 'sys_updated_by', 'sys_updated_on'], 20),
               // Sorted by state, the version marked "current" comes first among the states an instance has by default.
               read('sys_update_version', versionsQuery, ['state', 'source_table', 'source', 'sys_created_by', 'sys_created_on'], 10),
-              // Not a warning if this fails: it is one more witness, and many accounts cannot read it.
+              // One more witness, and many accounts cannot read it: the verdict stands without it, and the answer
+              // says what was not looked for.
               sn
                 .query<Row>({
                   table: 'upgrade_history_task',
@@ -427,7 +429,12 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
                   limit: 10,
                   display: true,
                 })
-                .catch(unlessNoConnection(null)),
+                .catch((error: unknown) => {
+                  // An instance without that table has no such entries, which is not "could not be read".
+                  const kind = kindOf(error)
+                  if (kind !== 'not_found') skipsUnread = kind
+                  return null
+                }),
             ])
           : [null, null, null]
 
@@ -507,6 +514,11 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         // A vendor version that became current after the skip means a later upgrade applied the record: it no longer differs.
         const appliedSince = Boolean(skip) && currentFromVendor && seconds(rawOf(current?.sys_created_on)) > seconds(skip?.createdOn ?? '')
         const skippedAsChanged = Boolean(skip) && !reverted && !appliedSince
+        // A change that nobody captured shows only where an upgrade refused to overwrite the record. Where those
+        // entries could not be read, "no change captured" is all that can be said, and the answer says so.
+        if (divergence === 'no_customer_changes_captured' && skipsUnread) {
+          warnings.push(`The entries of upgrades could not be read (upgrade_history_task: ${skipsUnread}), so it was not looked whether an upgrade found this record changed without a captured change. "No customer change captured" is all this answer says about that.`)
+        }
         if (divergence === 'no_customer_changes_captured' && !skippedAsChanged) {
           // An entry that came back without what the upgrade did with the record says nothing either way.
           const blank = skipRecords.some((row) => !rawOf(row['upgrade_detail.disposition']))

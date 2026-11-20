@@ -8,6 +8,7 @@ import { clip, fail, listing, listShape, ok, rawOf, rowSchema, source, tidy } fr
 import { traced } from '../trace.js'
 import {
   CLOSED_NAME,
+  copiesRecords,
   errorKind,
   explainEmpty,
   guardFields,
@@ -82,6 +83,8 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     const carriesClosed = async (payload: string) => {
       const tables = payloadTables(payload)
       if (!tables.length) return true
+      // A record that is a copy of another, and nothing in the payload says of which table: that cannot be told.
+      if (tables.every(copiesRecords)) return true
       // A name the instance does not know as a table counts as closed too: what the payload carries cannot be told.
       for (const name of tables) {
         if (await ctx.closed.reason(name)) return true

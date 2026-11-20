@@ -236,7 +236,7 @@ check(
 const perCaller = await ask('sn_query', { table: 'incident', groupBy: 'caller_id', limit: 5 })
 check('groups counted by such a reference carry no names', !perCaller.isError && (perCaller.data.groups ?? []).every((group: Data) => !group.display), `${perCaller.data.totalGroups} groups`)
 check('comparing such a reference with text is refused', blocked(await ask('sn_query', { table: 'incident', query: 'caller_idSTARTSWITHa', fields: ['sys_id'], limit: 1 })))
-check('a text search on a table that points into it is refused', refused(await ask('sn_query', { table: 'incident', query: '123TEXTQUERY321=network', fields: ['sys_id'], limit: 1 })))
+check('a text search on a table that points into it is refused', blocked(await ask('sn_query', { table: 'incident', query: '123TEXTQUERY321=network', fields: ['sys_id'], limit: 1 })))
 
 // A third server, on which business rules are closed. A captured change says by its name which table its record
 // is of: "sys_script_<sys_id>" is a business rule, "sys_script_include_<sys_id>" is a script include.

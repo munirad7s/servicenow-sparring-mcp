@@ -26,6 +26,11 @@ export interface Column {
   labelFrom?: string
   /** For a field of a database view: its name on the table it comes from. */
   sourceField?: string
+  /**
+   * For a field of a database view: the table in the parent chain of the joined table that defines it. There
+   * "definedOn" is the table the view joins, which is what decides what the field holds.
+   */
+  sourceDefinedOn?: string
 }
 
 export interface TableInfo {
@@ -786,7 +791,7 @@ export class Dictionary {
         const set = joined && joined.kind !== 'database_view' ? await this.columnSet(member.table, maxAgeMs) : null
         if (!set || set.partial) partial = true
         for (const column of set?.columns.values() ?? []) {
-          columns.set(`${member.prefix}_${column.name}`, { ...column, name: `${member.prefix}_${column.name}`, definedOn: member.table, sourceField: column.name })
+          columns.set(`${member.prefix}_${column.name}`, { ...column, name: `${member.prefix}_${column.name}`, definedOn: member.table, sourceField: column.name, sourceDefinedOn: column.definedOn })
         }
       }
       return { columns, partial }

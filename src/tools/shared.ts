@@ -305,6 +305,8 @@ function tableCuts(name: string): string[] {
  * such a record counts as one of a closed table.
  */
 const COPIES_OF_RECORDS = new Set(['sys_metadata_link'])
+/** Whether the records of a table are copies of records of other tables. */
+export const copiesRecords = (table: string): boolean => withBases(table).some((base) => COPIES_OF_RECORDS.has(base))
 
 /**
  * What stands before a generated sys_id at the end of an update name. Mostly that is the table of the record, but
@@ -906,18 +908,20 @@ async function keepSecretsOutOfReach(
     if (table !== 'sys_properties' && ((await propertyValueFields(ctx, table)).any || all.some(isPropertyValue))) {
       throw refuse('this table hands out the values of system properties, as a view of them or as a table below theirs, and some of them are secrets')
     }
-    // The name of a record behind a reference is found by the search as well, and some tables are named after
-    // records of other tables.
     if (ctx.sn.restricted) {
-      const named = all.find((column) => column.reference && RECORD_NAMES.has(column.reference))
-      if (named) throw refuse(`it also finds records by the names behind their references: "${named.name}" points into ${named.reference}, whose rows carry the names of records of other tables`)
-    }
-    // Measured: a text search finds a record by the name behind one of its references. A caller whose name stood in
-    // no text field of an incident was found on all 8 of his incidents. So it is a way to try out names.
-    if (ctx.sn.restricted) {
+      // Refused because of a closed table, so it is reported, and written to the audit log, as that.
+      const closed = (why: string) => new ServiceNowError(`A text search looks into the fields of "${table}" without naming them, and ${why}. Tables are closed on this machine. Filter on named fields instead. Nothing was sent.`, 'blocked', table)
+      // Some tables carry the names of records of other tables in a field of their own, and a search reads it.
+      const own = all.find((column) => recordNameKey(table, column.name, column))
+      if (own) throw closed(`"${own.name}" holds the readable names of records of other tables, which a search would find out by trying`)
+      // The name of a record behind a reference is found by the search as well, and such a table can be behind one.
+      const named = all.find((column) => column.reference && forTable(RECORD_NAMES, column.reference))
+      if (named) throw closed(`it also finds records by the names behind their references: "${named.name}" points into ${named.reference}, whose rows carry the names of records of other tables`)
+      // Measured: a text search finds a record by the name behind one of its references. A caller whose name stood
+      // in no text field of an incident was found on all 8 of his incidents. So it is a way to try out names.
       for (const column of all) {
         if (!(await ctx.closed.hidesNames(table, column.name))) continue
-        throw refuse(`it also finds records by the names behind their references: "${column.name}" points into a table that is closed on this machine, or that cannot be told`)
+        throw closed(`it also finds records by the names behind their references: "${column.name}" points into a table that is closed on this machine, or that cannot be told`)
       }
     }
     if (table === 'sys_properties') compared.add('value')
@@ -1175,10 +1179,13 @@ function refuseJournalConditions(table: string, parsed: ParsedQuery, resolved: M
 function warnAboutEmptyFields(parsed: ParsedQuery, resolved: Map<string, Column>, warnings: string[]): void {
   const asked = parsed.conditions.filter(({ operator, value }) => operator === 'ISEMPTY' || (operator === '=' && (value === '' || value === 'NULL')))
   // Only where it is joined to the condition with ^OR. In another part of the query it adds nothing to this one.
-  const covered = ({ field, group }: Condition) => asked.some((empty) => empty.group === group && (field === empty.field || field.startsWith(`${empty.field}.`)))
-  const skipping = parsed.conditions.filter((condition) => SKIPS_EMPTY.has(condition.operator) && !asksIfFilled(condition) && !covered(condition) && resolved.get(condition.field)?.type !== 'boolean')
+  const covered = (group: number, field: string) => asked.some((empty) => empty.group === group && (field === empty.field || field.startsWith(`${empty.field}.`)))
+  // "Is different from another field" leaves out the rows where either of the two is empty, so each is looked at.
+  const skipping = parsed.conditions
+    .filter((condition) => SKIPS_EMPTY.has(condition.operator) && !asksIfFilled(condition) && resolved.get(condition.field)?.type !== 'boolean')
+    .flatMap(({ field, operator, second, group }) => (operator === 'NSAMEAS' && second ? [field, second] : [field]).filter((name) => !covered(group, name)).map((name) => ({ field: name, operator })))
   if (!skipping.length) return
-  const fields = [...new Set(skipping.flatMap(({ field, operator, second }) => (operator === 'NSAMEAS' && second ? [field, second] : [field])))]
+  const fields = [...new Set(skipping.map(({ field }) => field))]
   const operators = [...new Set(skipping.map(({ operator }) => `"${operator}"`))]
   warnings.push(
     `${operators.join(', ')} ${operators.length === 1 ? 'leaves' : 'leave'} out rows where the field is empty (${fields.join(', ')}). ` +
