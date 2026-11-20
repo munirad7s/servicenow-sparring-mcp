@@ -101,6 +101,8 @@ export interface Condition {
   field: string
   operator: string
   value: string
+  /** The field on the other side, where the operator compares two fields. */
+  second?: string
 }
 
 export interface ParsedQuery {
@@ -109,6 +111,8 @@ export interface ParsedQuery {
   conditions: Condition[]
   /** The fields the query sorts by, and the second field of a comparison between two fields. */
   otherFields: string[]
+  /** The fields the query sorts by. */
+  sorts: string[]
   /** true if the query contains "^^", a literal ^ inside a value. */
   escapedCaret: boolean
 }
@@ -199,7 +203,7 @@ function splitTerms(query: string): string[] {
  * checked against the dictionary.
  */
 export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
-  const parsed: ParsedQuery = { fields: [], conditions: [], otherFields: [], escapedCaret: false }
+  const parsed: ParsedQuery = { fields: [], conditions: [], otherFields: [], sorts: [], escapedCaret: false }
   if (!query) return parsed
 
   if (query.length > MAX_QUERY_LENGTH) throw validation(`The query is longer than ${MAX_QUERY_LENGTH} characters.`, table)
@@ -230,6 +234,7 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
       if (!FIELD_PATH.test(sort[2])) throw unsupported(raw, `${sort[1]} needs a field name`)
       parsed.fields.push(inDictionary(sort[2], raw))
       parsed.otherFields.push(sort[2])
+      parsed.sorts.push(sort[2])
       continue
     }
 
@@ -256,8 +261,8 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
     const value = rest.slice(operator.length)
 
     parsed.fields.push(field)
-    parsed.conditions.push({ field, operator, value })
     const second = checkValue(operator, value, (why) => unsupported(raw, why))
+    parsed.conditions.push({ field, operator, value, ...(second ? { second } : {}) })
     if (second) {
       parsed.fields.push(inDictionary(second, raw))
       parsed.otherFields.push(second)
@@ -266,6 +271,7 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
 
   parsed.fields = [...new Set(parsed.fields)]
   parsed.otherFields = [...new Set(parsed.otherFields)]
+  parsed.sorts = [...new Set(parsed.sorts)]
   return parsed
 }
 

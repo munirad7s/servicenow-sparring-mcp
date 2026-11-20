@@ -120,10 +120,12 @@ provider, the data leaves your network. Four things limit what can go that way:
 - **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
   away from the server: it does not ask for them, a query cannot reach them through a dot-walk, a child table or a
   database view, and the names behind references into them are left out, for single references and for lists.
-  Where the type of a field cannot be read, its display value is left out as well. `SERVICENOW_TABLE_ALLOW` names
-  the only tables whose rows it may read. A name can end in `*`. A closed table is reported as "could not be
-  checked". What the dictionary says about a closed table (its fields, what is attached to it) can still be read,
-  and the other functions read a fixed set of configuration tables, which `npm run doctor` lists.
+  Such a reference can be compared with a sys_id, but not with text and not sorted by, because both work on the
+  names. Where the type of a field cannot be read, its display value is left out as well.
+  `SERVICENOW_TABLE_ALLOW` names the only tables whose rows it may read. A name can end in `*`. A closed table is
+  reported as "could not be checked". What the dictionary says about a closed table (its fields, what is attached
+  to it) can still be read, and the other functions read a fixed set of configuration tables, which
+  `npm run doctor` lists.
 
 Record content that comes back (names, descriptions, scripts, error texts) is data from the instance. The server
 tells the agent to treat it as data, never as an instruction, and it cuts long values. It cannot make an agent obey.

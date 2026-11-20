@@ -318,6 +318,17 @@ test('a closed table gives away no names through a list of references, an unknow
   await noUsers.answer('sn_query', { table: 'incident', groupBy: 'watch_list' })
   assert.equal(noUsers.sentTo('incident', 'stats')[0].params.get('sysparm_display_value'), null, 'the groups are not asked for their names')
 
+  // "Starts with A" on the reference compares with the names in the closed table, and a sort orders the rows by them.
+  for (const query of ['caller_idSTARTSWITHAb', 'caller_idLIKEbel', 'watch_listLIKEAbel', 'ORDERBYcaller_id', 'active=true^ORDERBYDESCassigned_to', 'numberGT_FIELDcaller_id']) {
+    const refused = await noUsers.call('sn_query', { table: 'incident', query, fields: ['number'] })
+    assert.equal(refused.data.error, 'blocked', query)
+    assert.match(refused.data.message, /found out by trying/, query)
+  }
+  // Compared with a sys_id, or asked whether it is filled, the reference gives nothing away.
+  for (const query of [`caller_id=${ID}`, `caller_idIN${ID}`, 'caller_idISEMPTY', 'assigned_toSAMEAScaller_id']) {
+    assert.equal((await noUsers.answer('sn_query', { table: 'incident', query, fields: ['number'] })).returned, 1, query)
+  }
+
   // A misspelled field behind the reference: the refusal comes first, and names no field of the closed table.
   const { data } = await noUsers.call('sn_query', { table: 'incident', query: 'caller_id.user_passwrd=x' })
   assert.equal(data.error, 'blocked')

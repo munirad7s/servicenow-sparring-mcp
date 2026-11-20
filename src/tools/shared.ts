@@ -23,6 +23,12 @@ export const LOOKS_SECRET = /passw(or)?d|passphrase|secret|token|credential|priv
 
 /** Operators that only ask whether a field is filled. They say nothing about what it holds. */
 const ASKS_IF_FILLED = new Set(['ISEMPTY', 'ISNOTEMPTY', 'ISEMPTYSTRING', 'ANYTHING'])
+/**
+ * Operators that compare a reference with a sys_id, or ask nothing about its content. Measured: LIKE and STARTSWITH
+ * on a reference match the name of the record behind it, and a sort orders by that name. Every operator not listed
+ * here is treated like those.
+ */
+const COMPARES_IDS = new Set(['=', '!=', 'IN', 'NOT IN', 'SAMEAS', 'NSAMEAS', ...ASKS_IF_FILLED])
 /** Measured: these leave out the rows where the field is empty. */
 const SKIPS_EMPTY = new Set(['!=', 'NOT IN', 'NOT LIKE'])
 /** A system property says by its type whether its value is a secret. Rows without a type stay in. */
@@ -173,6 +179,24 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
  * Returns the query to send.
  */
 async function keepSecretsOutOfReach(ctx: Context, table: string, query: string, parsed: ParsedQuery, resolved: Map<string, Column>, warnings: string[]): Promise<string> {
+  // The names of the records in a closed table are kept back from the answer. "Starts with A" on a reference into
+  // that table compares with those names, and sorting by the reference orders the rows by them.
+  if (ctx.sn.restricted) {
+    const closedBehind = (field: string) => {
+      const target = resolved.get(field)?.reference
+      return target && !ctx.sn.allows(target) ? target : null
+    }
+    const byName = [...parsed.conditions.filter(({ operator }) => !COMPARES_IDS.has(operator)).flatMap(({ field, second }) => (second ? [field, second] : [field])), ...parsed.sorts].find(closedBehind)
+    if (byName) {
+      throw new ServiceNowError(
+        `"${byName}" points into ${closedBehind(byName)}, which is closed on this machine. Comparing it with text or sorting by it works on the names of the records there, ` +
+          'so those names could be found out by trying. Compare it with a sys_id (=, IN) or ask whether it is filled. Nothing was sent.',
+        'blocked',
+        table,
+      )
+    }
+  }
+
   const compared = new Set([...parsed.otherFields, ...parsed.conditions.filter(({ operator }) => !ASKS_IF_FILLED.has(operator)).map(({ field }) => field)])
   if (!compared.size) return query
 

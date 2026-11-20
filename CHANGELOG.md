@@ -140,7 +140,8 @@ measurements.
   empty, and through a database view whose dictionary could not be read.
 - With tables closed on the machine, the names behind a list of references into a closed table were passed on, and
   so were display values of fields whose type could not be read. A hint about a misspelled field named fields of a
-  closed table.
+  closed table. A reference into a closed table could be compared with text or sorted by, which works on the names
+  of the records there.
 - A field to count by that could not be verified was sent to the Aggregate API when no row was visible to check
   it against.
 - A token renewed between two rejected requests was not tried for a minute, because the pause after the first

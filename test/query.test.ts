@@ -198,6 +198,7 @@ test('conditions are returned with operator and value', () => {
     { field: 'priority', operator: 'IN', value: '1,2' },
     { field: 'short_description', operator: 'LIKE', value: 'a^b' },
   ])
+  assert.deepEqual(parseEncodedQuery('closed_atMORETHANopened_at@hour@after@4').conditions, [{ field: 'closed_at', operator: 'MORETHAN', value: 'opened_at@hour@after@4', second: 'opened_at' }])
   assert.equal(parsed.escapedCaret, true)
   assert.equal(parseEncodedQuery('active=true').escapedCaret, false)
 })
@@ -205,6 +206,7 @@ test('conditions are returned with operator and value', () => {
 test('the fields a query sorts by or compares with are listed apart', () => {
   const parsed = parseEncodedQuery('active=true^closed_atGT_FIELDdue_date^opened_atSAMEASresolved_at@day^ORDERBYDESCnumber')
   assert.deepEqual(parsed.otherFields, ['due_date', 'resolved_at', 'number'])
+  assert.deepEqual(parsed.sorts, ['number'])
   assert.deepEqual(parseEncodedQuery('active=true').otherFields, [])
 })
 

@@ -96,6 +96,8 @@ Also measured:
 - `^EQ` in the middle of a query does not end it: conditions behind it still apply.
 - A `GOTO` in front of a condition, as the list search writes it, changes nothing.
 - `LIKE` and `STARTSWITH` on a reference field match its display value. `=` and `IN` compare with the sys_id.
+  `ORDERBY` on a reference sorts by the display value. Where the referenced table is closed on the machine that
+  runs the server, the server therefore refuses a text comparison with the reference, and a sort by it.
 - A string is compared without regard to case: `category=Inquiry` finds `inquiry`.
 - `ref_<child table>.<field>` on a parent table reaches a field of the child table.
 - `=` without a value is applied as "is empty", and `!=` without a value as "is not empty", on text, reference,
