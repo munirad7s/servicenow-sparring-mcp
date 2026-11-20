@@ -334,9 +334,9 @@ many. The npm scripts do not write it.
   closed, what a table is a child or a parent of, and that the instance applies the conditions it relies on.
   Measured on a fresh server with one table closed: 27 requests for the first query on its parent, then 1 for the
   next and 6 for the first on another table; 3 of the 27 list the tables below the closed one where there are
-  1,348 of them. With a list of the only tables that may be read, a first `sn_instance` took 153 requests with
-  three entries on the list and 169 with eleven, in eleven seconds, and a second one about 40; with no table
-  closed it takes 51. A read with display values asks, once in ten
+  1,348 of them. With a list of the only tables that may be read, a first `sn_instance` took 156 requests with
+  three entries on the list and 172 with eleven, in eleven to nineteen seconds, and a second one about 40; with
+  no table closed it takes 52. A read with display values asks, once in ten
   minutes, what the tables behind its references are and what a row of each shows as its name: three requests
   for up to forty tables as a rule, and more where their names are long or they have parents that are read as
   well. Measured with users closed, the first read of twenty incidents with display values
