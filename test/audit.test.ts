@@ -35,12 +35,14 @@ test('the lines of the audit log stand in the order of the requests', async () =
   const dir = mkdtempSync(join(tmpdir(), 'sparring-audit-'))
   try {
     const path = join(dir, 'audit.jsonl')
-    const { sn } = fakeInstance([{ table: 'incident', rows: [] }], {}, auditWriter(path))
-    for (let index = 0; index < 40; index++) await sn.query({ table: 'incident', query: `priority=${index}` })
-    await until(() => existsSync(path) && readFileSync(path, 'utf8').trim().split('\n').length === 40)
+    // Three hundred lines handed over at once, of very different length: written each on its own, they would overtake one another.
+    const write = auditWriter(path)
+    const entry = (index: number) => ({ time: '', tool: null, api: 'table' as const, table: 'incident', query: `priority=${index}^${'x'.repeat((index % 7) * 3_000)}`, fields: null, status: 200, sent: 1, rows: 0, total: 0, ms: 0 })
+    for (let index = 0; index < 300; index++) write(entry(index))
+    await until(() => existsSync(path) && readFileSync(path, 'utf8').trim().split('\n').length === 300)
 
-    const queries = readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line).query)
-    assert.deepEqual(queries, Array.from({ length: 40 }, (_, index) => `priority=${index}`))
+    const order = readFileSync(path, 'utf8').trim().split('\n').map((line) => Number(/^priority=(\d+)/.exec(JSON.parse(line).query)?.[1]))
+    assert.deepEqual(order, Array.from({ length: 300 }, (_, index) => index))
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }

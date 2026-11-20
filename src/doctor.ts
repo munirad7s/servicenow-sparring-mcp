@@ -10,19 +10,22 @@ import { loadSettings } from './config.js'
 import { accountRoles, probe, SOURCES } from './tools/instance.js'
 import { errorKind, mapLimit, NO_CONNECTION } from './tools/shared.js'
 
-export async function runDoctor(): Promise<void> {
+/**
+ * Prints what it finds and returns the exit code: 1 if the instance cannot be used or no source is readable.
+ * Called without a client, it reads the settings of the person who runs it.
+ */
+export async function runDoctor(given?: ServiceNowClient, print: (line: string) => void = console.log): Promise<number> {
   // Run by a person in a folder they chose, so a .env there may be used.
-  const config = loadSettings(process.env, process.cwd(), { cwdFile: true })
-  const sn = new ServiceNowClient(config)
-  console.log(`Checking ${sn.host}${config.envFile ? `, settings from ${config.envFile}` : ''}\n`)
+  const config = given ? null : loadSettings(process.env, process.cwd(), { cwdFile: true })
+  const sn = given ?? new ServiceNowClient(config!)
+  print(`Checking ${sn.host}${config?.envFile ? `, settings from ${config.envFile}` : ''}\n`)
 
   // One request first. A wrong password or address should fail once, not once per table.
   const first = await probe(sn, SOURCES[0].table)
   if (NO_CONNECTION.has(first.status)) {
-    console.log(`The instance cannot be used: ${first.error instanceof Error ? first.error.message : first.status}`)
-    console.log('Check the address and the login. For a certificate or proxy problem see "Proxies and certificates" in the README.')
-    process.exitCode = 1
-    return
+    print(`The instance cannot be used: ${first.error instanceof Error ? first.error.message : first.status}`)
+    print('Check the address and the login. For a certificate or proxy problem see "Proxies and certificates" in the README.')
+    return 1
   }
 
   const others = await mapLimit(SOURCES.slice(1), 4, async (item) => ({ ...item, ...(await probe(sn, item.table)) }))
@@ -30,14 +33,14 @@ export async function runDoctor(): Promise<void> {
   const width = Math.max(...results.map((result) => result.table.length))
   for (const result of results) {
     const mark = result.status === 'readable' ? 'ok ' : 'NO '
-    console.log(`${mark} ${result.table.padEnd(width)}  ${result.status.padEnd(16)} ${result.usedBy}`)
+    print(`${mark} ${result.table.padEnd(width)}  ${result.status.padEnd(16)} ${result.usedBy}`)
   }
   const closed = results.filter((result) => result.status !== 'readable')
-  console.log(`\n${results.length - closed.length} of ${results.length} sources readable.`)
-  if (closed.length) console.log('Tools that depend on a closed source report that part as "could not be checked".')
+  print(`\n${results.length - closed.length} of ${results.length} sources readable.`)
+  if (closed.length) print('Tools that depend on a closed source report that part as "could not be checked".')
 
-  console.log('\nBeyond the tables:')
-  const line = (label: string, text: string) => console.log(`  ${label.padEnd(34)} ${text}`)
+  print('\nBeyond the tables:')
+  const line = (label: string, text: string) => print(`  ${label.padEnd(34)} ${text}`)
 
   // The row is taken by its name, not by its place: an ignored condition would hand back some other property.
   const release = await sn
@@ -69,10 +72,10 @@ export async function runDoctor(): Promise<void> {
       : `${account.roles} roles, admin: ${account.admin ? 'yes' : 'no'}, snc_read_only: ${account.readOnlyRole ? 'yes' : 'NO'}`,
   )
   if (account && !account.readOnlyRole) {
-    console.log('\nThis account does not have the role snc_read_only. The server only ever reads, but the instance itself')
-    console.log('would accept a write from this account. With a read-only account the instance enforces the promise too.')
+    print('\nThis account does not have the role snc_read_only. The server only ever reads, but the instance itself')
+    print('would accept a write from this account. With a read-only account the instance enforces the promise too.')
   }
 
-  console.log(`\n${sn.requestCount} requests, all GET.`)
-  if (closed.length === results.length) process.exitCode = 1
+  print(`\n${sn.requestCount} requests, all GET.`)
+  return closed.length === results.length ? 1 : 0
 }

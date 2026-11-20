@@ -297,6 +297,16 @@ test('a token renewed during the pause after a rejected login is used at once', 
   assert.equal((await sn.query({ table: 'incident' })).records.length, 0)
 })
 
+test('after a rejected login the client stays quiet for a minute', async () => {
+  const { sn, calls } = fakeInstance([{ table: 'incident', status: 401 }])
+  const started = Date.now()
+  assert.equal(await kindOf(() => sn.query({ table: 'incident' })), 'auth')
+  const until = (sn as unknown as { paused: { until: number } }).paused.until
+  assert.ok(until >= started + 59_000 && until <= Date.now() + 60_000, 'the pause ends a minute after the rejection')
+  assert.equal(await kindOf(() => sn.query({ table: 'incident' })), 'auth')
+  assert.equal(calls.length, 1)
+})
+
 test('a token renewed between two rejections is tried, and ends the pause', async () => {
   let token = 'old'
   let valid = 'old'

@@ -5,6 +5,8 @@ export interface Route {
   table: string
   /** Text the sysparm_query must contain. Omit to match any query. */
   query?: string
+  /** The whole sysparm_query, where a part of it is not proof enough. */
+  exact?: string
   /** The sysparm_group_by a request to the Aggregate API must carry. Omit to match any. */
   groupBy?: string
   /** A null stands for a row that matches but is hidden from the account: counted in the total, never returned. */
@@ -71,6 +73,7 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
         candidate.table === table &&
         (candidate.api ?? 'table') === api &&
         (candidate.query === undefined || query.includes(candidate.query)) &&
+        (candidate.exact === undefined || query === candidate.exact) &&
         (candidate.groupBy === undefined || parsed.searchParams.get('sysparm_group_by') === candidate.groupBy),
     )
     const json = (body: unknown, status: number, headers: Record<string, string> = {}) =>
@@ -82,7 +85,17 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     if (status !== 200) return json({ error: ERRORS[status] ?? { message: `HTTP ${status}`, detail: '' }, status: 'failure' }, status)
 
     const rows = route.rows ?? []
-    if (api === 'stats') return json({ result: rows }, 200)
+    if (api === 'stats') {
+      // Like the Aggregate API: a group carries its label only when display values were asked for.
+      const labelled = parsed.searchParams.get('sysparm_display_value') === 'all'
+      const groups = rows
+        .filter((row): row is Row => row !== null)
+        .map((row) => {
+          const fields = (row as { groupby_fields?: Array<Record<string, unknown>> }).groupby_fields
+          return labelled || !Array.isArray(fields) ? row : { ...row, groupby_fields: fields.map(({ display_value: _label, ...rest }) => rest) }
+        })
+      return json({ result: groups }, 200)
+    }
 
     const offset = Number(parsed.searchParams.get('sysparm_offset') ?? 0)
     const limit = Number(parsed.searchParams.get('sysparm_limit') ?? 10_000)

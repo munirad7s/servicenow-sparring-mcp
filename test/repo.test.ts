@@ -36,6 +36,8 @@ test('the source contains exactly one HTTP method, and it is GET', () => {
   // Other ways to name a method: a quoted verb, a quoted key, an assignment, a shorthand property, a Request object.
   const otherways = /['"`](POST|PUT|PATCH)['"`]|['"`]method['"`]\s*:|\.method\s*=|[{,]\s*method\s*[,}]|\bnew\s+Request\s*\(/
   assert.deepEqual(sourceFiles.filter((path) => otherways.test(read(path))), [])
+  // The file that talks to the network names no other verb at all, also not as a plain word in a string.
+  assert.doesNotMatch(read('src/client.ts'), /['"`](DELETE|HEAD|OPTIONS|POST|PUT|PATCH)['"`]/)
 })
 
 test('only the client talks to the network, and only through fetch', () => {

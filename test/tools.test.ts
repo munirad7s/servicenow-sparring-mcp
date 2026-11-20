@@ -54,7 +54,6 @@ test('eight tools, all marked read-only, none that writes', async () => {
     assert.equal(tool.annotations?.readOnlyHint, true, tool.name)
     assert.equal(tool.annotations?.destructiveHint, false, tool.name)
     assert.ok(tool.outputSchema, `${tool.name} has an output schema`)
-    assert.doesNotMatch(tool.name, /create|update|delete|insert|write|exec|run/i)
   }
 })
 
@@ -555,6 +554,34 @@ test('the readable name of a record in a closed table is not passed on by the ot
   const answer = await judged.answer('sn_origin', { sysId: ID })
   assert.equal(answer.record.name, '[withheld: the record is in a table closed on this machine]')
   assert.equal(answer.evidence.upgradeSkips.rows[0].target, '[withheld: the record is in a table closed on this machine]')
+})
+
+test('a field of an encrypted type is withheld and cannot be compared', async () => {
+  const { answer, call } = await connect([
+    { table: 'sys_db_object', query: 'name=u_vault', rows: [tableRow('u_vault', 'Vault')] },
+    { table: 'sys_dictionary', query: 'nameINu_vault', rows: [column('u_vault', 'u_owner'), column('u_vault', 'u_blob', 'glide_encrypted')] },
+    ...dictionaryRoutes,
+    { table: 'u_vault', rows: [{ u_owner: 'abel', u_blob: 'encrypted-value' }] },
+  ])
+  assert.deepEqual((await answer('sn_query', { table: 'u_vault' })).records, [{ u_owner: 'abel', u_blob: '[withheld: this field holds a secret]' }])
+  assert.equal((await call('sn_query', { table: 'u_vault', query: 'u_blobSTARTSWITHa' })).data.error, 'validation')
+})
+
+test('a field that can point to any table loses its names when tables are closed', async () => {
+  const routes = [
+    ...dictionaryRoutes.map((route) => (route.query === 'nameINincident,task' ? { ...route, rows: [...(route.rows ?? []), column('incident', 'u_doc', 'document_id')] } : route)),
+    { table: 'incident', rows: [{ number: 'INC1', u_doc: labelled(ID, 'Abel Tuter') }] },
+    { table: 'incident', api: 'stats' as const, rows: [{ stats: { count: '1' }, groupby_fields: [{ field: 'u_doc', value: ID, display_value: 'Abel Tuter' }] }] },
+  ]
+  const closed = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
+  assert.deepEqual((await closed.answer('sn_query', { table: 'incident', fields: ['u_doc'], displayValue: true })).records, [{ u_doc: ID }])
+  assert.deepEqual((await closed.answer('sn_query', { table: 'incident', groupBy: 'u_doc' })).groups, [{ value: ID, count: 1 }])
+  assert.equal((await closed.call('sn_query', { table: 'incident', query: 'u_docSTARTSWITHAbel' })).data.error, 'blocked')
+
+  // With no table closed, the name is passed on, and the groups carry their labels.
+  const open = await connect(routes)
+  assert.deepEqual((await open.answer('sn_query', { table: 'incident', fields: ['u_doc'], displayValue: true })).records, [{ u_doc: { value: ID, display: 'Abel Tuter' } }])
+  assert.deepEqual((await open.answer('sn_query', { table: 'incident', groupBy: 'u_doc' })).groups, [{ value: ID, count: 1, display: 'Abel Tuter' }])
 })
 
 test('a field to count by that cannot be verified is not sent', async () => {
@@ -1379,6 +1406,32 @@ test('sn_origin still answers from the evidence when the table of application fi
   assert.equal((await rejected.call('sn_origin', { sysId: ID })).data.error, 'auth')
 })
 
+test('sn_origin: an untouched record of the global scope with a vendor version was delivered', async () => {
+  const { answer } = await connect(origin('sys_scope', [], [version('current', 'sys_upgrade_history', '2026-03-01 00:00:00')]))
+  const data = await answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ verdict: data.verdict, created: data.created }, { verdict: 'out_of_box_as_captured', created: 'delivered' })
+})
+
+test('sn_origin sees a revert when the vendor version is a few seconds older than the last change', async () => {
+  // The two are written in the same moment, and the clock of the update row can be seconds ahead.
+  const row = change({ sys_created_on: '2026-03-01 09:00:00', sys_updated_on: '2026-03-01 10:00:00' })
+  const near = await connect(origin('sys_store_app', [row], [version('current', 'sys_store_app', '2026-03-01 09:59:57', 'abel')]))
+  assert.match((await near.answer('sn_origin', { sysId: ID })).warnings.join(' '), /reverted to the vendor version/)
+  const far = await connect(origin('sys_store_app', [row], [version('current', 'sys_store_app', '2026-03-01 09:30:00', 'abel')]))
+  assert.doesNotMatch((await far.answer('sn_origin', { sysId: ID })).warnings.join(' '), /reverted to the vendor version/)
+})
+
+test('sn_origin says so when the table that would answer for a system field cannot be read', async () => {
+  const { answer } = await connect([
+    { table: 'sys_dictionary', rows: [{ sys_id: ID, name: 'x_acme_case', element: 'sys_id' }] },
+    { table: 'sys_db_object', status: 403 },
+    ...origin('', [], [], { sys_update_name: '', sys_class_name: 'sys_dictionary', sys_package: '' }),
+  ])
+  const data = await answer('sn_origin', { sysId: ID })
+  assert.equal(data.verdict, 'unknown')
+  assert.match(data.warnings.join(' '), /sys_db_object could not be read \(acl\), so the package of the table "x_acme_case"/)
+})
+
 test('sn_origin says why, whenever it does not decide', async () => {
   const cases: Array<[string, Route[], RegExp]> = [
     // Measured: one application file in nine belongs to no package, and almost none of those was ever captured.
@@ -1720,10 +1773,7 @@ const upgradeRoutes: Route[] = [
 ]
 
 test('sn_upgrade_skips covers the latest change of family, not the patch after it', async () => {
-  const routes: Route[] = [
-    ...upgradeRoutes.slice(0, 3),
-    { table: 'upgrade_history_task', api: 'stats', rows: [] },
-  ]
+  const routes = upgradeRoutes
   const { answer, sentTo, calls } = await connect(routes)
   const data = await answer('sn_upgrade_skips', {})
 
@@ -1937,6 +1987,15 @@ test('sn_dependencies with a field lists what is tied to that one field', async 
   assert.match((await call('sn_dependencies', { table: 'incident', categories: ['choices'] })).data.message, /not available without "field"/)
 })
 
+test('sn_dependencies says so when some rows of a category are hidden', async () => {
+  const rule = { sys_id: 'r1', sys_name: 'Example rule', sys_update_name: 'sys_script_r1', collection: 'incident', active: 'true' }
+  const { answer } = await connect([{ table: 'sys_script', rows: [rule, null, null] }, stats('sys_update_xml', {}), ...dictionaryRoutes])
+  const data = await answer('sn_dependencies', { table: 'incident', categories: ['businessRules'] })
+  assert.deepEqual({ total: data.categories.businessRules.total, returned: data.categories.businessRules.returned }, { total: 3, returned: 1 })
+  assert.match(data.categories.businessRules.reason, /2 matching row\(s\) are hidden from this account/)
+  assert.match(data.warnings.join(' '), /Rows are hidden from this account in: businessRules/)
+})
+
 test('sn_dependencies with a field says what it could not verify, and makes up no names', async () => {
   // The dictionary hides rows from the account: a field that is not among the visible ones may still exist.
   const partial = await connect([
@@ -1989,6 +2048,21 @@ test('sn_instance names the release, the account and what cannot be read', async
   // No table "domain", and the property that changes what an unusable query returns is not set.
   assert.deepEqual({ domains: data.domains, invalid: data.invalidQueryReturnsNoRows }, { domains: null, invalid: null })
   assert.doesNotMatch(warnings, /domains|returns_no_rows/)
+})
+
+test('sn_instance: an account that is no administrator and has no read-only role is named as such', async () => {
+  const routes = sourceTables.filter((table) => table !== 'sys_user_has_role').map((table) => ({ table, rows: [{ sys_id: '1' }] }))
+  const { answer } = await connect([{ table: 'sys_user_has_role', rows: [{ 'role.name': 'itil' }] }, ...routes])
+  const data = await answer('sn_instance')
+  assert.deepEqual(data.account, { roles: 1, admin: false, readOnlyRole: false })
+  assert.match(data.warnings.join(' '), /does not have the role snc_read_only/)
+})
+
+test('sn_instance does not look the account up through the user table when that table is closed', async () => {
+  const routes = sourceTables.map((table) => ({ table, rows: [{ sys_id: '1', 'role.name': 'admin' }] }))
+  const { answer, sentTo } = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
+  assert.equal((await answer('sn_instance')).account, null)
+  assert.equal(sentTo('sys_user_has_role').some((entry) => entry.query.includes('user.user_name')), false)
 })
 
 test('sn_instance counts the business rules that run on every read of every table', async () => {

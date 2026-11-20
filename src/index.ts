@@ -24,7 +24,10 @@ async function main() {
   const [command] = process.argv.slice(2)
   if (command === '--version' || command === '-v') return console.log(VERSION)
   if (command === '--help' || command === '-h') return console.log(USAGE)
-  if (command === 'doctor') return runDoctor()
+  if (command === 'doctor') {
+    process.exitCode = await runDoctor()
+    return
+  }
   if (command) throw new Error(`Unknown command "${command}". Try --help.`)
 
   const config = loadSettings()

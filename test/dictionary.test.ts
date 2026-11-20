@@ -128,6 +128,15 @@ test('the dictionary is read once per table', async () => {
   assert.equal(calls.length, after)
 })
 
+test('a miss is not looked up again within half a minute', async () => {
+  const { sn, calls } = fakeInstance(dictionaryRoutes)
+  const dict = new Dictionary(sn)
+  assert.equal((await dict.checkFields('incident', ['u_late'])).unknown.length, 1)
+  const before = calls.length
+  assert.equal((await dict.checkFields('incident', ['u_late'])).unknown.length, 1)
+  assert.equal(calls.length, before, 'the entry is younger than the time after which a miss is checked again')
+})
+
 test('a field created during a session is found: a miss is looked up again', async () => {
   const routes = [...dictionaryRoutes]
   const { sn } = fakeInstance(routes)

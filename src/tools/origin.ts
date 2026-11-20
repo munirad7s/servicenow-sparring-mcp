@@ -469,7 +469,10 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             const owner = await sn
               .query<Row>({ table: 'sys_db_object', query: `name=${table}`, fields: ['sys_package', 'sys_package.sys_class_name'], limit: 1, display: true })
               .then((page) => (page.records[0] ? tidy(page.records[0]) : null))
-              .catch(() => null)
+              .catch((error) => {
+                warnings.push(`sys_db_object could not be read (${errorKind(error)}), so the package of the table "${table}", which would answer for this entry, is not known.`)
+                return null
+              })
             if (owner && rawOf(owner['sys_package.sys_class_name'])) {
               packageClass = rawOf(owner['sys_package.sys_class_name'])
               packageName = labelOf(owner.sys_package)
