@@ -86,6 +86,16 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     return cleaned
   }
 
+  /** Says so when business rules run on every read of the table: what comes back is then what they let this account see. */
+  async function warnAboutQueryRules(table: string, warnings: string[]): Promise<void> {
+    const rules = await ctx.dict.queryRules(table).catch(() => null)
+    if (!rules?.count) return
+    warnings.push(
+      `${rules.count} business rule${rules.count === 1 ? ' runs' : 's run'} on every read of this table ("before query") and can hide rows depending on who asks: ` +
+        `rows and total are what ${rules.count === 1 ? 'it lets' : 'they let'} this account see. To read ${rules.count === 1 ? 'it' : 'them'}: sys_script, ${rules.query}.`,
+    )
+  }
+
   /** Rows per value of one field, through the Aggregate API. An unknown field would be ignored there too, and counted as one group. */
   async function countPerValue(table: string, query: string, groupBy: string, limit: number) {
     const guard = await guardFields(ctx, table, query, [], groupBy)
@@ -104,8 +114,10 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     const labels = !(intoClosed || (ctx.sn.restricted && (!column || column.type === 'document_id')))
     const groups = (await ctx.sn.groupCount(table, groupBy, guard.query, labels)).sort((a, b) => b.count - a.count)
     const shown = groups.slice(0, limit)
+    const warnings = [...guard.warnings]
+    await warnAboutQueryRules(table, warnings)
     return ok({
-      ...source(ctx.sn, [...guard.warnings]),
+      ...source(ctx.sn, warnings),
       table,
       query: guard.query,
       total: groups.reduce((sum, group) => sum + group.count, 0),
@@ -203,6 +215,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         if (page.total === 0 && guard.parsed.conditions.length) {
           warnings.push(...(await explainEmpty(ctx, table, guard).catch(() => [])))
         }
+        await warnAboutQueryRules(table, warnings)
 
         const records = clip(rows, warnings)
         return ok({ ...listing(ctx.sn, page, warnings, records.length), fieldCheck: guard.fieldCheck, records })

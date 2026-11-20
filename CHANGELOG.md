@@ -5,6 +5,12 @@ answer; such changes are listed under "Changed".
 
 ## 0.3.1 (2026-11-20)
 
+### Added
+
+- `sn_query` says when business rules run on every read of the queried table. Such a "before query" rule can hide
+  rows depending on who asks, and the total counts only what it lets through. Measured: 183 active rules of that
+  kind on one instance, among them two that apply to incident and ten that apply to customer service cases.
+
 ### Fixed
 
 - When the instance refuses a request because of one field in it, the hint said the table could not be read.

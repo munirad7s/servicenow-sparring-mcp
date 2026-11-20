@@ -90,6 +90,7 @@ export class Dictionary {
   private readonly columnSets = new Map<string, Entry<ColumnSet | null>>()
   private readonly choiceLists = new Map<string, Entry<Choice[]>>()
   private readonly labelSets = new Map<string, Entry<Map<string, string>>>()
+  private readonly ruleCounts = new Map<string, Entry<{ count: number; query: string } | null>>()
 
   constructor(
     private readonly sn: ServiceNowClient,
@@ -274,6 +275,23 @@ export class Dictionary {
       return records
         .filter((row) => row.name === owner && typeof row.value === 'string')
         .map((row) => ({ value: row.value, label: String(row.label ?? '') }))
+    })
+  }
+
+  /**
+   * The active business rules that run on every read of a table ("before query"). Such a rule can add conditions
+   * that depend on who asks, so the rows and the total an account gets are what the rule lets through. Rules on a
+   * parent table and on the table "global" run for the table too. null for a database view or an unknown table.
+   */
+  async queryRules(table: string): Promise<{ count: number; query: string } | null> {
+    const info = await this.table(table)
+    if (!info || info.kind === 'database_view') return null
+    return this.cached(this.ruleCounts, table, async () => {
+      const query = `collectionIN${[...info.chain, 'global'].join(',')}^action_query=true^active=true`
+      const page = await this.sn.query<Record<string, string>>({ table: 'sys_script', query, fields: ['sys_id', 'action_query'], limit: 1 })
+      // The answer checks its own query: a row without the field means the instance does not know it and ignored the condition.
+      if (page.total === null || (page.records[0] && !('action_query' in page.records[0]))) return null
+      return { count: page.total, query }
     })
   }
 

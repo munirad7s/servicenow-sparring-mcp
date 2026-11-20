@@ -86,7 +86,30 @@ test('sn_query answers with the query, the total, the cost and where to continue
   assert.equal(data.truncated, true)
   assert.equal(data.nextOffset, 2)
   assert.equal(data.fieldCheck, 'all field names verified against sys_dictionary')
-  assert.equal(data.requests, 5)
+  // Four to check the names, one to ask for rules that run on every read, one for the rows.
+  assert.equal(data.requests, 6)
+})
+
+test('sn_query says when business rules run on every read of the table', async () => {
+  // Measured: 183 such rules on one instance. They add conditions that depend on who asks.
+  const rules = (rows: Array<Record<string, string>>, total = rows.length): Route => ({ table: 'sys_script', query: 'action_query=true', rows, total })
+  const incident = { table: 'incident', rows: [{ number: 'INC1' }] }
+
+  const { answer, sentTo } = await connect([rules([{ sys_id: 'r1', action_query: 'true' }], 2), ...dictionaryRoutes, incident, stats('incident', { '1': 1 })])
+  const data = await answer('sn_query', { table: 'incident', fields: ['number'] })
+  assert.match(data.warnings.join(' '), /2 business rules run on every read of this table.*what they let this account see.*sys_script, collectionINincident,task,global\^action_query=true\^active=true/)
+  // Counting is a read too. The rules of a table are asked for once, not with every query.
+  assert.match((await answer('sn_query', { table: 'incident', groupBy: 'state' })).warnings.join(' '), /2 business rules run on every read/)
+  assert.equal(sentTo('sys_script').length, 1)
+
+  const none = await connect([rules([]), ...dictionaryRoutes, incident])
+  assert.deepEqual((await none.answer('sn_query', { table: 'incident', fields: ['number'] })).warnings, [])
+
+  // Not readable, or the instance does not know the field that marks such a rule: nothing is claimed.
+  for (const route of [{ table: 'sys_script', status: 403 }, rules([{ sys_id: 'r1' }], 500)]) {
+    const blind = await connect([route, ...dictionaryRoutes, incident])
+    assert.deepEqual((await blind.answer('sn_query', { table: 'incident', fields: ['number'] })).warnings, [])
+  }
 })
 
 test('sn_query says when rows matched but were withheld from this account', async () => {
