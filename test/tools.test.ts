@@ -2970,6 +2970,30 @@ test('through a database view the value of a system property can be neither comp
   const blind = await connect([...view, { table: 'sys_dictionary', status: 403 }, ...dictionaryRoutes, { table: 'u_property_view', rows }])
   const data = await blind.answer('sn_query', { table: 'u_property_view' })
   assert.deepEqual(data.records, [{ prop_name: 'glide.smtp.pw', prop_value: '[withheld: this field holds a secret]' }])
+
+  // And where the table of tables cannot be read at all: the name is still a view, and its definition is asked.
+  const noTables = await connect([{ table: 'sys_db_object', status: 403 }, ...view.filter((route) => route.table !== 'sys_db_object'), { table: 'sys_dictionary', status: 403 }, { table: 'u_property_view', rows }])
+  assert.deepEqual((await noTables.answer('sn_query', { table: 'u_property_view', fields: ['prop_name', 'prop_value'] })).records, [{ prop_name: 'glide.smtp.pw', prop_value: '[withheld: this field holds a secret]' }])
+  assert.equal((await noTables.call('sn_query', { table: 'u_property_view', query: 'prop_valueLIKEa' })).data.error, 'validation')
+
+  // A view that joins a table below the one of the properties hands their value out as well: it is defined above.
+  const below: Route[] = [
+    { table: 'sys_db_object', query: 'name=u_props_view', rows: [] },
+    { table: 'sys_db_view', query: 'name=u_props_view', rows: [{ sys_id: 'c'.repeat(32), name: 'u_props_view', label: 'Own properties' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'd'.repeat(32), table: 'u_props', variable_prefix: 'p' }] },
+    { table: 'sys_db_object', query: 'name=u_props', rows: [tableRow('u_props', 'Own properties', 'sys_properties')] },
+    { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] },
+    { table: 'sys_dictionary', query: 'nameINu_props,sys_properties', rows: [column('sys_properties', 'name'), column('sys_properties', 'value'), column('u_props', 'u_note')] },
+    ...dictionaryRoutes,
+    { table: 'u_props_view', rows: [{ p_name: 'glide.smtp.pw', p_value: 'ciphertext', p_u_note: 'mail' }] },
+  ]
+  const child = await connect(below)
+  assert.deepEqual((await child.answer('sn_query', { table: 'u_props_view', fields: ['p_name', 'p_value', 'p_u_note'] })).records, [{ p_name: 'glide.smtp.pw', p_value: '[withheld: this field holds a secret]', p_u_note: 'mail' }])
+  for (const args of [{ query: 'p_valueLIKEa' }, { query: 'ORDERBYp_value' }, { groupBy: 'p_value' }]) {
+    const refused = await child.call('sn_query', { table: 'u_props_view', ...args })
+    assert.equal(refused.data.error, 'validation', JSON.stringify(args))
+    assert.match(refused.data.message, /value of a system property/, JSON.stringify(args))
+  }
 })
 
 test('the value of a system property is withheld when it is read through a database view', async () => {

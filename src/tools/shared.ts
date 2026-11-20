@@ -67,7 +67,7 @@ export function recordPayload(table: string, path: string, column?: Column): 'pa
   const field = column ? (column.sourceField ?? column.name) : (path.split('.').at(-1) ?? path)
   // Reached through a reference or a view without a dictionary entry at hand: the table it belongs to is not known,
   // so the name decides. Every field of that name in the tables above carries a record.
-  const carries = column ? forTable(PAYLOAD_FIELDS, column.definedOn)?.includes(field) : path === field ? forTable(PAYLOAD_FIELDS, table)?.includes(field) : field === 'payload' || field === 'payload_diff'
+  const carries = column ? (forTable(PAYLOAD_FIELDS, column.definedOn) ?? forTable(PAYLOAD_FIELDS, column.sourceDefinedOn ?? column.definedOn))?.includes(field) : path === field ? forTable(PAYLOAD_FIELDS, table)?.includes(field) : field === 'payload' || field === 'payload_diff'
   if (!carries) return null
   return field === 'payload_diff' ? 'diff' : 'payload'
 }
@@ -699,7 +699,10 @@ const NO_SECRET_PROPERTIES = 'typeNOT INpassword,password2'
 
 /** The table of system properties, its archive or a part of it. */
 const holdsProperties = (table: string) => withBases(table).includes('sys_properties')
-const isPropertyValue = (column: Column | undefined) => column !== undefined && holdsProperties(column.definedOn) && (column.sourceField ?? column.name) === 'value'
+// For a field of a view, the table that defines it counts as well: a view can join a table below the one of the
+// properties, and the value is defined above it.
+const isPropertyValue = (column: Column | undefined) =>
+  column !== undefined && (holdsProperties(column.definedOn) || holdsProperties(column.sourceDefinedOn ?? column.definedOn)) && (column.sourceField ?? column.name) === 'value'
 
 /**
  * Whether a field holds a secret. The dictionary says so by its type. Where the entry is missing, or came back
@@ -744,7 +747,12 @@ export async function propertyValueFields(ctx: Context, table: string): Promise<
   const info = shape.info
   // A table below the table of system properties hands out the value under its own name.
   if (info?.chain.some(holdsProperties)) return { has: (field) => field === 'value', any: true }
-  const names = new Set((info?.members ?? []).filter((member) => holdsProperties(member.table)).map((member) => `${member.prefix}_value`))
+  // A view that joins the table of the properties, or a table below it, hands the value out under its prefix.
+  const names = new Set<string>()
+  for (const member of info?.members ?? []) {
+    const joined = holdsProperties(member.table) ? null : await ctx.dict.table(member.table).catch(unlessNoConnection(null))
+    if (holdsProperties(member.table) || joined?.chain.some(holdsProperties)) names.add(`${member.prefix}_value`)
+  }
   return { has: (field) => names.has(field), any: names.size > 0 }
 }
 

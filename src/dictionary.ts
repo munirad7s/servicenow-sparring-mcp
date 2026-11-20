@@ -761,12 +761,23 @@ export class Dictionary {
     let current = name
 
     for (;;) {
-      const page = await this.sn.query<Record<string, string>>({
+      const asked = this.sn.query<Record<string, string>>({
         table: 'sys_db_object',
         query: `name=${current}`,
         fields: ['name', 'label', 'scriptable_table', ...PARENT_FIELDS],
         limit: 1,
       })
+      // The table of tables cannot be read: the name can still be a database view, and its definition says whose
+      // fields it hands out. Only where that says nothing either is nothing known about the name.
+      const page = await (chain.length > 0
+        ? asked
+        : asked.catch(async (error: unknown) => {
+            if (noConnection(error)) throw error
+            const view = await this.loadView(name).catch(unlessNoConnection(null))
+            if (!view) throw error
+            return view
+          }))
+      if ('kind' in page) return page
       const row = page.records[0]
       if (!row) {
         if ((page.total ?? 0) > 0) {
