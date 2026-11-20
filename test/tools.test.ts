@@ -150,6 +150,34 @@ test('a choice label in place of the stored value is refused, with the value to 
   assert.equal((await answer('sn_query', { table: 'incident', query: 'stateIN1,6' })).returned, 1)
 })
 
+test('the check of choice labels also runs for a database view and with a partly readable dictionary', async () => {
+  const view: Route[] = [
+    { table: 'sys_db_object', query: 'name=incident_view', rows: [] },
+    { table: 'sys_db_view', query: 'name=incident_view', rows: [{ sys_id: 'c'.repeat(32), name: 'incident_view', label: 'Incidents' }] },
+    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }] },
+  ]
+  const onView = await connect([...view, ...dictionaryRoutes, { table: 'incident_view', rows: [{ inc_number: 'INC1' }] }])
+  const refused = await onView.call('sn_query', { table: 'incident_view', query: 'inc_state=Resolved' })
+  assert.match(refused.data.message, /"Resolved" is the label of "6"/)
+  assert.equal((await onView.answer('sn_query', { table: 'incident_view', query: 'inc_state=6' })).returned, 1)
+
+  // The dictionary of sys_user cannot be read, so the dot-walk is checked against a row. The label is still caught.
+  const partly = dictionaryRoutes.map((route) => (route.query === 'name=sys_user' ? { ...route, rows: undefined, status: 403 } : route))
+  const { call, sentTo } = await connect([...partly, { table: 'incident', rows: [{ number: 'INC1', 'caller_id.email': 'a@example.org' }] }])
+  assert.match((await call('sn_query', { table: 'incident', query: 'state=Resolved^caller_id.emailLIKEexample' })).data.message, /label of "6"/)
+  assert.equal(sentTo('incident').length, 0)
+
+  // A choice field reached by a dot-walk is not checked, and the answer says so.
+  const walked = await connect([
+    { table: 'sys_db_object', query: 'name=problem', rows: [tableRow('problem', 'Problem', 'task')] },
+    { table: 'sys_dictionary', query: 'nameINproblem,task', rows: [column('task', 'state', 'integer', '', { choice: '3' }), column('problem', 'first_incident', 'reference', 'incident')] },
+    ...dictionaryRoutes,
+    { table: 'problem', rows: [] },
+  ])
+  const data = await walked.answer('sn_query', { table: 'problem', query: 'first_incident.state=Resolved' })
+  assert.match(data.warnings.join(' '), /"first_incident.state" is a choice field, and its values could not be checked/)
+})
+
 test('an empty result is explained when a value has the wrong shape', async () => {
   const { answer } = await connect([...dictionaryRoutes, { table: 'incident', rows: [] }])
 

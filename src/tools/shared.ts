@@ -19,7 +19,7 @@ export const READ_ONLY = {
 export const SECRET_TYPES = new Set(['password', 'password2', 'glide_encrypted'])
 export const SECRET_NOTE = '[withheld: this field holds a secret]'
 /** Where the type of a field cannot be read, its name is the only sign left. */
-export const LOOKS_SECRET = /pass(word|wd)?|secret|token|credential|private_?key|api_?key/i
+export const LOOKS_SECRET = /passw(or)?d|passphrase|secret|token|credential|private_?key|api_?key/i
 
 export interface Guard {
   /** A sentence for the answer: how the field names were verified. */
