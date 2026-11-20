@@ -556,6 +556,42 @@ test('a name that had to make room among those remembered is not answered as "no
   assert.equal((await instance().knownTables(['sys_script', ...many])).has('sys_script'), true)
 })
 
+test('what the name look-up says about a table it finds is kept, where the row says all of it', async () => {
+  const parentsOf = (...names: string[]) => Object.fromEntries(Array.from({ length: 8 }, (_, level) => [`${'super_class.'.repeat(level + 1)}name`, names[level] ?? '']))
+  const row = (name: string, ...parents: string[]) => ({ name, label: name, scriptable_table: 'false', ...parentsOf(...parents) })
+  const deep = Array.from({ length: 8 }, (_, level) => `u_level_${level}`)
+  const { sn, calls } = fakeInstance([
+    {
+      table: 'sys_db_object',
+      query: 'nameIN',
+      rows: [
+        row('sys_script', 'sys_metadata'),
+        // Came without the fields asked for: it says less than it seems to.
+        { name: 'u_bare' },
+        // Eight parents: one request sees no further, so the chain may go on.
+        row('u_deep', ...deep),
+        // A parent that comes twice is no chain.
+        row('u_ring', 'u_other', 'u_ring'),
+      ],
+    },
+    { table: 'sys_db_object', query: 'name=u_bare', rows: [row('u_bare', 'task')] },
+  ])
+  const dict = new Dictionary(sn)
+  assert.deepEqual([...(await dict.knownTables(['sys_script', 'u_bare', 'u_deep', 'u_ring', 'u_none']))].sort(), ['sys_script', 'u_bare', 'u_deep', 'u_ring'])
+  assert.equal(calls.length, 1)
+  // Kept: what the table extends is known without another request.
+  assert.deepEqual((await dict.table('sys_script'))?.chain, ['sys_script', 'sys_metadata'])
+  assert.equal(calls.length, 1)
+  // Not kept: the table is asked for by itself.
+  assert.deepEqual((await dict.table('u_bare'))?.chain, ['u_bare', 'task'])
+  assert.equal(calls.length, 2)
+  for (const name of ['u_deep', 'u_ring']) {
+    const sentBefore: number = calls.length
+    await dict.table(name).catch(() => null)
+    assert.ok(calls.length > sentBefore, name)
+  }
+})
+
 test('names that look like an unknown field are searched for the first few only', async () => {
   // Each search compares with every field of the table: a hundred unknown names on a wide table took seconds.
   const check = await new Dictionary(fakeInstance(dictionaryRoutes).sn).checkFields('incident', Array.from({ length: 8 }, (_, index) => `numbe${index}`))

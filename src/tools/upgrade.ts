@@ -251,7 +251,8 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
           )
         }
 
-        const isError = (code: string) => /error/i.test(disposition.all[code] ?? '')
+        const labelOfCode = (code: string) => (Object.hasOwn(disposition.all, code) ? disposition.all[code] : undefined)
+        const isError = (code: string) => /error/i.test(labelOfCode(code) ?? '')
         const wanted = Object.keys(disposition.skipped).filter((code) => !(excludeErrors && isError(code)))
         const errorCodes = Object.keys(disposition.all).filter(isError)
         if (onlySkipped && !wanted.length) {
@@ -338,7 +339,7 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
             entries: perUpgrade ? (perUpgrade.find((group) => group.value === item.sysId)?.count ?? 0) : null,
           })),
           dispositionCodes: { skipped: disposition.skipped, from: disposition.from },
-          byDisposition: byName(perDisposition, (group) => disposition.all[group.value] ?? group.value),
+          byDisposition: byName(perDisposition, (group) => labelOfCode(group.value) ?? group.value),
           byType: byName(types, (group) => group.display ?? group.value),
           notReviewed: states ? states.filter((group) => reviewCodes.notReviewed.has(group.value)).reduce((sum, group) => sum + group.count, 0) : null,
           records,

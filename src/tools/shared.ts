@@ -371,10 +371,11 @@ function tableCuts(name: string): string[] {
 
 /**
  * Tables whose records are copies of records of other tables. Measured: a linked application file is named after
- * the record it links to. Which table that record is of, its update name does not say, so while tables are closed
- * such a record counts as one of a closed table.
+ * the record it links to, and the entry for a deleted application file after the record that was deleted. Which
+ * table that record is of, the update name of the copy does not say, so while tables are closed such a record
+ * counts as one of a closed table.
  */
-const COPIES_OF_RECORDS = new Set(['sys_metadata_link'])
+const COPIES_OF_RECORDS = new Set(['sys_metadata_link', 'sys_metadata_delete'])
 /** Whether the records of a table are copies of records of other tables. */
 export const copiesRecords = (table: string): boolean => withBases(table).some((base) => COPIES_OF_RECORDS.has(base))
 
@@ -386,11 +387,11 @@ export const copiesRecords = (table: string): boolean => withBases(table).some((
  * workflow, "wf_workflow_<sys_id>" (wf_workflow_version). A name that begins with the word on the left can stand
  * for a record of the tables on the right, so those have to be open as well.
  */
-const NAMED_BY_ANOTHER_RULE: Record<string, string[]> = {
-  sys_choice: ['sys_choice_set'],
-  sys_ui_related: ['sys_ui_related_list'],
-  wf_workflow: ['wf_workflow_version'],
-}
+const NAMED_BY_ANOTHER_RULE = new Map([
+  ['sys_choice', ['sys_choice_set']],
+  ['sys_ui_related', ['sys_ui_related_list']],
+  ['wf_workflow', ['wf_workflow_version']],
+])
 
 /**
  * What stands before a generated sys_id at the end of an update name. Mostly that is the table of the record, but
@@ -492,7 +493,7 @@ export async function isClosedRecord(ctx: Context, updateName: string, page?: Re
   const closedByName = (table: string) => withBases(table).some((base) => ctx.sn.denies(base) || COPIES_OF_RECORDS.has(base) || denied.has(base))
   const listed = Boolean(ctx.sn.openClasses())
   // The tables a name of this beginning stands for by another rule than "the name begins with the table".
-  const others = cuts.flatMap((cut) => NAMED_BY_ANOTHER_RULE[cut] ?? [])
+  const others = cuts.flatMap((cut) => NAMED_BY_ANOTHER_RULE.get(cut) ?? [])
   // Nothing the name can begin with is closed by name, and no list says that only some tables may be read.
   if (!listed && ![...cuts, ...others].some(closedByName)) return false
 
@@ -560,7 +561,9 @@ export function recordNameKey(table: string, path: string, column?: Column, owne
   const plain = path === field && !column?.sourceField
   const tables = [...(column ? [column.definedOn] : []), ...(plain ? [table] : owner ? [owner] : [])]
   // Reached through a reference without a dictionary entry at hand: the names used for an update name decide.
-  const known = tables.length ? tables.map((name) => forTable(RECORD_NAMES, name)?.[field]).find(Boolean) : [...RECORD_NAMES.values()].map((fields) => fields[field]).find((entry) => entry?.holds === 'update_name')
+  // By its own entries only: a field can be named like something every object has.
+  const entry = (fields: Record<string, NameKey> | undefined) => (fields && Object.hasOwn(fields, field) ? fields[field] : undefined)
+  const known = tables.length ? tables.map((name) => entry(forTable(RECORD_NAMES, name))).find(Boolean) : [...RECORD_NAMES.values()].map(entry).find((found) => found?.holds === 'update_name')
   if (!known) return null
   // Beside the field, under the same prefix: "upgrade_detail.target_name" has "upgrade_detail.file_name".
   if (column?.sourceField) return { ...known, path: path.slice(0, path.length - field.length) + known.key }
@@ -584,7 +587,8 @@ export function viewField(members: Array<{ table: string; prefix: string }>, key
 /** Whether a table that is named in a row may be read: what the row says, taken as the name of a table. */
 export async function isClosedTableName(ctx: Context, name: string): Promise<boolean> {
   const table = name.toLowerCase()
-  return !isTableName(table) || (await ctx.closed.reason(table)) !== null
+  // A record of a table whose records are copies of others: which table the copied record is of is not said.
+  return !isTableName(table) || (ctx.sn.restricted && copiesRecords(table)) || (await ctx.closed.reason(table)) !== null
 }
 
 /** Elements that hold records and are none themselves. */
@@ -824,11 +828,17 @@ export async function propertyValueFields(ctx: Context, table: string): Promise<
   if (info?.chain.some(holdsProperties)) return { has: (field) => field === 'value', any: true }
   // A view that joins the table of the properties, or a table below it, hands the value out under its prefix.
   const names = new Set<string>()
+  let guessed = false
   for (const member of info?.members ?? []) {
     const joined = holdsProperties(member.table) ? null : await ctx.dict.table(member.table).catch(unlessNoConnection(null))
     if (holdsProperties(member.table) || joined?.chain.some(holdsProperties)) names.add(`${member.prefix}_value`)
+    else if (!joined) {
+      // What the joined table extends could not be read: a table below the one of the properties is not ruled out.
+      names.add(`${member.prefix}_value`)
+      guessed = true
+    }
   }
-  return { has: (field) => names.has(field), any: names.size > 0 }
+  return { has: (field) => names.has(field), any: names.size > 0, ...(guessed ? { guessed } : {}) }
 }
 
 export interface Shape {

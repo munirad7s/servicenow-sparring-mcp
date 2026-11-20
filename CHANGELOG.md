@@ -43,10 +43,11 @@ tables away.
   that of 0.4.0.
 - **The value of a system property could be read through a database view** in two cases the fix of 0.4.0 left
   out: a view over a table that extends `sys_properties`, and a view on an instance where the account cannot
-  read the table of tables, so that the server did not know it for a view.
+  read the table of tables, so that the server did not know it for a view. Where it cannot be read what a joined
+  table extends, the field that is named like the value of a property counts as one.
 - **"Is not one of" went out unproven.** It is the condition that leaves the rows of closed tables out, and it
   was asked by itself only where the row asked for came back with its class. Where rows have a class and that
-  row is hidden, or comes without the field, the request is refused now.
+  row is hidden, or comes without the field, or the question for it fails, the request is refused now.
 - **Records captured under a name that does not begin with their table kept their names.** Measured over 6,631
   captured changes, whose payload names the table, and over the application files of 1,998 classes: the choices
   of a field are captured as `sys_choice_<table>_<field>` and are a record of `sys_choice_set`, the related lists
@@ -54,14 +55,16 @@ tables away.
   of the workflow (`wf_workflow_version`). Closing one of those tables did not keep the names of its captured
   changes back. The server knows the three rules now. The entry for a deleted application file
   (`sys_metadata_delete`) keeps the name of the record that was deleted: read from its own table it is judged by
-  its update name, and `sys_metadata` answers without those rows while tables are closed.
+  its update name, and `sys_metadata` answers without those rows while tables are closed. An update name or a
+  table name that names such an entry counts as a record that cannot be told, as one that names a linked
+  application file does: `sn_origin` could be made to read the entry with its name.
 - **A table could come back as "no table".** What the server remembers about names is bounded, and the answer
   was read back from it: a table whose entry had to make room while the same call asked about more names counted
   as no table. Under a list of the only tables that may be read, a record of a closed table could then pass for
   one of the open table its name also begins with.
 - **A new part of a rotated table could be read until the list of parts was read again.** The list is remembered
   for ten minutes, and a part that the instance creates in between is not on it. A name that reads like a part of
-  a rotated table and is not on the list now has the list read anew, once a minute at most.
+  a table the list knows as rotated now counts as a part of it, on the list or not.
 
 ### Fixed
 
@@ -122,14 +125,18 @@ tables away.
   HTTP 200 in the middle of a call was thrown as one failed look-up, and a function that catches those answered
   "could not be read", where the same failure as an HTML page ended the call. It ends the call now and does not
   count as an accepted login. So does a request that is held back after a timeout while nothing has ever
-  answered. The audit log wrote the status 200 for a request that failed with an answer of HTTP 200 (too large,
-  an error inside it, no list): it writes the kind of failure now.
+  answered. A request that ran out of time after a login had been rejected and renewed stopped the queue as if
+  the instance had never answered, and ended the calls behind it: that timeout is now about the one request. The
+  audit log wrote the status 200 for a request that failed with an answer of HTTP 200 (too large, an error
+  inside it, no list, a count that is no number): it writes the kind of failure now.
 - **A page of update names could cost hundreds of requests.** Under a list of the only tables that may be read,
   every beginning of every update name on a page is asked about. In a test with two hundred names that share no
   beginning, that cost 368 requests in `sn_delta` and ended `sn_query` at the 500 a call may send. Measured on
   the instance: no name of 76,000 has more than fifteen beginnings, and the most a page of two hundred had
   between them was 433. A page now asks about two thousand at most, says how many names it left out, and treats
-  those as records whose table cannot be told. Where the look-up itself fails, the answer says that as well.
+  those as records whose table cannot be told. Where the look-up itself fails, the answer says that as well. What
+  each table that was found extends was asked for with one more request per table, two hundred for a page whose
+  names begin with two hundred open tables: it is read with the look-up now.
 - **Two inputs cost far more than their length.** A text with many beginnings of an element and blanks inside
   one closing tag was read once per beginning, and a table name that can be read as an archive and as a part in
   many ways took ten seconds for eighty characters.
@@ -183,8 +190,9 @@ No answer changed its shape. What a caller can notice:
   ways round it that it knows, from what the instance itself says belongs to the table: for twelve tables on the
   test instance, among them one with 132 tables below it and one with 1,347, 684 checks passed, none found
   anything, and two were refused by the instance itself, which proves nothing. A check counts as passed only where
-  the server refuses because of the closed table or answers without anything of it. With the two rules for names
-  behind references switched off, it reported 16 findings on three tables.
+  the server refuses because of the closed table or answers without anything of it, and a direct read that fails
+  counts as a check that could not be run. With the two rules for names behind references switched off, it
+  reported 16 findings on three tables.
 
 ## 0.4.0 (2026-11-20)
 

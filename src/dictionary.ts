@@ -148,8 +148,6 @@ const MAX_ENTRIES = 400
 const NO_SUCH_TABLE = ['zz__no_such_table_a', 'zz__no_such_table_b']
 /** As many names as are remembered to be a table or none. An entry is a name and a flag. */
 const MAX_KNOWN_NAMES = 5_000
-/** How often at most the list of the parts of rotated tables is read anew because a name looks like a new part. */
-const PARTS_ANEW_MS = 60_000
 /** The fields the platform shows as the name of a row where the dictionary marks none, by their names. */
 const NAMED_AS_DISPLAY = ['name', 'u_name', 'number', 'u_number']
 /** Kinds of fields that show the name of another record. */
@@ -209,7 +207,6 @@ export class Dictionary {
   private readonly parentChecks = new Map<string, Entry<boolean>>()
   private readonly knownNames = new Map<string, { table: boolean; at: number }>()
   private readonly partLists = new Map<string, Entry<Map<string, string> | null>>()
-  private partsReadAnew = 0
   private readonly shownSets = new Map<string, Entry<Array<{ field: string; reference: string | null }> | null>>()
 
   /**
@@ -266,11 +263,13 @@ export class Dictionary {
       else if (hit.table) tables.add(name)
     }
     for (const group of inGroups(unknown)) {
-      const { records, total, complete } = await this.sn.all<Record<string, string>>({ table: 'sys_db_object', query: `nameIN${group.join(',')}`, fields: ['name'] }, 1_000)
+      // With what each table extends: what is asked about a table that was found here costs no request of its own.
+      const { records, total, complete } = await this.sn.all<Record<string, string>>({ table: 'sys_db_object', query: `nameIN${group.join(',')}`, fields: ['name', 'label', 'scriptable_table', ...PARENT_FIELDS] }, 1_000)
       if (!complete || (total !== null && records.length < total)) {
         throw new ServiceNowError('It could not be read completely which of these names are tables: rows of sys_db_object are hidden from this account.', 'acl', 'sys_db_object')
       }
       const found = new Set(records.map((row) => row.name))
+      for (const row of records) this.remember(row, now)
       for (const name of group) {
         if (found.has(name)) tables.add(name)
         this.knownNames.delete(name)
@@ -279,6 +278,24 @@ export class Dictionary {
       while (this.knownNames.size > MAX_KNOWN_NAMES) this.knownNames.delete(this.knownNames.keys().next().value as string)
     }
     return tables
+  }
+
+  /**
+   * Keeps what a row of sys_db_object says about its table, where the row says all of it: its label, and its
+   * parents up to the root within what one request sees. A page of two hundred update names can begin with as
+   * many tables, and asking for each of them once more was a request each.
+   */
+  private remember(row: Record<string, string>, now: number): void {
+    // A row that came without the fields asked for says less than it seems to.
+    if (!('label' in row) || !('scriptable_table' in row)) return
+    const parents = parentsOf(row)
+    if (!parents || parents.length >= PARENT_FIELDS.length || new Set([row.name, ...parents]).size !== parents.length + 1) return
+    const known = this.tables.get(row.name)
+    if (known && now - known.at < this.ttlMs) return
+    const info: TableInfo = { name: row.name, label: String(row.label ?? ''), chain: [row.name, ...parents], kind: row.scriptable_table === 'true' ? 'remote_table' : 'table' }
+    this.tables.delete(row.name)
+    this.tables.set(row.name, { value: Promise.resolve(info), at: now })
+    if (this.tables.size > MAX_ENTRIES) this.tables.delete(this.tables.keys().next().value as string)
   }
 
   /**
@@ -627,14 +644,7 @@ export class Dictionary {
    * named after the table with four digits, 8 with one digit, and 30 name the table itself. null where the list
    * cannot be read completely: the caller then has to go by the name of a table.
    */
-  rotatedParts(anew = false): Promise<Map<string, string> | null> {
-    // A part that was created after the list was read is not on it. A caller that meets a name which reads like
-    // a part and is not on the list asks for it anew: once a minute at most, or such a name would cost a request
-    // every time it is asked for.
-    if (anew && Date.now() - this.partsReadAnew >= PARTS_ANEW_MS) {
-      this.partsReadAnew = Date.now()
-      this.partLists.delete('parts')
-    }
+  rotatedParts(): Promise<Map<string, string> | null> {
     return this.cached(this.partLists, 'parts', async () => {
       const read = await this.sn.all<Record<string, string>>({ table: 'sys_table_rotation_schedule', fields: ['table_name', 'name.name'] }, 5_000).catch(unlessNoConnection(null))
       if (!read || !read.complete || (read.total !== null && read.records.length < read.total)) return null

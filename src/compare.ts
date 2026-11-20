@@ -459,7 +459,8 @@ for (const [table, groupBy, query] of COUNTS) {
     page = next.data
   }
   const theirs = await get(table, { sysparm_count: 'true', sysparm_group_by: groupBy, ...(query ? { sysparm_query: query } : {}) }, 'stats')
-  const want = new Map<string, number>(((theirs.rows ?? []) as Data[]).map((group) => [String(group.groupby_fields?.[0]?.value ?? ''), Number(group.stats?.count)]))
+  // Measured: a table without rows can answer with one group of no rows. That is no group, here as for the server.
+  const want = new Map<string, number>(((theirs.rows ?? []) as Data[]).map((group): [string, number] => [String(group.groupby_fields?.[0]?.value ?? ''), Number(group.stats?.count)]).filter(([, count]) => count !== 0))
   const got = new Map<string, number>(groups.map((group) => [String(group.value), Number(group.count)]))
   const rowsInAll = [...want.values()].reduce((sum, value) => sum + value, 0)
   const same = theirs.status === 200 && groups.length === want.size && got.size === want.size && [...want].every(([value, count]) => got.get(value) === count) && first.data.totalGroups === want.size && first.data.total === rowsInAll
@@ -574,21 +575,33 @@ process.exit(differences.length || wrong.length || altered.length || miscounted.
 /** Tries the ways round a closed table that this script knows, for each table named. Returns the exit code. */
 async function closedTables(names: string[]): Promise<number> {
   console.log(`A closed table, tried on ${new URL(settings.instanceUrl).host}`)
-  const list = async (table: string, query: string, columns: string[], limit = 1_000) => (await get(table, { sysparm_query: query, sysparm_fields: columns.join(','), sysparm_limit: limit })).rows ?? []
-  const rowsThatMatch = async (table: string, query: string) => Number((await get(table, { sysparm_query: query, sysparm_fields: 'sys_id', sysparm_limit: 1 })).total ?? NaN)
   const passed = new Map<string, number>()
   const good = (kind: string) => passed.set(kind, (passed.get(kind) ?? 0) + 1)
   const findings: string[] = []
   // Refused, but not because of the closed table: that proves nothing about it. And what could not be run at all.
   const otherwise = new Map<string, number>()
   const notRun = new Map<string, number>()
+  const unrun = (what: string) => notRun.set(what, (notRun.get(what) ?? 0) + 1)
+  // What the instance says when it is asked directly. A read that fails says nothing: it is no "nothing there",
+  // and what is built on it could not be run.
+  const list = async (table: string, query: string, columns: string[], limit = 1_000) => {
+    const { rows } = await get(table, { sysparm_query: query, sysparm_fields: columns.join(','), sysparm_limit: limit })
+    if (!rows) unrun(`a direct read of ${table} failed`)
+    return rows ?? []
+  }
+  /** How many rows match, asked directly. "needed": a check is built on the number, so that a count that fails is a check that could not be run. Without it the number only picks what to try. */
+  const rowsThatMatch = async (table: string, query: string, needed = false) => {
+    const { status, total } = await get(table, { sysparm_query: query, sysparm_fields: 'sys_id', sysparm_limit: 1 })
+    if (needed && (status !== 200 || total === null)) unrun(`a direct count on ${table} failed`)
+    return Number(total ?? NaN)
+  }
   /** true if the server answered with an error. Only a refusal because of the closed table counts as passed. */
   const refused = (answer: { data: Data; isError: boolean }, kind: string): boolean => {
     if (!answer.isError) return false
     const error = String(answer.data.error)
     if (error === 'blocked') good(kind)
     else if (['validation', 'acl', 'not_found'].includes(error)) otherwise.set(`${kind}: as "${error}"`, (otherwise.get(`${kind}: as "${error}"`) ?? 0) + 1)
-    else notRun.set(`${kind}: ended with "${error}"`, (notRun.get(`${kind}: ended with "${error}"`) ?? 0) + 1)
+    else unrun(`${kind}: ended with "${error}"`)
     return true
   }
   let requests = 0
@@ -620,8 +633,10 @@ async function closedTables(names: string[]): Promise<number> {
       if (!refused(await ask('sn_query', { table, limit: 1 }), 'the table or a table below it is refused')) finding(`${table} is answered`)
       if (!refused(await ask('sn_query', { table, groupBy: 'sys_created_by' }), 'a count on the table or a table below it is refused')) finding(`${table} is counted per value`)
     }
-    for (const [name, args] of [['sn_dependencies', { table: closed }], ['sn_query', { table: `ar_${closed}`, limit: 1 }]] as const) {
-      if (!refused(await ask(name, args), 'what is attached to the table, and its archive, are refused')) finding(`${name} with ${JSON.stringify(args)} is answered`)
+    if (!refused(await ask('sn_dependencies', { table: closed }), 'what is attached to the table is refused')) finding(`sn_dependencies for ${closed} is answered`)
+    // Its archive, where the instance has one: a name the instance does not list is refused whatever is closed.
+    if ((await list('sys_db_object', `name=ar_${closed}`, ['name'], 1)).length) {
+      if (!refused(await ask('sn_query', { table: `ar_${closed}`, limit: 1 }), 'the archive of the table is refused')) finding(`ar_${closed} is answered`)
     }
 
     // 2. Through the tables above it: no row of the family, and a total without them.
@@ -633,18 +648,30 @@ async function closedTables(names: string[]): Promise<number> {
         const ids = (read.data.records as Data[]).map((row) => String(row.sys_id ?? '')).filter(Boolean)
         const shown = (read.data.records as Data[]).filter((row) => family.includes(String(row.sys_class_name))).length
         let closedRows = 0
-        for (let at = 0; at < ids.length; at += 40) for (const part of await inFamily(`sys_idIN${ids.slice(at, at + 40).join(',')}^sys_class_nameIN<family>`)) closedRows += await rowsThatMatch(parent, part)
-        if (shown || closedRows) finding(`${parent} with "${masked(query)}": ${Math.max(shown, closedRows)} of ${ids.length} rows are rows of the closed table`)
-        else good('rows read through a table above hold none of the closed table')
-        const whole = await rowsThatMatch(parent, query)
+        for (let at = 0; at < ids.length; at += 40) for (const part of await inFamily(`sys_idIN${ids.slice(at, at + 40).join(',')}^sys_class_nameIN<family>`)) closedRows += await rowsThatMatch(parent, part, true)
+        if (shown || closedRows) finding(`${parent} with "${masked(query)}": ${Math.max(shown, closedRows || 0)} of ${ids.length} rows are rows of the closed table`)
+        else if (!Number.isNaN(closedRows)) good('rows read through a table above hold none of the closed table')
+        const whole = await rowsThatMatch(parent, query, true)
         let closedInAll = 0
-        for (const part of await inFamily([query.split('^ORDERBY')[0], 'sys_class_nameIN<family>'].filter(Boolean).join('^'))) closedInAll += await rowsThatMatch(parent, part)
+        for (const part of await inFamily([query.split('^ORDERBY')[0], 'sys_class_nameIN<family>'].filter(Boolean).join('^'))) closedInAll += await rowsThatMatch(parent, part, true)
         // Fewer is no finding: the server also leaves out what it cannot tell apart, linked application files for one.
-        if (Number(read.data.total) <= whole - closedInAll) good('the total through a table above counts no closed row')
+        if (typeof read.data.total !== 'number') unrun('a read through a table above came without a total')
+        else if (Number.isNaN(whole - closedInAll)) continue
+        else if (read.data.total <= whole - closedInAll) good('the total through a table above counts no closed row')
         else finding(`${parent} with "${masked(query)}": the total is ${read.data.total}, and only ${whole - closedInAll} rows are open`)
       }
       const perClass = await ask('sn_query', { table: parent, groupBy: 'sys_class_name', limit: 200 })
       if (refused(perClass, 'a count per class on a table above is refused')) continue
+      // Every group, read on as an agent would.
+      for (let page = perClass.data; page.truncated && typeof page.nextOffset === 'number'; ) {
+        const next = await ask('sn_query', { table: parent, groupBy: 'sys_class_name', limit: 200, offset: page.nextOffset })
+        if (next.isError) {
+          unrun(`a count per class on a table above stopped after its first groups: "${next.data.error}"`)
+          break
+        }
+        ;(perClass.data.groups as Data[]).push(...(next.data.groups as Data[]))
+        page = next.data
+      }
       if ((perClass.data.groups as Data[]).some((group) => family.includes(String(group.value)))) finding(`${parent} counted per class shows a class of the closed table`)
       else good('a count per class through a table above shows no closed class')
     }

@@ -162,12 +162,12 @@ provider, the data leaves your network. Five things limit what can go that way:
     and of its child tables; an archive table, `ar_<table>`, extends nothing either. Which tables are parts of
     which, the instance lists in `sys_table_rotation_schedule`, and the server goes by that list: measured, 319
     of 327 parts are named after their table with four digits, and 8 with one. The list is remembered for ten
-    minutes; a name that reads like a part of a rotated table and is not on it has the list read anew, once a
-    minute at most, so that a part created in between is closed with the next call. Where the list cannot be
-    read, a table whose name ends in digits counts as a part of the table without them. Where the table is open
-    and has a closed table below it, its parts and its archive are closed all the same: ask the table itself,
-    which leaves those rows out. The archive of a table the deny list names is closed also where the instance
-    no longer has the table.
+    minutes, and a part that the instance creates in between is not on it: so a table whose name reads like a
+    part of a table that the list knows as rotated counts as a part of it, on the list or not. Where the list
+    cannot be read, a table whose name ends in digits counts as a part of the table without them. Where the
+    table is open and has a closed table below it, its parts and its archive are closed all the same: ask the
+    table itself, which leaves those rows out. The archive of a table the deny list names is closed also where
+    the instance no longer has the table.
   - What the instance lists neither as a table nor as a database view counts as closed, and so does a database
     view that joins another view, or that comes back without a table it joins: nothing says whose rows it holds.
   - A parent table answers without the rows of its closed child tables. The same holds where a query walks a

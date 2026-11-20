@@ -124,6 +124,8 @@ export class ServiceNowClient {
   private auth: Auth
   /** Becomes true once the instance has accepted the credentials. Until then requests go one at a time. */
   private accepted = false
+  /** true once the instance has answered anything at all. A login that is rejected later does not take that back. */
+  private answered = false
   private opening: Promise<void> | null = null
   private inFlight = 0
   private readonly waiting: Array<() => void> = []
@@ -166,16 +168,16 @@ export class ServiceNowClient {
     params.set('sysparm_suppress_pagination_header', 'true')
     if (display) params.set('sysparm_display_value', 'all')
 
-    const { body, headers } = await this.get('table', table, sent, fields?.length ? fields : null, params)
-
-    const header = headers.get('x-total-count')
-    const total = header !== null && /^\d+$/.test(header) ? Number(header) : null
-    const records = (body.result as unknown[]).filter((row): row is T => row !== null && typeof row === 'object')
-    // What reads the rows afterwards goes as deep as they go. A row nested thousands of levels would end the call
-    // with an error of the runtime, and not with a sentence about the answer.
-    if (records.some((row) => nestedTooDeep(row, MAX_CELL_DEPTH))) {
-      throw unusableAnswer(`${this.host} answered with rows that are nested deeper than a row of a table is.`, table)
-    }
+    const { records, total } = await this.get('table', table, sent, fields?.length ? fields : null, params, (result, headers) => {
+      const header = headers.get('x-total-count')
+      const rows = result.filter((row): row is T => row !== null && typeof row === 'object')
+      // What reads the rows afterwards goes as deep as they go. A row nested thousands of levels would end the call
+      // with an error of the runtime, and not with a sentence about the answer.
+      if (rows.some((row) => nestedTooDeep(row, MAX_CELL_DEPTH))) {
+        throw unusableAnswer(`${this.host} answered with rows that are nested deeper than a row of a table is.`, table)
+      }
+      return { records: rows, total: header !== null && /^\d+$/.test(header) ? Number(header) : null }
+    })
     if (gate && display) await this.withoutClosedNames(gate, table, records as Row[])
     return { table, query: sent, limit, offset, records, total }
   }
@@ -287,30 +289,36 @@ export class ServiceNowClient {
     if (query) params.set('sysparm_query', query)
     if (display) params.set('sysparm_display_value', 'all')
 
-    const { body } = await this.get('stats', table, query, [groupBy], params)
-
-    const groups = (body.result as Array<{ stats?: { count?: unknown }; groupby_fields?: Array<{ value?: unknown; display_value?: unknown }> } | null>).map((group) => {
-      const count = String(group?.stats?.count ?? '')
-      if (!/^\d+$/.test(count)) {
-        throw new ServiceNowError(`${this.host} answered with a count that is not a number.`, 'invalid_response', table)
-      }
-      const field = group?.groupby_fields?.[0]
-      const value = String(field?.value ?? '')
-      const shown = String(field?.display_value ?? '')
-      return { value, count: Number(count), ...(shown && shown !== value ? { display: shown } : {}) }
-    })
+    const groups = await this.get('stats', table, query, [groupBy], params, (result) =>
+      (result as Array<{ stats?: { count?: unknown }; groupby_fields?: Array<{ value?: unknown; display_value?: unknown }> } | null>).map((group) => {
+        const count = String(group?.stats?.count ?? '')
+        if (!/^\d+$/.test(count)) {
+          throw new ServiceNowError(`${this.host} answered with a count that is not a number.`, 'invalid_response', table)
+        }
+        const field = group?.groupby_fields?.[0]
+        const value = String(field?.value ?? '')
+        const shown = String(field?.display_value ?? '')
+        return { value, count: Number(count), ...(shown && shown !== value ? { display: shown } : {}) }
+      }),
+    )
     // Measured: counted per class, a table without rows can answer with one group of no rows and an empty value
     // (2 of 51 such tables, 15 views), where others answer with an empty list. A group of no rows is none.
     return { groups: groups.filter((group) => group.count > 0), query }
   }
 
-  private async get(
+  /**
+   * One request, with its line in the audit log. "read" turns the list that came back into what the caller wants
+   * and refuses what is no answer to the question: it runs before the line is written, so that a request whose
+   * answer could not be used is not written as one that went well.
+   */
+  private async get<Read>(
     api: 'table' | 'stats',
     table: string,
     query: string,
     fields: string[] | null,
     params: URLSearchParams,
-  ): Promise<{ body: { result: unknown[] }; headers: Headers }> {
+    read: (result: unknown[], headers: Headers) => Read,
+  ): Promise<Read> {
     const started = Date.now()
     const count = { sent: 0 }
     const log = (status: number | ErrorKind, rows: number | null, total: number | null) =>
@@ -320,9 +328,10 @@ export class ServiceNowClient {
       // A table closed on this machine is not asked for, but the attempt is still written to the audit log.
       this.assertAllowed(table)
       const answer = await this.inTurn(() => (this.accepted ? this.send(api, table, params, count) : this.alone(() => this.send(api, table, params, count))))
+      const usable = read(answer.body.result, answer.headers)
       const header = answer.headers.get('x-total-count')
       log(200, answer.body.result.length, header !== null && /^\d+$/.test(header) ? Number(header) : null)
-      return answer
+      return usable
     } catch (error) {
       // A request that was not sent has no HTTP status of its own. And a status that says "fine" is not written for
       // a request that failed: an answer too large to read, an error inside it, or no answer of an instance at all.
@@ -458,6 +467,7 @@ export class ServiceNowClient {
       const error = new ServiceNowError(`${this.host} rejected the credentials (HTTP 401).`, 'auth', table, 401)
       // Back to one request at a time: an expired token must not be retried by everything in flight.
       this.accepted = false
+      this.answered = true
       this.paused = { until: Date.now() + PAUSE_AFTER_REJECTED_LOGIN_MS, error, rejected: sent }
       // A rejected login is not a missing piece of an answer: the call it happens in fails.
       if (call) call.ended ??= error
@@ -480,7 +490,7 @@ export class ServiceNowClient {
 
     if (!response.ok || (isObject && body?.error)) {
       // A refusal by the instance itself means it is reachable and took the login. A 5xx or 429 can come from in front of it.
-      if (response.status < 500 && response.status !== 429) this.accepted = true
+      if (response.status < 500 && response.status !== 429) this.accepted = this.answered = true
       const message = quoteInstanceText(isObject ? body?.error?.message : '')
       const detail = quoteInstanceText(isObject ? body?.error?.detail : '')
       const said = message ? `: "${message}"${detail ? ` ("${detail}")` : ''}` : ''
@@ -503,7 +513,7 @@ export class ServiceNowClient {
       throw error
     }
 
-    this.accepted = true
+    this.accepted = this.answered = true
     return { body: { result }, headers: response.headers }
   }
 
@@ -548,9 +558,13 @@ export class ServiceNowClient {
     return new ServiceNowError(`Cannot reach ${this.host} (${code ?? 'request failed'}).`, 'network', table)
   }
 
-  /** While no request has ever succeeded, a failure to connect stops the queue behind it for a short time. */
+  /**
+   * While the instance has never answered, a failure to connect stops the queue behind it for a short time. Not
+   * after a login that was rejected and renewed: the instance is there, and one request that then runs out of
+   * time is about that request.
+   */
   private pauseIfClosed(error: ServiceNowError): ServiceNowError {
-    if (!this.accepted && ['network', 'timeout', 'redirect', 'invalid_response'].includes(error.kind)) {
+    if (!this.answered && ['network', 'timeout', 'redirect', 'invalid_response'].includes(error.kind)) {
       this.paused = { until: Date.now() + PAUSE_WHILE_UNREACHABLE_MS, error }
     }
     return error

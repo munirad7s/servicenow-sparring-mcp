@@ -52,7 +52,7 @@ const SHOWS_ITSELF = new Set(
  * was deleted. Read from its own table, the row is judged by what says which table that record is of. Read as a
  * row of the parent it is not, so while tables are closed the parent answers without these rows.
  */
-const COPIES_BELOW: Record<string, string[]> = { sys_metadata: ['sys_metadata_delete', 'sys_metadata_link'] }
+const COPIES_BELOW = new Map([['sys_metadata', ['sys_metadata_delete', 'sys_metadata_link']]])
 
 /**
  * Tables whose rows show, as their own name, the name of a record of another table. Measured: a reference into the
@@ -157,15 +157,12 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     // A part of a rotated table, or the archive of a table, holds the rows of that table and of its child tables.
     // Which tables are parts of a rotated one, the instance says in a list. Where that list cannot be read, or
     // is closed on this machine, the name of a table has to do.
-    let parts = sn.allows('sys_table_rotation_schedule') && sn.allows('sys_table_rotation') ? await dict.rotatedParts() : null
-    if (parts) {
-      // The list is remembered for a while, and a part that was created since is not on it. A name that reads like
-      // a part of a table the list knows as rotated, and is not on the list, has it read anew.
-      const known = parts
-      const rotated = new Set(known.values())
-      if (info.chain.some((name) => !known.has(name) && partOfByName(name).some((base) => base !== undefined && rotated.has(base)))) parts = await dict.rotatedParts(true)
-    }
-    const basesOf = (name: string) => tableNames([archiveOf(name), ...(parts ? [parts.get(name)] : partOfByName(name))], name)
+    const parts = sn.allows('sys_table_rotation_schedule') && sn.allows('sys_table_rotation') ? await dict.rotatedParts() : null
+    // The list is remembered for a while, and a part that the instance creates in between is not on it. So a name
+    // that reads like a part of a table the list knows as rotated counts as one, on the list or not.
+    const rotated = new Set(parts?.values())
+    const likeAPart = (name: string) => partOfByName(name).filter((base) => base !== undefined && rotated.has(base))
+    const basesOf = (name: string) => tableNames([archiveOf(name), ...(parts ? [parts.get(name), ...likeAPart(name)] : partOfByName(name))], name)
     for (const [name, base] of info.chain.flatMap((name) => basesOf(name).map((base) => [name, base]))) {
       // A table the deny list names counts whether or not the instance still has it: its archive can outlive it.
       if (sn.denies(base)) return `"${name}" holds rows of ${base} (a part of a rotated table, or its archive), and "${base}" is closed on this machine`
@@ -214,7 +211,7 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
 
   /** Whether a table that is open has a closed table below it, or may have one. */
   async function holdsClosedBelow(table: string): Promise<boolean> {
-    if (COPIES_BELOW[table]?.length || (await deniedBelow(table)).length > 0) return true
+    if (COPIES_BELOW.has(table) || (await deniedBelow(table)).length > 0) return true
     const below = await allowedBelow(table)
     return below === null || below.unlisted || below.byParent.length > 0
   }
@@ -265,7 +262,7 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     // Where the tables below cannot be listed, only the classes on the list are let through: that is all that can
     // be said, and a class on the list with a closed parent in between cannot be told. So nothing is sent.
     if (!listed) throw blocked(`Tables are closed on this machine, and the tables below "${table}" could not be listed, so it cannot be told which of its rows belong to a closed one.`, table)
-    const closed = [...new Set([...(await deniedBelow(table)), ...listed.byParent, ...(COPIES_BELOW[table] ?? [])])].sort()
+    const closed = [...new Set([...(await deniedBelow(table)), ...listed.byParent, ...(COPIES_BELOW.get(table) ?? [])])].sort()
     if (closed.length) parts.push(`${field}NOT IN${closed.join(',')}^OR${field}ISEMPTY`)
     if (listed.unlisted) parts.push(sn.openClasses(field)!)
     return parts.length ? parts.join('^') : null
@@ -300,6 +297,8 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     // Only now is a row asked for that the questions above did not have to match nothing: one that has a class.
     // Where a question failed, no such request goes out. Without such a row no row of a closed class is there.
     const row = await ask(`${field}ISNOTEMPTY`, ['sys_id', field])
+    // The question failed: that is no answer, and "no row has a class" would be read from it.
+    if (row === null) return { applied: false, lasting: false }
     const some = (page: Awaited<ReturnType<typeof ask>>) => Boolean(page && (page.records.length > 0 || (page.total ?? 0) > 0))
     const lasting = some(row)
     if (!lasting) {

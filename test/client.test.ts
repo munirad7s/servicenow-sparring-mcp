@@ -385,6 +385,29 @@ test('a token renewed during the pause after a rejected login is used at once', 
   assert.equal((await sn.query({ table: 'incident' })).records.length, 0)
 })
 
+test('a request that runs out of time after the instance has answered does not hold the others back', async () => {
+  // A token expires and is renewed. The first request with the new token runs out of time. The instance is there,
+  // so that is about that one request: the next one is sent, and no call ends because of it.
+  let token = 'old'
+  let slow = false
+  let sent = 0
+  const sn = new ServiceNowClient({ ...config, auth: { kind: 'bearer', token: 'old' }, reloadAuth: () => ({ kind: 'bearer', token }) }, async (_url, init) => {
+    sent++
+    if ((init.headers as Record<string, string>).Authorization !== 'Bearer new') return json({ error: { message: 'User Not Authenticated' } }, 401)
+    if (slow) {
+      slow = false
+      throw new DOMException('timed out', 'TimeoutError')
+    }
+    return json({ result: [] })
+  })
+  assert.equal(await kindOf(() => sn.query({ table: 'incident' })), 'auth')
+  token = 'new'
+  slow = true
+  assert.equal(await kindOf(() => sn.query({ table: 'incident' })), 'timeout')
+  assert.equal((await sn.query({ table: 'incident' })).records.length, 0)
+  assert.equal(sent, 3)
+})
+
 test('after a rejected login the client stays quiet for a minute', async () => {
   const { sn, calls } = fakeInstance([{ table: 'incident', status: 401 }])
   const started = Date.now()
@@ -537,6 +560,15 @@ test('every request is written to the audit log with the tool that asked, and no
     assert.equal(written?.status, kind)
     assert.equal(written?.rows, null)
   }
+  // Also where the list came and what is in it is no answer: a count that is no number, a row nested without end.
+  const uncountable = new ServiceNowClient(config, async () => json({ result: [{ stats: { count: 'many' }, groupby_fields: [{ value: 'x' }] }] }), { audit: (entry) => entries.push(entry) })
+  await kindOf(() => uncountable.groupCount('incident', 'state'))
+  assert.deepEqual([entries.at(-1)?.status, entries.pop()?.rows], ['invalid_response', null])
+  let nested: unknown = 'x'
+  for (let level = 0; level < 200; level++) nested = { deeper: nested }
+  const endless = new ServiceNowClient(config, async () => json({ result: [nested] }), { audit: (entry) => entries.push(entry) })
+  await kindOf(() => endless.query({ table: 'incident' }))
+  assert.deepEqual([entries.at(-1)?.status, entries.pop()?.rows], ['invalid_response', null])
 
   // A request the rules for closed tables refuse names an open table. It is logged all the same, as it was asked.
   const refused: AuditEntry[] = []
