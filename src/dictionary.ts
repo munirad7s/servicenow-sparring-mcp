@@ -331,6 +331,40 @@ export class Dictionary {
    * Drops what is remembered about a table, so that the next read asks the instance.
    * For a database view, call it for the tables it joins as well.
    */
+  /** What the table of tables looked like when it was last looked at, and when that was. */
+  private tablesSeen: { at: number; stamp: string } | null = null
+  private looking: Promise<void> | null = null
+
+  /**
+   * Looks whether a table was created, removed or changed since the lists of tables were read. A table created
+   * below a closed one holds rows of it from its first row on, and the lists are kept for ten minutes: without
+   * this, such a table was read through its parents for that long. One request, at most once in thirty seconds:
+   * how many tables there are, and which one was changed last. Where that is not what it was, everything that is
+   * remembered about tables is read anew, also where it could be read before and cannot be now.
+   */
+  tablesUnchanged(): Promise<void> {
+    if (this.tablesSeen && Date.now() - this.tablesSeen.at < this.recheckMs) return Promise.resolve()
+    this.looking ??= (async () => {
+      try {
+        const stamp = await this.sn
+          .query<Record<string, string>>({ table: 'sys_db_object', query: 'ORDERBYDESCsys_updated_on', fields: ['sys_id', 'sys_updated_on'], limit: 1 })
+          .then((page) => `${page.total}|${page.records[0]?.sys_id}|${page.records[0]?.sys_updated_on}`)
+          // Not readable is a state like any other: the lists cannot be read either then, and are not asked for
+          // with every request. Readable again, it differs and they are read anew.
+          .catch(unlessNoConnection('not read'))
+        if (this.tablesSeen && this.tablesSeen.stamp !== stamp) this.forgetTables()
+        this.tablesSeen = { at: Date.now(), stamp }
+      } finally {
+        this.looking = null
+      }
+    })()
+    return this.looking
+  }
+
+  private forgetTables(): void {
+    for (const cache of [this.tables, this.columnSets, this.choiceLists, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.closedSets, this.knownNames, this.partLists, this.shownSets, this.childSets]) cache.clear()
+  }
+
   forget(name: string): void {
     for (const cache of [this.tables, this.columnSets, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.childSets, this.shownSets]) cache.delete(name)
     for (const key of [...this.choiceLists.keys()]) if (key.startsWith(`${name}.`)) this.choiceLists.delete(key)

@@ -5769,3 +5769,58 @@ test('a system property the server reads by name is not passed on where its type
   assert.equal(secret.release.build, null)
   assert.match(secret.warnings.join(' '), /glide\.war was not returned/)
 })
+
+test('a table created below a closed one is kept out within half a minute', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  // The lists of closed tables are kept for ten minutes. A table created in that time holds rows of the closed
+  // one from its first row on, and "task" answers with them.
+  const stamp = (total: number, changed: string): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: changed }], total })
+  const routes: Route[] = [
+    stamp(100, '2026-11-20 09:00:00'),
+    closedTables(tableRow('incident', 'Incident', 'task')),
+    { table: 'sys_dictionary', query: 'nameINtask', rows: [column('task', 'number'), column('task', 'sys_class_name', 'sys_class_name')] },
+    ...dictionaryRoutes,
+    { table: 'task', rows: [{ number: 'TASK1' }] },
+  ]
+  const { answer, call, sentTo } = await connect(routes, { tables: { allow: [], deny: ['incident'] } })
+  const read = async () => {
+    await answer('sn_query', { table: 'task', fields: ['number'] })
+    return sentTo('task').at(-1)!.query
+  }
+  const asked = () => sentTo('sys_db_object').filter((sent) => sent.query.startsWith('ORDERBYDESCsys_updated_on')).length
+  assert.equal(await read(), 'sys_class_nameNOT INincident^ORsys_class_nameISEMPTY')
+  assert.equal(asked(), 1)
+
+  // Somebody creates a table below incident. For thirty seconds the server goes by what it read.
+  routes.unshift(stamp(101, '2026-11-20 10:00:05'), closedTables(tableRow('incident', 'Incident', 'task'), tableRow('u_major_incident', 'Major incident', 'incident', 'task')))
+  t.mock.timers.tick(20_000)
+  assert.equal(await read(), 'sys_class_nameNOT INincident^ORsys_class_nameISEMPTY')
+  assert.equal(asked(), 1)
+  // Then it looks at the table of tables again: one more table than before, so the lists are read anew.
+  t.mock.timers.tick(11_000)
+  assert.equal(await read(), 'sys_class_nameNOT INincident,u_major_incident^ORsys_class_nameISEMPTY')
+  assert.equal(asked(), 2)
+  // Nothing changed since: the look costs one request in thirty seconds, and the lists stay.
+  const lists = () => sentTo('sys_db_object').filter((sent) => sent.query.includes('^ORname=sys_db_object')).length
+  const before = lists()
+  t.mock.timers.tick(31_000)
+  assert.equal(await read(), 'sys_class_nameNOT INincident,u_major_incident^ORsys_class_nameISEMPTY')
+  assert.deepEqual([asked(), lists()], [3, before])
+
+  // A table that is moved under the closed one changes no number, and one that replaces another no date: either
+  // of the two is a change.
+  const second = tableRow('u_second', 'Second', 'incident', 'task')
+  routes.unshift(stamp(101, '2026-11-20 10:02:00'), closedTables(tableRow('incident', 'Incident', 'task'), second))
+  t.mock.timers.tick(31_000)
+  assert.equal(await read(), 'sys_class_nameNOT INincident,u_second^ORsys_class_nameISEMPTY')
+  routes.unshift(stamp(102, '2026-11-20 10:02:00'), closedTables(tableRow('incident', 'Incident', 'task'), second, tableRow('u_third', 'Third', 'incident', 'task')))
+  t.mock.timers.tick(31_000)
+  assert.equal(await read(), 'sys_class_nameNOT INincident,u_second,u_third^ORsys_class_nameISEMPTY')
+
+  // A table of tables that can no longer be read is a change as well: what was read before is not relied on.
+  const sent = sentTo('task').length
+  routes.unshift({ table: 'sys_db_object', status: 403 })
+  t.mock.timers.tick(31_000)
+  assert.equal((await call('sn_query', { table: 'task', fields: ['number'] })).data.error, 'blocked')
+  assert.equal(sentTo('task').length, sent)
+})

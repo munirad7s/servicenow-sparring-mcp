@@ -131,6 +131,8 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     if (!sn.restricted || seen.has(table)) return null
     seen.add(table)
     if (!sn.allows(table)) return `"${table}" is closed on this machine`
+    // The lists below are kept for ten minutes. A table created under a closed one in that time is seen here.
+    await dict.tablesUnchanged()
     const foundation = await closedFoundation()
     if (foundation) return foundation
 

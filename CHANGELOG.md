@@ -22,6 +22,13 @@ answer; such changes are listed under "Changed".
   its name. The name is held against the names of the rotated tables now, and the rotations themselves are read
   as well: 3 of 49 on the test instance have no part yet, so their first part would have been a table nobody knew
   as one.
+- **A table created below a closed one was read through its parents for up to ten minutes.** Which tables are
+  below a closed one is read once and kept for ten minutes. A table created in that time holds rows of the
+  closed one from its first row on, and a read of a table above it answered with them. With tables closed, the
+  server now looks at the table of tables once in thirty seconds: how many there are, and which was changed
+  last. One request of under a hundred bytes, about 120 milliseconds when measured. Where that differs, or can no
+  longer be read, everything remembered about tables is read anew. Thirty seconds remain, and the definitions of
+  views and fields are still kept for ten minutes; the README says so.
 - **What looks like a secret was taken out of a text only by `sn_query`.** The name of a captured change, of a
   record or of an upgrade entry is a text as well, and `sn_delta`, `sn_origin`, `sn_dependencies` and
   `sn_upgrade_skips` passed such texts on as they came. Every text of every answer is read now, and the words of

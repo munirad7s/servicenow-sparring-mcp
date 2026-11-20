@@ -285,9 +285,11 @@ many. The npm scripts do not write it.
   with the instance at a time, whichever function sends them.
 - With tables closed on the machine, the first calls cost more: the server has to establish which tables are
   closed, what a table is a child or a parent of, and that the instance applies the conditions it relies on.
-  Measured on a fresh server: 15 requests to list the 1,349 tables below a closed one, 18 for the first query on
-  the parent of a closed table, then 1 for the next and 2 for the first on another table. With a long list of the
-  only tables that may be read, a first `sn_instance` took 172. A read with display values asks, once in ten
+  Measured on a fresh server with one table closed: 27 requests for the first query on its parent, then 1 for the
+  next and 6 for the first on another table; 3 of the 27 list the tables below the closed one where there are
+  1,348 of them. With a list of the only tables that may be read, a first `sn_instance` took 153 requests with
+  three entries on the list and 169 with eleven, in eleven seconds, and a second one about 40; with no table
+  closed it takes 51. A read with display values asks, once in ten
   minutes, what the tables behind its references are and what a row of each shows as its name: three requests
   for up to forty tables. Measured with users closed, the first read of twenty incidents with display values
   took 10 requests.
@@ -302,6 +304,13 @@ many. The npm scripts do not write it.
   page in place of data, or a refusal that is not in the JSON an instance refuses with, as a proxy in front of
   it sends. One request that runs out of time does not: where the answer does not depend on it, the answer says
   what could not be read.
+- With tables closed, the server looks at the table of tables once in thirty seconds: how many tables there
+  are, and which was changed last. That is one request of under a hundred bytes (measured: about 120
+  milliseconds). Where either differs, everything it remembers about tables is read anew. A table created below
+  a closed one holds rows of it from its first row on, and without this look it was read through its parents
+  until the lists were ten minutes old. Thirty seconds remain. The definition of a database view and the fields
+  of a table are still kept for ten minutes: a view that is changed to join a closed table, or a reference that
+  is pointed at one, is seen after that.
 - What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is
   missing from an entry older than 30 seconds is looked up once more, so a field created during a session is
   found. `sn_schema` reads the dictionary anew for every call, for a database view also that of the tables it
