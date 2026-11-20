@@ -230,6 +230,9 @@ appends one line per request:
 {"time":"2026-11-20T02:14:07.101Z","tool":"sn_query","api":"table","table":"sys_script","query":"collection=incident^active=true","fields":["name","when"],"status":200,"sent":1,"rows":2,"total":83,"ms":212}
 ```
 
+`status` is the HTTP status of the answer. Where a request failed without a status that says so, it is the kind of
+failure in its place (for example `timeout`, `network`, `invalid_response` or `too_large`), so that a 200 always
+stands for an answer that was read.
 `sent` is the number of HTTP requests this took: 0 for a request that was refused or held back, 2 after a retry.
 A call that was refused because of a closed table has its line as well, with the status `blocked`, also where it
 was refused before any request was made: the log is there to show what was tried.

@@ -166,9 +166,6 @@ export class ServiceNowClient {
     if (display) params.set('sysparm_display_value', 'all')
 
     const { body, headers } = await this.get('table', table, sent, fields?.length ? fields : null, params)
-    if (!Array.isArray(body.result)) {
-      throw new ServiceNowError(`${this.host} answered without a result list.`, 'invalid_response', table)
-    }
 
     const header = headers.get('x-total-count')
     const total = header !== null && /^\d+$/.test(header) ? Number(header) : null
@@ -290,9 +287,6 @@ export class ServiceNowClient {
     if (display) params.set('sysparm_display_value', 'all')
 
     const { body } = await this.get('stats', table, query, [groupBy], params)
-    if (!Array.isArray(body.result)) {
-      throw new ServiceNowError(`${this.host} answered without a result list.`, 'invalid_response', table)
-    }
 
     const groups = (body.result as Array<{ stats?: { count?: unknown }; groupby_fields?: Array<{ value?: unknown; display_value?: unknown }> } | null>).map((group) => {
       const count = String(group?.stats?.count ?? '')
@@ -313,7 +307,7 @@ export class ServiceNowClient {
     query: string,
     fields: string[] | null,
     params: URLSearchParams,
-  ): Promise<{ body: { result?: unknown }; headers: Headers }> {
+  ): Promise<{ body: { result: unknown[] }; headers: Headers }> {
     const started = Date.now()
     const count = { sent: 0 }
     const log = (status: number | ErrorKind, rows: number | null, total: number | null) =>
@@ -323,15 +317,14 @@ export class ServiceNowClient {
       // A table closed on this machine is not asked for, but the attempt is still written to the audit log.
       this.assertAllowed(table)
       const answer = await this.inTurn(() => (this.accepted ? this.send(api, table, params, count) : this.alone(() => this.send(api, table, params, count))))
-      if (!Array.isArray(answer.body.result)) {
-        throw new ServiceNowError(`${this.host} answered without a result list.`, 'invalid_response', table)
-      }
       const header = answer.headers.get('x-total-count')
       log(200, answer.body.result.length, header !== null && /^\d+$/.test(header) ? Number(header) : null)
       return answer
     } catch (error) {
-      // A request that was not sent has no HTTP status of its own.
-      log(error instanceof ServiceNowError ? ((count.sent ? error.status : undefined) ?? error.kind) : 'unknown', null, null)
+      // A request that was not sent has no HTTP status of its own. And a status that says "fine" is not written for
+      // a request that failed: an answer too large to read, an error inside it, or no answer of an instance at all.
+      const status = error instanceof ServiceNowError && count.sent ? error.status : undefined
+      log(error instanceof ServiceNowError ? (status !== undefined && (status < 200 || status > 299) ? status : error.kind) : 'unknown', null, null)
       if (error instanceof Error) this.written.add(error)
       throw error
     }
@@ -381,7 +374,7 @@ export class ServiceNowClient {
     // Each kind of second try is made once, and one does not use up the other: a token can expire while a request
     // waits for the rate limit.
     tried: { login?: boolean; rate?: boolean } = {},
-  ): Promise<{ body: { result?: unknown }; headers: Headers }> {
+  ): Promise<{ body: { result: unknown[] }; headers: Headers }> {
     if (this.paused?.rejected) {
       // A pause after a rejected login holds for the credentials that were rejected. Others end it at once:
       // a renewed token in the env file, or one a request in flight picked up in the meantime.
@@ -394,7 +387,9 @@ export class ServiceNowClient {
         const { error } = this.paused
         const held = new ServiceNowError(`${error.message} Not sent again for a moment, because the last request to this instance failed.`, error.kind, table, error.status)
         const now = currentCall()
-        if (now && (error.kind === 'auth' || error.kind === 'network' || error.kind === 'redirect' || error.kind === 'invalid_response')) now.ended ??= held
+        // Held, the request says nothing about what was asked: also where the failure before it was one request
+        // that ran out of time, which ends no call of its own.
+        if (now) now.ended ??= held
         throw held
       }
       this.paused = null
@@ -494,16 +489,19 @@ export class ServiceNowClient {
       )
     }
 
-    if (!isObject || !body) {
+    const result = isObject ? body?.result : undefined
+    if (!Array.isArray(result)) {
       const type = quoteInstanceText(response.headers.get('content-type') ?? 'unknown content type', 80)
-      const error = this.pauseIfClosed(new ServiceNowError(`${this.host} did not answer with JSON (HTTP ${response.status}, ${type}).`, 'invalid_response', table, response.status))
-      // What answers is not the API of an instance: a page of a sleeping instance, or of a proxy.
+      const said = isObject ? `${this.host} answered without a result list (HTTP ${response.status}).` : `${this.host} did not answer with JSON (HTTP ${response.status}, ${type}).`
+      const error = this.pauseIfClosed(new ServiceNowError(said, 'invalid_response', table, response.status))
+      // What answers is not the API of an instance: a page of a sleeping instance, or the answer of a proxy,
+      // also where that is JSON. Every list this server asks for comes as a list.
       if (call) call.ended ??= error
       throw error
     }
 
     this.accepted = true
-    return { body, headers: response.headers }
+    return { body: { result }, headers: response.headers }
   }
 
   /** Reads the body, and stops as soon as it is larger than allowed. */

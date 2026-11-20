@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { ServiceNowClient, type AuditEntry } from '../src/client.js'
 import { ServiceNowError } from '../src/errors.js'
 import { createContext } from '../src/server.js'
-import { traced } from '../src/trace.js'
+import { currentCall, traced } from '../src/trace.js'
 import { config, dictionaryRoutes, fakeInstance } from './fake.js'
 
 const failure = async (run: () => Promise<unknown>): Promise<ServiceNowError> => {
@@ -94,9 +94,51 @@ test('an answer that is not JSON is an error, not "no rows"', async () => {
   assert.equal(await kindOf(() => sn.query({ table: 'incident' })), 'invalid_response')
 })
 
-test('an answer without a result list is an error', async () => {
-  const sn = new ServiceNowClient(config, async () => json({ result: { a: 1 } }))
-  assert.equal(await kindOf(() => sn.query({ table: 'incident' })), 'invalid_response')
+test('an answer without a result list is an error, and no answer of an instance', async () => {
+  for (const body of [{ result: { a: 1 } }, {}, { message: 'maintenance' }, [], { result: null }]) {
+    let requests = 0
+    const sn = new ServiceNowClient(config, async () => (requests++, json(body)))
+    const error = await failure(() => sn.query({ table: 'incident' }))
+    assert.equal(error.kind, 'invalid_response', JSON.stringify(body))
+    assert.match(error.message, /answered without a result list \(HTTP 200\)/)
+    // Whatever answered is not the API of an instance: it does not count as an accepted login, and nothing is
+    // sent behind it for a moment, as after a page from a proxy.
+    assert.match((await failure(() => sn.groupCount('incident', 'state'))).message, /Not sent again/)
+    assert.equal(requests, 1)
+  }
+})
+
+test('what is not the answer of an instance ends the call it comes in, and so does a request that is held back', async () => {
+  const endedBy = (sn: ServiceNowClient, requests: number) =>
+    traced('sn_example', async () => {
+      const seen: Array<Error | undefined> = []
+      for (let request = 0; request < requests; request++) {
+        // A look-up that catches every failure, as the counts of a list do.
+        await sn.query({ table: 'incident' }).catch(() => undefined)
+        seen.push(currentCall()!.ended)
+      }
+      return seen
+    })({})
+
+  // JSON without a result list, in the middle of a call: the same as a page in place of data.
+  let sent = 0
+  const gateway = new ServiceNowClient(config, async () => (++sent === 1 ? json({ result: [{ number: 'INC1' }] }) : json({})))
+  const [fine, broken] = await endedBy(gateway, 2)
+  assert.equal(fine, undefined)
+  assert.equal((broken as ServiceNowError).kind, 'invalid_response')
+
+  // One request that ran out of time is about that request. The one behind it is not sent while nothing has ever
+  // answered: that says nothing about what was asked, so the call ends there.
+  let attempts = 0
+  const slow = new ServiceNowClient(config, async () => {
+    attempts++
+    throw new DOMException('timed out', 'TimeoutError')
+  })
+  const [first, held] = await endedBy(slow, 2)
+  assert.equal(first, undefined)
+  assert.equal((held as ServiceNowError).kind, 'timeout')
+  assert.match((held as Error).message, /Not sent again/)
+  assert.equal(attempts, 1)
 })
 
 test('redirects are not followed, and are named as such', async () => {
@@ -478,9 +520,19 @@ test('every request is written to the audit log with the tool that asked, and no
   const limited = fakeInstance([{ table: 'incident', status: 429 }], {}, (entry) => entries.push(entry))
   await kindOf(() => limited.sn.query({ table: 'incident', fields: ['number'] }))
   assert.deepEqual(entries.splice(-1).map((entry) => `${entry.status}, sent ${entry.sent}, fields ${entry.fields}`), ['429, sent 2, fields number'])
-  const odd = new ServiceNowClient(config, async () => json({ result: { a: 1 } }), { audit: (entry) => entries.push(entry) })
-  await kindOf(() => odd.query({ table: 'incident' }))
-  assert.equal(entries.pop()?.status, 'invalid_response')
+  // A request that failed is never written with the status of one that went well: these three all come with HTTP 200.
+  for (const [answer, kind] of [
+    [() => json({ result: { a: 1 } }), 'invalid_response'],
+    [() => new Response('<html>Your instance is hibernating</html>', { status: 200 }), 'invalid_response'],
+    [() => json({ error: { message: 'Operation Failed', detail: 'ACL Exception Read Failed' } }), 'acl'],
+    [() => new Response('x'.repeat(config.maxResponseBytes + 1), { status: 200 }), 'too_large'],
+  ] as const) {
+    const odd = new ServiceNowClient(config, async () => answer(), { audit: (entry) => entries.push(entry) })
+    await kindOf(() => odd.query({ table: 'incident' }))
+    const written = entries.pop()
+    assert.equal(written?.status, kind)
+    assert.equal(written?.rows, null)
+  }
 
   // A request the rules for closed tables refuse names an open table. It is logged all the same, as it was asked.
   const refused: AuditEntry[] = []

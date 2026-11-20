@@ -3516,8 +3516,9 @@ test('a login that is rejected in the middle of a call is passed on as that', as
   const atTheEnd = await last.call('sn_plugins')
   assert.equal(atTheEnd.isError, true)
   assert.equal(atTheEnd.data.error, 'auth')
-  // The same for an instance that can no longer be reached, and for one that answers with a page in place of data.
-  for (const [kind, broken] of [['network', { unreachable: true }], ['invalid_response', { body: '<html>Your instance is hibernating</html>' }]] as const) {
+  // The same for an instance that can no longer be reached, and for one that answers with a page in place of data,
+  // or with JSON that carries no list: a gateway in front of the instance answers that way.
+  for (const [kind, broken] of [['network', { unreachable: true }], ['invalid_response', { body: '<html>Your instance is hibernating</html>' }], ['invalid_response', { body: '{}' }], ['invalid_response', { body: '{"result":{"stats":{"count":"3"}}}' }]] as const) {
     const gone = await connect([{ table: 'v_plugin', rows: [{ id: 'com.example', name: 'Example', active: 'active', version: '1.0' }] }, ...['sys_store_app', 'sys_scope', 'sys_app'].map((table): Route => ({ table, ...broken }))])
     const answer = await gone.call('sn_plugins')
     assert.equal(answer.isError, true, kind)
