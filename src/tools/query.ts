@@ -97,7 +97,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     // Which tables the update names of this page begin with is asked for the page as a whole.
     const beside = (row: Row) => Object.keys(row).flatMap((key) => {
       const nameOf = recordNameKey(table, key, describe(key), owners.get(key)?.table, shape.info?.chain)
-      return nameOf?.holds === 'update_name' && nameOf.path in row ? [rawOf(row[nameOf.path])] : []
+      return nameOf?.holds === 'update_name' && Object.hasOwn(row, nameOf.path) ? [rawOf(row[nameOf.path])] : []
     })
     const named = restricted ? await knowRecordTables(ctx, rows.flatMap(beside)) : undefined
     if (named) warnings.push(...leftOutNames(named))
@@ -135,7 +135,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         } else if (nameOf && filled(value)) {
           // The readable name of a record of another table. Without what says which record, there is no telling: an
           // empty name is no table, and no update name stands for a closed record.
-          const which = nameOf.path in row ? rawOf(row[nameOf.path]) : ''
+          const which = Object.hasOwn(row, nameOf.path) ? rawOf(row[nameOf.path]) : ''
           const closed =
             nameOf.holds === 'untold' ? true : nameOf.holds === 'table' ? !nameOf.notTables?.includes(which) && (await isClosedTableName(ctx, which)) : await isClosedRecord(ctx, which, named)
           if (closed) counts.closedNames++
@@ -414,7 +414,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
           })
 
         const first = page.records[0]
-        const leftOut = first ? (fields ?? []).filter((field) => !(field in first)) : []
+        const leftOut = first ? (fields ?? []).filter((field) => !Object.hasOwn(first, field)) : []
         if (leftOut.length) warnings.push(`The instance left out the requested field(s) ${leftOut.join(', ')}.`)
 
         const { known, complete } = await describeFields(table, fields, guard)

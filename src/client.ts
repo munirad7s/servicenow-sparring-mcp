@@ -101,10 +101,21 @@ const MAX_IN_FLIGHT = 8
  */
 const MAX_REQUESTS_PER_CALL = 500
 /**
- * As long as the path and the parameters of a request may be. Measured: an instance took an address of 8,218
- * characters and answered HTTP 414 to one of 8,223. A caret or a comma takes three of them.
+ * As long as one call may take before it sends no further request: this, or three times what one request may
+ * take where that is set higher. A client has given up on the call long before.
+ */
+const MAX_CALL_MS = 90_000
+/**
+ * As long as the path and the parameters of a request may be. Measured: an instance took a path with its
+ * parameters of 8,177 characters and answered HTTP 414 to one of 8,178. That is a first line of the request of
+ * 8,192 bytes, so the name of the host does not count. A caret or a comma takes three characters.
  */
 const MAX_REQUEST_LENGTH = 8_000
+/**
+ * Refusals that are about the size of one request, by whatever stands in front of the instance: measured, HTTP
+ * 414 comes as a page of HTML and not in the JSON of an instance. They say nothing about who answers.
+ */
+const ABOUT_THE_REQUEST = new Set([413, 414, 431])
 /** A cell of a row is a text, or a value with its display value. Anything nested deeper is no row of a table. */
 const MAX_CELL_DEPTH = 4
 const nestedTooDeep = (value: unknown, left: number): boolean => value !== null && typeof value === 'object' && (left === 0 || Object.values(value).some((inner) => nestedTooDeep(inner, left - 1)))
@@ -175,7 +186,12 @@ export class ServiceNowClient {
 
     const { records, total } = await this.get('table', table, sent, fields?.length ? fields : null, params, (result, headers) => {
       const header = headers.get('x-total-count')
-      const rows = result.filter((row): row is T => row !== null && typeof row === 'object')
+      // Only the fields that were asked for: an instance sends no others, and what is not an instance is not
+      // trusted to. Every check behind this is made for the fields of the request.
+      const asked = fields?.length ? new Set(fields) : null
+      const rows = result
+        .filter((row): row is T => row !== null && typeof row === 'object')
+        .map((row) => (asked && !Array.isArray(row) ? (Object.fromEntries(Object.entries(row as object).filter(([key]) => asked.has(key))) as T) : row))
       // What reads the rows afterwards goes as deep as they go. A row nested thousands of levels would end the call
       // with an error of the runtime, and not with a sentence about the answer.
       if (rows.some((row) => nestedTooDeep(row, MAX_CELL_DEPTH))) {
@@ -305,11 +321,16 @@ export class ServiceNowClient {
       (result as Array<{ stats?: { count?: unknown }; groupby_fields?: Array<{ value?: unknown; display_value?: unknown }> } | null>).map((group) => {
         const count = String(group?.stats?.count ?? '')
         if (!/^\d+$/.test(count)) {
-          throw new ServiceNowError(`${this.host} answered with a count that is not a number.`, 'invalid_response', table)
+          // No answer of an instance: it ends the call, whatever catches it.
+          const error = new ServiceNowError(`${this.host} answered with a count that is not a number.`, 'invalid_response', table)
+          const call = currentCall()
+          if (call) call.ended ??= error
+          throw error
         }
         const field = group?.groupby_fields?.[0]
         const value = String(field?.value ?? '')
-        const shown = String(field?.display_value ?? '')
+        // A label is taken only where one was asked for: it is not asked for where it could name a closed record.
+        const shown = display ? String(field?.display_value ?? '') : ''
         return { value, count: Number(count), ...(shown && shown !== value ? { display: shown } : {}) }
       }),
     )
@@ -436,6 +457,17 @@ export class ServiceNowClient {
       )
       throw call.ended
     }
+    const allowed = Math.max(MAX_CALL_MS, 3 * this.config.timeoutMs)
+    if (call && Date.now() - call.started > allowed) {
+      // Many small requests to a slow instance add up: 150 questions of two seconds each are five minutes, and
+      // every one of them stays within the limit for one request.
+      call.ended ??= endsTheCall(
+        `This call was stopped after ${allowed / 1000} seconds: the instance answers slowly, and the call needs many requests. ` +
+          'Ask for less at a time: fewer conditions, fewer fields, fewer rows.',
+        table,
+      )
+      throw call.ended
+    }
     const url = `${this.config.instanceUrl}${path}`
     const sent = this.auth
     this.requestCount++
@@ -470,6 +502,17 @@ export class ServiceNowClient {
       throw error
     }
 
+    let body: { result?: unknown; error?: { message?: unknown; detail?: unknown } } | undefined
+    try {
+      body = JSON.parse(text)
+    } catch {
+      body = undefined
+    }
+    const isObject = body !== null && typeof body === 'object'
+    // A refusal in the words of an instance: JSON with an error in it. A page in front of the instance, a proxy
+    // that denies or a gateway that fails, answers with a status too, and is no instance.
+    const saysSo = isObject && Boolean(body?.error)
+
     if (response.status === 401) {
       // Try again once with other credentials: those another request picked up in the meantime, or those now in the env file.
       const fresh = tried.login ? undefined : this.config.reloadAuth?.()
@@ -479,7 +522,7 @@ export class ServiceNowClient {
       const error = new ServiceNowError(`${this.host} rejected the credentials (HTTP 401).`, 'auth', table, 401)
       // Back to one request at a time: an expired token must not be retried by everything in flight.
       this.accepted = false
-      this.answered = true
+      if (saysSo) this.answered = true
       this.paused = { until: Date.now() + PAUSE_AFTER_REJECTED_LOGIN_MS, error, rejected: sent }
       // A rejected login is not a missing piece of an answer: the call it happens in fails.
       if (call) call.ended ??= error
@@ -492,26 +535,28 @@ export class ServiceNowClient {
       return this.send(api, table, params, count, { ...tried, rate: true })
     }
 
-    let body: { result?: unknown; error?: { message?: unknown; detail?: unknown } } | undefined
-    try {
-      body = JSON.parse(text)
-    } catch {
-      body = undefined
-    }
-    const isObject = body !== null && typeof body === 'object'
-
-    if (!response.ok || (isObject && body?.error)) {
+    if (!response.ok || saysSo) {
       // A refusal by the instance itself means it is reachable and took the login. A 5xx or 429 can come from in front of it.
-      if (response.status < 500 && response.status !== 429) this.accepted = this.answered = true
+      if (saysSo && response.status < 500 && response.status !== 429) this.accepted = this.answered = true
       const message = quoteInstanceText(isObject ? body?.error?.message : '')
       const detail = quoteInstanceText(isObject ? body?.error?.detail : '')
       const said = message ? `: "${message}"${detail ? ` ("${detail}")` : ''}` : ''
-      throw new ServiceNowError(
-        `${this.host} answered HTTP ${response.status}${said}.`,
-        classify(response.status, `${message} ${detail}`),
+      // A refusal below 500 that is not in the words of an instance is the page of something in front of it: that
+      // says nothing about what this account may read.
+      const upstream = !saysSo && response.status < 500 && response.status !== 429 && !ABOUT_THE_REQUEST.has(response.status)
+      const error = new ServiceNowError(
+        upstream
+          ? `${this.host} answered HTTP ${response.status} without the JSON of an instance (${quoteInstanceText(response.headers.get('content-type') ?? 'unknown content type', 80)}): a proxy or a page in front of the instance.`
+          : `${this.host} answered HTTP ${response.status}${said}.`,
+        upstream ? 'invalid_response' : classify(response.status, `${message} ${detail}`),
         table,
         response.status,
       )
+      if (upstream) {
+        this.pauseIfClosed(error)
+        if (call) call.ended ??= error
+      }
+      throw error
     }
 
     const result = isObject ? body?.result : undefined

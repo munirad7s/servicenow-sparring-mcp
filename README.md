@@ -292,12 +292,16 @@ many. The npm scripts do not write it.
   for up to forty tables. Measured with users closed, the first read of twenty incidents with display values
   took 10 requests.
 - One call sends at most 500 requests and ends with an error after that. A call needs that many only where it
-  names hundreds of things that each have to be looked up. A request whose address would be longer than 8,000
-  characters is not sent: measured, an instance took 8,218 and answered HTTP 414 to 8,223, and a caret, a comma
-  or an equals sign takes three of them.
+  names hundreds of things that each have to be looked up. A call that has run for 90 seconds sends no further
+  request and ends the same way; where the limit for one request is set above 30 seconds, a call has three times
+  that. A request whose path and parameters would be longer
+  than 8,000 characters is not sent: measured, an instance took 8,177 and answered HTTP 414 to 8,178, whatever
+  the name of its host, and a caret, a comma or an equals sign takes three of them.
 - A login that is rejected in the middle of a call, or an instance that can no longer be reached, ends the call
-  with that error, whichever look-up it happened in. One request that runs out of time does not: where the
-  answer does not depend on it, the answer says what could not be read.
+  with that error, whichever look-up it happened in. So does an answer that is not the answer of an instance: a
+  page in place of data, or a refusal that is not in the JSON an instance refuses with, as a proxy in front of
+  it sends. One request that runs out of time does not: where the answer does not depend on it, the answer says
+  what could not be read.
 - What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is
   missing from an entry older than 30 seconds is looked up once more, so a field created during a session is
   found. `sn_schema` reads the dictionary anew for every call, for a database view also that of the tables it

@@ -75,9 +75,9 @@ const shownFrom = (column: { type: string; reference: string | null } | undefine
   !column ? null : column.type === 'domain_id' ? 'domain' : JOURNALS.has(column.type) ? 'sys_journal_field' : ATTACHMENTS.has(column.type) ? 'sys_attachment' : column.reference
 
 /**
- * As long as a query may be once it is written into the address of a request. Measured: an instance took an
- * address of 8,218 characters and answered HTTP 414 to one of 8,223, and a caret or a comma takes three of them.
- * The rest is left for the fields a request names.
+ * As long as a query may be once it is written into the address of a request. Measured: an instance took a path
+ * with its parameters of 8,177 characters and answered HTTP 414 to one of 8,178, and a caret or a comma takes
+ * three of them. The rest is left for the fields a request names.
  */
 const MAX_SENT_QUERY = 6_000
 /** How long a proof that the instance applies a condition holds, and how many are kept. */
@@ -373,7 +373,7 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
       const conditions: string[] = []
       const dotted = [...new Set(paths.filter((path) => path.includes('.')))]
       if (dotted.length) {
-        const check = await dict.checkFields(table, dotted)
+        const check = await dict.checkFields(table, dotted, false)
         for (const name of check.reached) {
           const closed = await reason(name)
           if (closed) throw blocked(`This request reads from ${name} through a dot-walk or a database view, and ${closed}.`, name)
@@ -422,7 +422,7 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     async prepare(table, paths) {
       if (!sn.restricted) return
       // Best effort: whatever fails here fails again where each field is judged, and is dealt with there.
-      const check = await dict.checkFields(table, paths).catch(unlessNoConnection(null))
+      const check = await dict.checkFields(table, paths, false).catch(unlessNoConnection(null))
       const targets = [...new Set(paths.map((path) => shownFrom(check?.resolved.get(path))).filter((target): target is string => Boolean(target)))]
       if (targets.length < 2) return
       // What each of these tables extends, in one request for forty of them, and then what each shows as its name.
@@ -433,7 +433,7 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
 
     async hidesNames(table, path, shown = false) {
       if (!sn.restricted) return null
-      const check = await dict.checkFields(table, [path])
+      const check = await dict.checkFields(table, [path], false)
       const column = check.resolved.get(path)
       // Which table the name comes from is not known: the type could not be read, or the field can point anywhere.
       if (!column?.type || column.type === 'document_id') return 'untold'

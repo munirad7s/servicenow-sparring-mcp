@@ -596,3 +596,154 @@ test('every request is written to the audit log with the tool that asked, and no
   const written = JSON.stringify(entries)
   assert.doesNotMatch(written, /secret|private text|Basic /)
 })
+
+test('a refusal that is not in the words of an instance is no refusal by the instance', async () => {
+  const page = (status: number) => new Response('<html><body>Denied</body></html>', { status, headers: { 'content-type': 'text/html' } })
+  const refusal = (status: number) => json({ error: { message: 'Operation Failed', detail: 'ACL Exception Read Failed due to security constraints' }, status: 'failure' }, status)
+
+  // Measured: an instance refuses in JSON with an error in it, whatever the status (400, 401, 403, 404). A page
+  // with such a status comes from what stands in front of it, and says nothing about what this account may read.
+  let sent = 0
+  const proxied = new ServiceNowClient(config, async () => (sent++, page(403)))
+  const denied = await failure(() => proxied.query({ table: 'incident' }))
+  assert.equal(denied.kind, 'invalid_response')
+  assert.equal(denied.status, 403)
+  assert.match(denied.message, /HTTP 403 without the JSON of an instance \(text\/html\)/)
+  // No instance has answered yet, so nothing is sent behind it for a moment: as after any page in place of data.
+  assert.match((await failure(() => proxied.query({ table: 'incident' }))).message, /Not sent again/)
+  assert.equal(sent, 1)
+
+  // JSON alone does not make it an instance: one refuses with an error in it.
+  const policy = new ServiceNowClient(config, async () => json({ message: 'Blocked by policy' }, 403))
+  assert.equal(await kindOf(() => policy.query({ table: 'incident' })), 'invalid_response')
+
+  // The instance itself refuses: that is about the table, and the next request is sent.
+  let asked = 0
+  const refusing = new ServiceNowClient(config, async () => (asked++, refusal(403)))
+  assert.equal(await kindOf(() => refusing.query({ table: 'incident' })), 'acl')
+  assert.equal(await kindOf(() => refusing.query({ table: 'incident' })), 'acl')
+  assert.equal(asked, 2)
+
+  // In the middle of a call the page ends the call, whichever look-up it came in: a tool that takes "not
+  // readable" for an answer must not take this for one.
+  let requests = 0
+  const behind = new ServiceNowClient(config, async () => (++requests === 1 ? json({ result: [{ number: 'INC1' }] }) : page(404)))
+  const ended = await traced('sn_example', async () => {
+    await behind.query({ table: 'incident' })
+    await behind.query({ table: 'incident' }).catch(() => undefined)
+    return currentCall()!.ended
+  })({})
+  assert.equal((ended as ServiceNowError).kind, 'invalid_response')
+  // The refusal of the instance does not.
+  const stays = await traced('sn_example', async () => {
+    await refusing.query({ table: 'incident' }).catch(() => undefined)
+    return currentCall()!.ended
+  })({})
+  assert.equal(stays, undefined)
+
+  // Measured: a request too long for what stands in front of the instance is answered with HTTP 414 and a page.
+  // That is about the one request: it is named as before, and the next one is sent.
+  let tried = 0
+  const long = new ServiceNowClient(config, async () => (++tried === 1 ? page(414) : json({ result: [] })))
+  assert.equal(await kindOf(() => long.query({ table: 'incident' })), 'bad_request')
+  assert.equal((await long.query({ table: 'incident' })).records.length, 0)
+})
+
+test('a rejected login that is not in the words of an instance does not count as an answer of the instance', async () => {
+  // A gateway asks for a login of its own with a page. Other credentials end the pause after it. The instance
+  // behind it has still never answered: a request that fails to connect then holds the next one back.
+  const scene = (first: () => Response) => {
+    let token = 'old'
+    let sent = 0
+    const sn = new ServiceNowClient({ ...config, auth: { kind: 'bearer', token: 'old' }, reloadAuth: () => ({ kind: 'bearer', token }) }, async () => {
+      if (++sent === 1) return first()
+      throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } })
+    })
+    return { sn, renew: () => void (token = 'new'), sent: () => sent }
+  }
+  const gateway = scene(() => new Response('<html>Sign in</html>', { status: 401, headers: { 'content-type': 'text/html' } }))
+  assert.equal(await kindOf(() => gateway.sn.query({ table: 'incident' })), 'auth')
+  gateway.renew()
+  assert.equal(await kindOf(() => gateway.sn.query({ table: 'incident' })), 'network')
+  assert.match((await failure(() => gateway.sn.query({ table: 'incident' }))).message, /Not sent again/)
+  assert.equal(gateway.sent(), 2)
+
+  // The instance rejecting the login in its own words has answered: a failure to connect after that is about
+  // that one request.
+  const instance = scene(() => json({ error: { message: 'User Not Authenticated', detail: 'Required to provide Auth information' }, status: 'failure' }, 401))
+  assert.equal(await kindOf(() => instance.sn.query({ table: 'incident' })), 'auth')
+  instance.renew()
+  assert.equal(await kindOf(() => instance.sn.query({ table: 'incident' })), 'network')
+  assert.equal(await kindOf(() => instance.sn.query({ table: 'incident' })), 'network')
+  assert.equal(instance.sent(), 3)
+})
+
+test('what was not asked for is not taken from an answer', async () => {
+  // Measured: counted per value, an instance sends a label only where display values were asked for (five fields,
+  // with the parameter left out, "false" and "true": none). What sends one all the same is not believed.
+  const labelled = new ServiceNowClient(config, async () => json({ result: [{ stats: { count: '3' }, groupby_fields: [{ field: 'assigned_to', value: 'abc', display_value: 'Alice Example' }] }] }))
+  assert.deepEqual(await labelled.groupCount('incident', 'assigned_to'), [{ value: 'abc', count: 3 }])
+  assert.deepEqual(await labelled.groupCount('incident', 'assigned_to', '', true), [{ value: 'abc', count: 3, display: 'Alice Example' }])
+
+  // A row carries the fields that were asked for. Every check on what a row shows is made for those.
+  const wide = new ServiceNowClient(config, async () => json({ result: [{ number: 'INC1', short_description: 'x', u_note: { value: 'abc', display_value: 'Alice Example' } }] }))
+  assert.deepEqual((await wide.query({ table: 'incident', fields: ['number', 'short_description'] })).records, [{ number: 'INC1', short_description: 'x' }])
+  assert.deepEqual((await wide.query({ table: 'incident', fields: ['number'], display: true })).records, [{ number: 'INC1' }])
+  // Without a list of fields the instance sends every field of the row.
+  assert.deepEqual(Object.keys((await wide.query({ table: 'incident' })).records[0]), ['number', 'short_description', 'u_note'])
+})
+
+test('a call that has run for a minute and a half sends no further request', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  let sent = 0
+  // Each request takes twenty seconds: within the limit for one request, and five of them are more than a call may take.
+  const slow = new ServiceNowClient(config, async () => {
+    sent++
+    t.mock.timers.tick(20_000)
+    return json({ result: [{ number: 'INC1' }] })
+  })
+  const seen = await traced('sn_example', async () => {
+    const kinds: string[] = []
+    for (let request = 0; request < 8; request++) {
+      // A look-up that catches every failure, as the counts of a list do.
+      kinds.push(await slow.query({ table: 'incident' }).then(() => 'answered', (error) => (error as ServiceNowError).kind))
+    }
+    return { kinds, ended: currentCall()!.ended }
+  })({})
+  // Sent at 0, 20, 40, 60 and 80 seconds; at 100 the call is over.
+  assert.deepEqual(seen.kinds, ['answered', 'answered', 'answered', 'answered', 'answered', 'too_large', 'too_large', 'too_large'])
+  assert.equal(sent, 5)
+  assert.match((seen.ended as Error).message, /stopped after 90 seconds/)
+
+  // Another call starts its own time, and a request outside of any call has none.
+  assert.equal((await traced('sn_example', () => slow.query({ table: 'incident' }))({})).records.length, 1)
+  t.mock.timers.tick(200_000)
+  assert.equal((await slow.query({ table: 'incident' })).records.length, 1)
+
+  // Where one request may take two minutes, a call may take six: a limit set that high is set for an instance
+  // that needs it.
+  let patient = 0
+  const allowed = new ServiceNowClient({ ...config, timeoutMs: 120_000 }, async () => {
+    patient++
+    t.mock.timers.tick(100_000)
+    return json({ result: [] })
+  })
+  const kinds = await traced('sn_example', async () => {
+    const seen: string[] = []
+    for (let request = 0; request < 6; request++) seen.push(await allowed.query({ table: 'incident' }).then(() => 'answered', (error) => (error as ServiceNowError).kind))
+    return seen
+  })({})
+  // Sent at 0, 100, 200 and 300 seconds; at 400 the call is over.
+  assert.deepEqual(kinds, ['answered', 'answered', 'answered', 'answered', 'too_large', 'too_large'])
+  assert.equal(patient, 4)
+})
+
+test('a count that is no number ends the call it comes in', async () => {
+  const broken = new ServiceNowClient(config, async () => json({ result: [{ stats: { count: 'many' }, groupby_fields: [{ field: 'state', value: '1' }] }] }))
+  const ended = await traced('sn_example', async () => {
+    await broken.groupCount('incident', 'state').catch(() => undefined)
+    return currentCall()!.ended
+  })({})
+  assert.equal((ended as ServiceNowError).kind, 'invalid_response')
+  assert.match((ended as Error).message, /count that is not a number/)
+})

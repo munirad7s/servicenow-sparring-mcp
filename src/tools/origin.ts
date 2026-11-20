@@ -512,8 +512,13 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         // Versions per source. Counted here when every version is in view, asked for otherwise.
         let sources: Record<string, number> | null = null
         if (everyVersionShown) {
-          sources = {}
-          for (const row of versionRows) sources[rawOf(row.source_table) || 'unknown'] = (sources[rawOf(row.source_table) || 'unknown'] ?? 0) + 1
+          // Counted in a map: a plain object answers to "constructor" before anything was counted.
+          const tally = new Map<string, number>()
+          for (const row of versionRows) {
+            const source = rawOf(row.source_table) || 'unknown'
+            tally.set(source, (tally.get(source) ?? 0) + 1)
+          }
+          sources = Object.fromEntries(tally)
         } else if (versions) {
           const counted = await sn.groupCount('sys_update_version', 'source_table', `name=${name}`).catch(unlessNoConnection(null))
           sources = counted && Object.fromEntries(counted.map((group) => [group.value || 'unknown', group.count]))

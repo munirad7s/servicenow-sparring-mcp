@@ -37,6 +37,44 @@ answer; such changes are listed under "Changed".
 
 ### Fixed
 
+- **A page from what stands in front of the instance was taken for a refusal by the instance.** A proxy that
+  answered HTTP 403 or 404 with a page was reported as "this account may not read the table" or "no such table",
+  and it counted as a login the instance had taken. Measured: an instance refuses in JSON with an error in it,
+  with 400, 401, 403 and 404 alike. A refusal below 500 that is not that is reported as no answer of an instance
+  now, ends the call it comes in, and holds the next request back for a moment while no instance has answered.
+  HTTP 414 is the exception: measured, it comes as a page, and it is about the one request.
+- **A call had no limit in time.** Each request has one, 30 seconds unless set otherwise, and a call may send 500.
+  Against an instance that answers each of them slowly, a call could run for minutes after the client had given
+  up on it. A call sends no further request once it has run for 90 seconds, or for three times the limit of one
+  request where that is set higher, and ends with an error that says so.
+- A row comes with the fields that were asked for and no others, and a count per value with a label only where
+  one was asked for. Measured, an instance sends neither unasked (five fields counted per value, with the
+  parameter left out, "false" and "true"); what is not an instance is not trusted to, because the checks on what
+  a row shows are made for the fields of the request.
+- A count that is no number ends the call it comes in, like every other answer that is not the answer of an
+  instance.
+- The length a request may have was given as that of its address. It is the path with its parameters: measured,
+  8,177 characters were taken and 8,178 answered with HTTP 414, whatever the name of the host.
+- **A field name that every object answers to passed for a field of a row.** Where the dictionary of a table
+  cannot be read, the names in a call are checked against a row of the table. `constructor` is in every row
+  without being a field of it, so a condition on it was sent, the instance dropped it and answered with every
+  row, and the answer said the names had been verified. The same slip was in the note about fields the instance
+  left out, and in the count of versions per source of `sn_origin`, where a source of that name turned the count
+  into text.
+- **Texts made to be read slowly.** Two expressions took time with the square of the length of a text: measured,
+  14 seconds for a tag with an attribute name of 80,000 characters and no value, and 2.7 seconds for 76,000
+  characters of opening tags of a system property, written with entities, that never close. A payload can be a
+  megabyte. Both take a millisecond now. After that, 1,996 long texts built from repeated pieces were timed
+  through the two functions that read payloads: none took more than 300 milliseconds.
+- **Work that grew with what an answer carried.** A database view may be filtered, sorted or counted by twenty
+  fields in one call: each has to be proven by questions to the instance, one after the other, and a query naming
+  150 would have asked for minutes. The rules for closed tables no longer search for names that look like a field
+  they do not know: nobody read them, and each search compared with every field of the table. What is kept of the
+  dictionary has a size: a name as wide as an instance stores one (measured: 80 characters), a label 200. Two
+  tables of a view that come with the same sys_id are no usable definition.
+- With tables closed, an answer that called the table of field lists of views a view itself made the server read
+  that table to find out what it is, and the read waited for its own answer: the call never came back. No
+  instance answers that way; the tables a view is defined in are not taken for views now.
 - **A request that the instance ended because it ran too long was reported as an unknown failure.** Measured: a
   count per value of a text field of a table of 3.5 million rows came back after 61 seconds with HTTP 500 and
   "Transaction cancelled: maximum execution time exceeded". That is a request that ran out of time, and it is

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Dictionary } from '../src/dictionary.js'
 import { ServiceNowError } from '../src/errors.js'
+import { createContext } from '../src/server.js'
 import { column, dictionaryRoutes, fakeInstance, isProof, showsParents, tableRow, type Route } from './fake.js'
 
 test('a table knows its parents and its kind', async () => {
@@ -611,4 +612,22 @@ test('a row that is not the table that was asked for is not taken for it', async
   // A table that names itself among its parents, or one of them twice, has no chain that ends.
   const circle = fakeInstance([{ table: 'sys_db_object', exact: 'name=u_a', rows: [tableRow('u_a', 'A', 'u_b', 'u_a')] }])
   await assert.rejects(new Dictionary(circle.sn).table('u_a'), (error: unknown) => error instanceof ServiceNowError && error.kind === 'invalid_response')
+})
+
+test('names that look like an unknown field are searched for only where somebody reads them', async (t) => {
+  const { sn } = fakeInstance(dictionaryRoutes)
+  const dictionary = new Dictionary(sn)
+  assert.ok((await dictionary.checkFields('incident', ['short_desc'])).unknown[0].suggestions.length > 0)
+  const plain = await dictionary.checkFields('incident', ['short_desc'], false)
+  assert.deepEqual(plain.unknown.map((item) => [item.field, item.suggestions]), [['short_desc', []]])
+
+  // The rules for closed tables ask what a field is, once for every field of an answer that shows a name. They read
+  // no such names: the search compares with every field of the table, each time anew.
+  const closed = fakeInstance([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1', u_unknown: { value: 'abc', display_value: 'Somebody' } }] }], { tables: { allow: [], deny: ['sys_user'] } })
+  const context = createContext(closed.sn)
+  const asked = t.mock.method(context.dict, 'checkFields')
+  const page = await closed.sn.query({ table: 'incident', display: true })
+  assert.deepEqual(page.records, [{ number: { value: 'INC1', display_value: 'INC1' }, u_unknown: 'abc' }])
+  assert.ok(asked.mock.callCount() > 0)
+  assert.deepEqual([...new Set(asked.mock.calls.map((call) => call.arguments[2]))], [false])
 })

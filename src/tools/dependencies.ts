@@ -225,7 +225,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
       // instance does not know that field and ignored the condition.
       const first = page.records[0]
       if (first) {
-        const missing = required.filter((field) => !(field in first))
+        const missing = required.filter((field) => !Object.hasOwn(first, field))
         if (missing.length) return notChecked(`"${category.table}" has no field ${missing.join(', ')} on this instance, so the condition would have been ignored`)
       } else if ((page.total ?? 0) > 0) {
         return notChecked(`${page.total} row(s) match, but none is visible to this account`)
@@ -239,7 +239,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
         if (check.status !== 'checked') return notChecked('no row matched, and it could not be verified that the instance understood the query: it answers a query it cannot use with no rows')
       }
       // A field to name the items by that the instance does not know: then an empty name says nothing, and no name is made up for it.
-      const named = (category.label ?? []).every((field) => !first || field in first)
+      const named = (category.label ?? []).every((field) => !first || Object.hasOwn(first, field))
 
       const rows = page.records.map(tidy)
       const items = rows.map((row): Item => {

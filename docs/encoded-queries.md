@@ -264,9 +264,11 @@ Also measured:
   rows came back after 61 seconds with HTTP 500 and "Transaction cancelled: maximum execution time exceeded". A
   search through the same field, sorted by it, took 44 seconds and answered. The server reports the first as a
   request that ran out of time; its own limit, 30 seconds unless set otherwise, is usually reached before.
-- An instance takes a request up to a length. One instance took an address of 8,218 characters and answered HTTP
-  414 to one of 8,223, whatever it consisted of. `^`, `,` and `=` are written with three characters there, so a
-  query of 2,701 carets was the longest of its kind. The server does not send a request longer than 8,000.
+- An instance takes a request up to a length: the path with its parameters, without the name of the host. One
+  instance took 8,177 characters and answered HTTP 414 to 8,178, whatever they consisted of: a first line of the
+  request of 8,192 bytes. `^`, `,` and `=` are written with three characters there, so a query of 2,701 carets
+  was the longest of its kind. The server does not send a path with parameters longer than 8,000. The 414 comes
+  as a page of HTML, not in the JSON an instance refuses with.
 
 ## Not measured
 

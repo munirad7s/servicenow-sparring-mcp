@@ -329,7 +329,9 @@ function scrubOnce(text: string): { text: string; withheld: number } {
   const isValue = (tag: string) => localName(tag) === 'value'
   out = records(out, new RegExp(String.raw`<(?:[\w.-]+:)?sys_properties${ATTRIBUTES}\s*>`, 'gi'), /<\/(?:[\w.-]+:)?sys_properties\s*>/gi, '<![CDATA[', ']]>', (record) => (judge(record) ? without(record, isValue, true) : record))
   if (/&lt;(?:[\w.-]+:)?sys_properties/i.test(out)) {
-    out = records(out, /&lt;(?:[\w.-]+:)?sys_properties(?:\s(?:(?!&gt;)[^<>])*)?&gt;/gi, /&lt;\/(?:[\w.-]+:)?sys_properties\s*&gt;/gi, '&lt;![CDATA[', ']]&gt;', (record) =>
+    // The attributes of an opening tag end at the next tag at the latest: read past it, a text of openings that
+    // never close was read to its end from each of them (measured: 2.7 seconds for 76,000 characters).
+    out = records(out, /&lt;(?:[\w.-]+:)?sys_properties(?:\s(?:(?!&gt;|&lt;)[^<>])*)?&gt;/gi, /&lt;\/(?:[\w.-]+:)?sys_properties\s*&gt;/gi, '&lt;![CDATA[', ']]&gt;', (record) =>
       judge(unescaped(record)) ? withoutEscaped(record, isValue, true) : record,
     )
   }
@@ -605,7 +607,9 @@ const MAX_PAYLOAD_TABLES = 40
 const TAG = new RegExp(String.raw`<(\/?)(${ELEMENT})(${ATTRIBUTES})\s*(\/?)>`, 'y')
 /** A tag that carries attributes, wherever it stands. */
 const TAG_WITH_ATTRIBUTES = new RegExp(String.raw`<(${ELEMENT})(\s+[\w:.-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?${ATTRIBUTES})\s*\/?>`, 'g')
-const ATTRIBUTE = /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
+// A name begins where no name is running: without that, a name of a million characters with no "=" behind it was
+// tried from each of its characters (measured: 14 seconds for 80,000 characters, a millisecond with it).
+const ATTRIBUTE = /(?<![\w:.-])([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
 /** The first element of a document: behind its declaration, and behind the wrappers that hold records. */
 const FIRST_ELEMENT = new RegExp(String.raw`<\?xml\b[^<>]*\?>\s*(?:<(?:record_update|unload|xml)${ATTRIBUTES}\s*>\s*)*<(${ELEMENT})`, 'gi')
 
@@ -891,6 +895,37 @@ export interface Guard {
   warnings: string[]
 }
 
+/** As many fields of a database view as one call may be filtered, sorted or counted by. */
+const MAX_FIELDS_PROVEN = 20
+
+/**
+ * Refuses a field of a database view that the view is to be filtered, sorted or counted by, unless the instance
+ * proves that it applies a condition on it. Measured: a view drops a condition on a field it does not take from a
+ * joined table, and on some of the fields it does take (one of eight listed fields of one joined table), and
+ * answers with every row. Its definition does not say which.
+ */
+export async function requireProofOnView(ctx: Context, view: string, paths: string[]): Promise<void> {
+  const asked = new Set(paths)
+  // Each field is proven by up to two questions to the instance, one after the other. A query that filters a view
+  // by a hundred fields would spend minutes on that before it reads a row.
+  if (asked.size > MAX_FIELDS_PROVEN) {
+    throw validation(
+      `This call filters, sorts or counts "${view}", which is a database view or could be one, by ${asked.size} fields. The instance has to prove for each that it applies a condition on it, and at most ${MAX_FIELDS_PROVEN} are proven in one call. Ask with fewer. Nothing was read.`,
+      view,
+    )
+  }
+  // The path as it is written: measured, a view dropped the condition on 3 of 28 walks from a reference that it
+  // filtered by itself.
+  for (const path of asked) {
+    if (await ctx.dict.viewCarries(view, path)) continue
+    throw validation(
+      `"${path}" is asked of "${view}", which is a database view or could be one, and the instance did not prove that it applies a condition on it: asked for the rows where it is empty and filled at once, and for those where it is one of the two, it did not answer with none and with rows. ` +
+        'Measured: a view drops a condition on some of its fields and answers unfiltered, so the query was not sent.',
+      view,
+    )
+  }
+}
+
 /**
  * Refuses a query or field list that cannot be trusted, before it is sent.
  *
@@ -906,25 +941,6 @@ export interface Guard {
  * "groupBy" is the field an Aggregate call counts by. Like a field in a condition,
  * it changes the answer if the instance ignores it.
  */
-/**
- * Refuses a field of a database view that the view is to be filtered, sorted or counted by, unless the instance
- * proves that it applies a condition on it. Measured: a view drops a condition on a field it does not take from a
- * joined table, and on some of the fields it does take (one of eight listed fields of one joined table), and
- * answers with every row. Its definition does not say which.
- */
-export async function requireProofOnView(ctx: Context, view: string, paths: string[]): Promise<void> {
-  // The path as it is written: measured, a view dropped the condition on 3 of 28 walks from a reference that it
-  // filtered by itself.
-  for (const path of new Set(paths)) {
-    if (await ctx.dict.viewCarries(view, path)) continue
-    throw validation(
-      `"${path}" is asked of "${view}", which is a database view or could be one, and the instance did not prove that it applies a condition on it: asked for the rows where it is empty and filled at once, and for those where it is one of the two, it did not answer with none and with rows. ` +
-        'Measured: a view drops a condition on some of its fields and answers unfiltered, so the query was not sent.',
-      view,
-    )
-  }
-}
-
 export async function guardFields(ctx: Context, table: string, query: string, fields: string[] = [], groupBy?: string): Promise<Guard> {
   if (!ctx.sn.allows(table)) {
     throw new ServiceNowError(`Table "${table}" is closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY). Nothing was sent.`, 'blocked', table)
@@ -1026,7 +1042,8 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   const probe = await ctx.sn.query<Row>({ table, fields: paths, limit: 1 })
   const row = probe.records[0]
   if (row) {
-    const missing = paths.filter((path) => !(path in row))
+    // Its own fields: a row is an object, and "constructor" is in every one of those.
+    const missing = paths.filter((path) => !Object.hasOwn(row, path))
     if (missing.length) {
       throw validation(
         `Unknown field: ${missing.join(', ')}. A row of "${table}" does not carry ${missing.length === 1 ? 'it' : 'them'} ` +

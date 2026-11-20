@@ -151,6 +151,12 @@ const NO_SUCH_TABLE = ['zz__no_such_table_a', 'zz__no_such_table_b']
 /** As many names as are remembered to be a table or none. An entry is a name and a flag. */
 const MAX_KNOWN_NAMES = 5_000
 /** The fields the platform shows as the name of a row where the dictionary marks none, by their names. */
+/** The tables the definition of a database view is read from. */
+const DEFINE_A_VIEW = new Set(['sys_db_view', 'sys_db_view_table', 'sys_db_view_table_field'])
+/** As wide as an instance stores the name of a table or a field. */
+const MAX_NAME = 80
+/** A label as it is kept: measured, an instance stores one 80 characters wide. What is kept for ten minutes has a size. */
+const clipped = (value: unknown, width = 200): string => String(value ?? '').slice(0, width)
 const NAMED_AS_DISPLAY = ['name', 'u_name', 'number', 'u_number']
 /** Kinds of fields that show the name of another record. */
 const POINTS_ELSEWHERE = new Set(['reference', 'glide_list', 'document_id'])
@@ -391,7 +397,7 @@ export class Dictionary {
     // Root first, so a label closer to the inspected table wins.
     for (const table of [...chain].reverse()) {
       for (const row of records) {
-        if (row.name === table && typeof row.element === 'string' && row.label) labels.set(row.element, { label: String(row.label), table })
+        if (row.name === table && typeof row.element === 'string' && row.label) labels.set(row.element, { label: clipped(row.label), table })
       }
     }
     return labels
@@ -400,9 +406,11 @@ export class Dictionary {
   /**
    * Checks field paths against the dictionary. A dot-walk is followed only through
    * a reference field: ServiceNow drops a condition that walks through a list
-   * field. "ref_<child>.<field>" reaches a field of a child table.
+   * field. "ref_<child>.<field>" reaches a field of a child table. "lookAlikes" false leaves out the search for
+   * names that look like an unknown one, for a caller that only wants to know what a field is: that search
+   * compares with every field of the table, and each call would start it anew.
    */
-  async checkFields(table: string, paths: string[]): Promise<FieldCheck> {
+  async checkFields(table: string, paths: string[], lookAlikes = true): Promise<FieldCheck> {
     const check: FieldCheck = { status: 'checked', unknown: [], resolved: new Map(), owners: new Map(), reached: new Set(), walks: new Map() }
     const unavailable = (reason: string) => {
       check.status = 'unavailable'
@@ -465,7 +473,7 @@ export class Dictionary {
             if (set.partial) unavailable(`the dictionary of "${current}" is only partly readable for this account`)
             // Names that look like the unknown one are searched for the first few only: each search compares
             // with every field of the table.
-            else check.unknown.push({ field: path, table: current, segment, reason: `"${segment}" is not a field of "${current}"`, suggestions: check.unknown.length < 5 ? suggest(segment, set.columns) : [] })
+            else check.unknown.push({ field: path, table: current, segment, reason: `"${segment}" is not a field of "${current}"`, suggestions: lookAlikes && check.unknown.length < 5 ? suggest(segment, set.columns) : [] })
             break
           }
 
@@ -910,7 +918,7 @@ export class Dictionary {
 
       if (chain.length === 0) {
         chain.push(name)
-        label = String(row.label ?? '')
+        label = clipped(row.label)
         remote = row.scriptable_table === 'true'
       }
 
@@ -931,6 +939,9 @@ export class Dictionary {
 
   /** Database views have no entry in sys_db_object. Their fields are the fields of the joined tables, with a prefix. */
   private async loadView(name: string): Promise<TableInfo | null> {
+    // The tables a view is defined in are no views. Taken for one, the last of them would be read to find out what
+    // it is itself, and that read waits for its own answer where tables are closed: a call that never comes back.
+    if (DEFINE_A_VIEW.has(name)) return null
     const page = await this.sn.query<Record<string, string>>({ table: 'sys_db_view', query: `name=${name}`, fields: ['sys_id', 'name', 'label'], limit: 1 })
     const view = page.records[0]
     if (!view) {
@@ -959,11 +970,16 @@ export class Dictionary {
     // A view can list the fields it takes from a table it joins. Measured: 103 of 558 views of an instance do, and
     // a condition on a field outside such a list is dropped. Where the lists cannot be read, no field is taken on trust.
     const ids = joined.records.map((row) => String(row.sys_id ?? '')).filter((id) => /^[0-9A-Za-z_]{1,32}$/.test(id))
+    // Two joined tables with one id: then the field lists cannot be told apart, and every table would take the other's.
+    if (new Set(ids).size < ids.length) {
+      throw unusableAnswer(`The tables of the database view "${name}" came back with the same sys_id more than once, so they could not be told apart.`, 'sys_db_view_table')
+    }
     // Read like the request of any tool: the lists are no part of what the gate of closed tables is built from.
     const lists = ids.length
       ? await this.gated
           .all<Record<string, string>>({ table: 'sys_db_view_table_field', query: `view_tableIN${ids.join(',')}`, fields: ['view_table', 'field'] })
-          .then((read) => (read.complete && read.total !== null && read.records.length === read.total ? read.records : null))
+          // A name longer than the instance stores one is no field: a list that carries one was not read.
+          .then((read) => (read.complete && read.total !== null && read.records.length === read.total && read.records.every((row) => String(row.field ?? '').length <= MAX_NAME) ? read.records : null))
           .catch(unlessNoConnection(null))
       : []
     const listOf = (id: string): string[] | null | undefined => {
@@ -986,7 +1002,7 @@ export class Dictionary {
     if (!members.length) {
       throw unusableAnswer(`The database view "${name}" came back without a table it joins, so it could not be told whose rows it holds.`, 'sys_db_view_table')
     }
-    return { name, label: String(view.label ?? ''), chain: [name], kind: 'database_view', members }
+    return { name, label: clipped(view.label), chain: [name], kind: 'database_view', members }
   }
 
   private readonly carried = new Map<string, Entry<boolean>>()
@@ -1071,11 +1087,13 @@ export class Dictionary {
     // Root first, so a definition closer to the inspected table wins.
     for (const table of [...info.chain].reverse()) {
       for (const row of records) {
-        if (row.name !== table || typeof row.element !== 'string' || !row.element) continue
+        // Measured: the name of a field is stored 80 characters wide, a label 80, a type 40. What is longer is not
+        // the entry of a field, and what is kept of each entry has a size.
+        if (row.name !== table || typeof row.element !== 'string' || !row.element || row.element.length > MAX_NAME) continue
         columns.set(row.element, {
           name: row.element,
-          label: String(row.column_label ?? ''),
-          type: String(row.internal_type ?? ''),
+          label: clipped(row.column_label),
+          type: clipped(row.internal_type, MAX_NAME),
           reference: isTableName(row.reference) ? row.reference : null,
           mandatory: row.mandatory === 'true',
           readOnly: row.read_only === 'true',

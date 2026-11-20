@@ -284,6 +284,10 @@ function hintFor(kind: string, about: string | undefined, message: string): stri
     case 'too_large':
       return 'Ask for fewer fields, or use a smaller limit.'
     case 'invalid_response':
+      // A refusal with a page in place of the JSON an instance refuses with.
+      if (/without the JSON of an instance/.test(message)) {
+        return 'What answered stands in front of the instance: a proxy, a firewall, or a rule about which addresses may connect. That says nothing about the data and nothing about what this account may read: report it as "could not be checked".'
+      }
       return 'The answer was not the expected JSON. A developer instance may be hibernating: open it in a browser to wake it. Otherwise check the instance address.'
     default:
       return 'Unexpected failure. Report the message as it is; do not guess what the data would have been.'

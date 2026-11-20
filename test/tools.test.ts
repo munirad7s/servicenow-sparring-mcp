@@ -1510,8 +1510,8 @@ test('one call does not send hundreds of requests, whatever it names', async () 
 })
 
 test('a request longer than an instance takes is not sent', async () => {
-  // Measured: an address of 8,218 characters was taken and one of 8,223 answered with HTTP 414. A caret and an
-  // equals sign take three characters each, so a query of 6,000 characters can be one of 9,000 in the address.
+  // Measured: a path with its parameters of 8,177 characters was taken and one of 8,178 answered with HTTP 414.
+  // A caret and an equals sign take three characters each, so a query of 6,000 characters can be one of 9,000.
   const { call, sentTo } = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
   const { data } = await call('sn_query', { table: 'incident', query: Array.from({ length: 700 }, () => 'number=1').join('^'), fields: ['number'] })
   assert.equal(data.error, 'validation')
@@ -4074,6 +4074,14 @@ test('a login that is rejected in the middle of a call is passed on as that', as
   // One request that runs out of answers of its own kind, a table this account may not read, ends nothing.
   const forbiddenApps = await connect([{ table: 'v_plugin', rows: [{ id: 'com.example', name: 'Example', active: 'active', version: '1.0' }] }, ...['sys_store_app', 'sys_scope', 'sys_app'].map((table): Route => ({ table, status: 403 }))])
   assert.equal((await forbiddenApps.call('sn_plugins')).isError, false)
+  // The same status with a page, from what stands in front of the instance, is no "may not read": it says nothing
+  // about the account, so the call ends there and the answer says who refused.
+  const proxied = await connect([{ table: 'v_plugin', rows: [{ id: 'com.example', name: 'Example', active: 'active', version: '1.0' }] }, ...['sys_store_app', 'sys_scope', 'sys_app'].map((table): Route => ({ table, status: 403, body: '<html>Access denied</html>' }))])
+  const denied = await proxied.call('sn_plugins')
+  assert.equal(denied.isError, true)
+  assert.equal(denied.data.error, 'invalid_response')
+  assert.match(denied.data.message, /HTTP 403 without the JSON of an instance/)
+  assert.match(denied.data.hint, /stands in front of the instance/)
   const witness = await connect([{ table: 'upgrade_history_task', status: 401 }, ...origin('sys_plugins', [], [])])
   assert.equal((await witness.call('sn_origin', { sysId: ID })).data.error, 'auth')
   const unreadable = await connect([{ table: 'upgrade_history_task', status: 403 }, ...origin('sys_plugins', [], [])])
@@ -5582,4 +5590,117 @@ test('every request any tool sends is a GET to one of two read endpoints', async
     assert.equal(entry.pathname, `/api/now/${entry.api}/${entry.table}`)
     assert.doesNotMatch(entry.query, /javascript/i)
   }
+})
+
+test('a name that every object answers to is a field like any other', async () => {
+  // Without a dictionary the names are checked against a row. "constructor" is in every object, without being a
+  // field of it: the condition on it would have been dropped by the instance and the answer unfiltered.
+  const routes = [{ table: 'sys_db_object', rows: [] }, { table: 'sys_db_view', rows: [] }, { table: 'v_virtual', rows: [{ a: '1', b: '2' }] }]
+  const probed = await connect(routes)
+  const refused = await probed.call('sn_query', { table: 'v_virtual', query: 'constructor=needle', fields: ['a'] })
+  assert.equal(refused.data.error, 'validation')
+  assert.match(refused.data.message, /Unknown field: constructor/)
+  assert.equal(probed.sentTo('v_virtual').length, 1, 'only the probe was sent')
+
+  // A field of that name which the dictionary knows and the row does not carry is said, like any field left out.
+  const known = await connect([
+    { table: 'sys_db_object', query: 'name=u_items', rows: [tableRow('u_items', 'Items')] },
+    { table: 'sys_dictionary', query: 'nameINu_items', rows: [column('u_items', 'number'), column('u_items', 'constructor')] },
+    ...dictionaryRoutes,
+    { table: 'u_items', rows: [{ number: 'N1' }] },
+  ])
+  const data = await known.answer('sn_query', { table: 'u_items', fields: ['number', 'constructor'] })
+  assert.match(data.warnings.join(' '), /left out the requested field\(s\) constructor/)
+
+  // Versions are counted per source, whatever a source is called.
+  const { answer } = await connect(origin('sys_plugins', [change()], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel'), version('previous', 'constructor', '2026-03-01 09:59:59'), version('previous', 'constructor', '2026-03-01 09:59:58')]))
+  assert.deepEqual((await answer('sn_origin', { sysId: ID })).evidence.versions.bySource, { sys_update_set: 1, constructor: 2 })
+})
+
+test('a table the definition of a view is read from is not taken for a view', { timeout: 10_000 }, async () => {
+  // An answer that calls the table of field lists a view: read to find out what it is itself, with tables closed,
+  // that read would wait for its own answer and the call would never come back.
+  const { call } = await connect(
+    [
+      { table: 'sys_db_object', query: 'name=sys_db_view_table_field', rows: [] },
+      { table: 'sys_db_view', query: 'name=sys_db_view_table_field', rows: [{ sys_id: 'a'.repeat(32), name: 'sys_db_view_table_field', label: 'Fields' }] },
+      { table: 'sys_db_view_table', rows: [{ sys_id: 'b'.repeat(32), table: 'sys_user', variable_prefix: 'usr' }] },
+      { table: 'sys_db_view_table_field', rows: [] },
+      ...dictionaryRoutes,
+    ],
+    { tables: { allow: ['sys_*'], deny: [] } },
+  )
+  const { data } = await call('sn_query', { table: 'sys_db_view_table_field', limit: 1 })
+  assert.equal(data.error, 'blocked')
+  assert.match(data.message, /lists it neither as a table nor as a database view/)
+})
+
+test('what is read about a view and its fields has a size', async () => {
+  const fields = Array.from({ length: 21 }, (_, index) => `f${String(index).padStart(2, '0')}`)
+  const MEMBER = 'b'.repeat(32)
+  const world = (...first: Route[]): Route[] => [
+    ...first,
+    { table: 'sys_db_object', query: 'name=u_wide_view', rows: [] },
+    { table: 'sys_db_view', query: 'name=u_wide_view', rows: [{ sys_id: 'a'.repeat(32), name: 'u_wide_view', label: 'Wide' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: MEMBER, table: 'u_wide', variable_prefix: 'w' }] },
+    { table: 'sys_db_view_table_field', rows: [] },
+    { table: 'sys_db_object', query: 'name=u_wide', rows: [tableRow('u_wide', 'Wide')] },
+    { table: 'sys_dictionary', query: 'nameINu_wide', rows: fields.map((field) => column('u_wide', field)) },
+    ...dictionaryRoutes,
+    { table: 'u_wide_view', rows: [{ w_f00: 'x' }] },
+  ]
+  const filteredBy = (count: number) => fields.slice(0, count).map((field) => `w_${field}ISNOTEMPTY`).join('^')
+
+  // Each field a view is filtered by is proven by questions to the instance, one after the other. Twenty in a
+  // call; with more, nothing is asked.
+  const many = await connect(world())
+  const refused = await many.call('sn_query', { table: 'u_wide_view', query: filteredBy(21), fields: ['w_f00'] })
+  assert.equal(refused.data.error, 'validation')
+  assert.match(refused.data.message, /by 21 fields\. The instance has to prove for each.*at most 20 are proven in one call/)
+  assert.equal(many.sentTo('u_wide_view').length, 0)
+  const fine = await connect(world())
+  assert.equal((await fine.answer('sn_query', { table: 'u_wide_view', query: filteredBy(20), fields: ['w_f00'] })).records.length, 1)
+
+  // Two joined tables that come with one sys_id cannot be told apart: each would take the field list of the other.
+  const twins = await connect(world({ table: 'sys_db_view_table', rows: [{ sys_id: MEMBER, table: 'u_wide', variable_prefix: 'w' }, { sys_id: MEMBER, table: 'u_wide', variable_prefix: 'x' }] }))
+  const same = await twins.call('sn_schema', { table: 'u_wide_view' })
+  assert.equal(same.isError, true)
+  assert.match(same.data.message, /same sys_id more than once/)
+
+  // Measured: the name of a field is stored 80 characters wide. A list of fields that carries a longer one was
+  // not read: no field of that table is taken on trust.
+  const listed = await connect(world({ table: 'sys_db_view_table_field', rows: [{ view_table: MEMBER, field: 'f00' }, { view_table: MEMBER, field: 'f'.repeat(81) }] }))
+  const unread = await listed.answer('sn_schema', { table: 'u_wide_view' })
+  assert.match(unread.warnings.join(' '), /It could not be read whether this view lists the fields it takes from u_wide/)
+  assert.equal(unread.columns.length, 21)
+
+  // The dictionary: an entry with a longer name is no field, and a label is kept as wide as a label is.
+  const name80 = `u_${'a'.repeat(78)}`
+  const wide = await connect([
+    { table: 'sys_db_object', query: 'name=u_wide', rows: [tableRow('u_wide', 'L'.repeat(5_000))] },
+    { table: 'sys_dictionary', query: 'nameINu_wide', rows: [{ ...column('u_wide', name80), column_label: 'x'.repeat(5_000) }, column('u_wide', `u_${'a'.repeat(79)}`), column('u_wide', 'f00')] },
+    { table: 'sys_documentation', rows: [{ name: 'u_wide', element: 'f00', label: 'y'.repeat(5_000) }] },
+    ...dictionaryRoutes,
+  ])
+  const schema = await wide.answer('sn_schema', { table: 'u_wide' })
+  assert.deepEqual(schema.columns.map((entry: Data) => entry.name), ['f00', name80])
+  assert.deepEqual(schema.columns.map((entry: Data) => entry.label), ['y'.repeat(200), 'x'.repeat(200)])
+  assert.equal(schema.table.label.length, 200)
+})
+
+test('a text made to be read slowly is read in the time its length takes', { timeout: 20_000 }, () => {
+  // Measured before: each of these took time with the square of its length, 14 seconds and 2.7 seconds for 80,000
+  // characters. A payload can be a megabyte.
+  const started = Date.now()
+  const bare = `<incident ${'a'.repeat(400_000)}></incident>`
+  assert.deepEqual(payloadTables(bare), ['incident'])
+  const attributed = `<record_update table="incident"><incident action="INSERT_OR_UPDATE" ${'a'.repeat(400_000)}><number>INC1</number></incident></record_update>`
+  assert.deepEqual(payloadTables(attributed), ['incident'])
+
+  const unfinished = `${'&lt;sys_properties '.repeat(20_000)}!`
+  assert.equal(scrubSecrets(unfinished).text === unfinished, true)
+  // What the expression is for still holds: the value of a property written with entities is taken out.
+  const escaped = '&lt;sys_properties action="INSERT_OR_UPDATE"&gt;&lt;name&gt;x.password&lt;/name&gt;&lt;type&gt;password2&lt;/type&gt;&lt;value&gt;hunter2hunter2&lt;/value&gt;&lt;/sys_properties&gt;'
+  assert.doesNotMatch(scrubSecrets(escaped).text, /hunter2/)
+  assert.ok(Date.now() - started < 10_000)
 })
