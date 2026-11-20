@@ -8,5 +8,5 @@
     "sourceMap": false
   },
   "include": ["src/**/*"],
-  "exclude": ["src/smoke.ts", "src/call.ts", "src/origin-check.ts"]
+  "exclude": ["src/smoke.ts", "src/call.ts", "src/origin-check.ts", "src/compare.ts"]
 }

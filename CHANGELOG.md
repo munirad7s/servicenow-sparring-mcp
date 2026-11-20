@@ -7,6 +7,14 @@ answer; such changes are listed under "Changed".
 
 ### Fixed
 
+- **A list read page by page brought some rows twice and missed others.** Measured: where rows are equal in what
+  a query sorts by, the instance gives them another place from one page to the next. `sn_delta` sorts captured
+  changes by the time of their last change, and most of them share it with a neighbour (244 of 299 in a row): ten
+  pages of a hundred were 989 different rows, so eleven customizations were listed twice and eleven never. The entries of
+  upgrades were 153 of 158, a query sorted by type 753 of 1,000. Every sorted query is now sent with the sys_id
+  as its last sort key, in the direction of the key before it, which costs nothing when measured on a table of
+  3.5 million rows. Each of these reads then brought every row once. The answer names the query as it was sent.
+  A query that asks for no order is sent as before: read by pages it brought no row twice.
 - **`sn_origin` gave up on a record that stores no update name.** Measured: a third of the application files of
   an instance store none, because they were never captured. Dictionary entries and labels were already found by
   what they describe. For any other class the answer was `unknown`, with the claim that such a record is captured
@@ -16,6 +24,16 @@ answer; such changes are listed under "Changed".
   the first and the last five names of the class. Where all are built that way, it judges the record under the
   name it would get and says so; where no record of the class carries a name, or the names follow another rule,
   the verdict stays `unknown` and the warning says which of the two it is. Such a call costs 6 requests, not 1.
+
+### Added
+
+- **`npm run compare`** holds the server against the instance asked directly, past everything the server does to
+  a request. It reads the dictionary a second time, one table of the parent chain after the other, and compares
+  each field with what `sn_schema` says; and it sends a few hundred encoded queries both ways. On the test
+  instance: 2,727 fields of 55 tables without a difference, and of 331 queries 311 with the same total and the
+  same first rows, 18 refused as intended, two sent with a condition added on purpose (properties that hold a
+  secret). It ends with 1 if anything differs, so it can run before a release. Its first run found the rows that
+  change places between pages.
 - **A list of counts that was cut did not say so.** `sn_delta` and `sn_upgrade_skips` list the thirty largest
   groups of `byType` (and `byDisposition`). Where there were more, the rest was left out without a word, and a sum
   over the list came out below `total`. Both now say how many groups there are, and `sn_delta` how many rows the

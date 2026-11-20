@@ -1712,7 +1712,7 @@ test('a record in a closed table is not read by the other tools either, and its 
   assert.equal(stopped.data.error, 'blocked')
   assert.match(stopped.data.message, /This sys_id stands for a record in a table that is closed on this machine/)
   assert.equal(traced.sentTo('sys_update_version').length + traced.sentTo('upgrade_history_task').length, 0)
-  assert.deepEqual(traced.sentTo('sys_update_xml').map((sent) => sent.query), [`nameENDSWITH_${ID}^ORDERBYDESCsys_updated_on`])
+  assert.deepEqual(traced.sentTo('sys_update_xml').map((sent) => sent.query), [`nameENDSWITH_${ID}^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id`])
 
   // A record that stores no name gets the one its class gives its records. Where that name begins with a closed
   // table, nothing is read under it either.
@@ -2061,7 +2061,7 @@ test('the values of system properties that hold secrets cannot be found out by t
 
   // A condition on the value, or a sort by it: the properties of type password are taken out, in every part of the query.
   const found = await answer('sn_query', { table: 'sys_properties', query: 'valueLIKEzurich^NQname=glide.war^ORDERBYvalue', fields: ['name', 'value'] })
-  const sent = `valueLIKEzurich^${LEFT_OUT}^NQname=glide.war^ORDERBYvalue^${LEFT_OUT}`
+  const sent = `valueLIKEzurich^${LEFT_OUT}^NQname=glide.war^ORDERBYvalue^${LEFT_OUT}^ORDERBYsys_id`
   // First the properties without a type are counted, so that the answer can say how many the search does not cover.
   assert.deepEqual(sentTo('sys_properties').map((entry) => entry.query), ['typeISEMPTY', sent])
   assert.equal(found.query, sent)
@@ -2923,7 +2923,7 @@ test('sn_origin: with more update rows than one page, the first capture is asked
   assert.equal(data.evidence.customerUpdates.firstCapturedOn, '2026-03-01 00:00:00')
   assert.equal(data.created, 'here')
   assert.equal(data.verdict, 'customer_created')
-  assert.ok(sentTo('sys_update_xml').some((entry) => entry.query === `name=${NAME}^ORDERBYsys_created_on`))
+  assert.ok(sentTo('sys_update_xml').some((entry) => entry.query === `name=${NAME}^ORDERBYsys_created_on^ORDERBYsys_id`))
 })
 
 test('sn_origin decides from what is in view where the versions cannot be counted, and abstains where that is not enough', async () => {
@@ -3325,7 +3325,7 @@ test('sn_origin finds the current version among many, and does not vouch for a s
   const data = await answer('sn_origin', { sysId: ID })
   assert.deepEqual({ divergence: data.divergence, verdict: data.verdict }, { divergence: 'customer_changes_captured', verdict: 'customized' })
   assert.equal(data.evidence.versions.current.source_table, 'sys_update_set')
-  assert.equal(sentTo('sys_update_version').at(-1)?.query, `name=${NAME}^state=current^ORDERBYDESCsys_created_on`)
+  assert.equal(sentTo('sys_update_version').at(-1)?.query, `name=${NAME}^state=current^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`)
 
   // A current version that comes from a repository: whose content it is, this tool cannot say.
   const repo = await connect(origin('sys_store_app', [], [version('current', 'sys_repo_config', '2026-03-01 10:00:00', 'abel')]))
@@ -3487,7 +3487,7 @@ test('sn_origin: a record that is gone', async () => {
   const deleted = await connect(origin(null, [change({ action: 'DELETE' })], []))
   const bySysId = await deleted.answer('sn_origin', { sysId: ID })
   assert.equal(bySysId.verdict, 'deleted_here')
-  assert.equal(deleted.sentTo('sys_update_xml')[0].query, `nameENDSWITH_${ID}^ORDERBYDESCsys_updated_on`)
+  assert.equal(deleted.sentTo('sys_update_xml')[0].query, `nameENDSWITH_${ID}^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id`)
   assert.equal((await deleted.answer('sn_origin', { updateName: NAME })).verdict, 'deleted_here')
 
   const missing = await connect(origin(null, [], []))
@@ -3521,7 +3521,7 @@ test('sn_origin: a dictionary entry or label that was never captured has no stor
   const data = await field.answer('sn_origin', { sysId: ID })
   assert.equal(data.record.updateName, 'sys_dictionary_incident_category')
   assert.equal(data.verdict, 'out_of_box_as_captured')
-  assert.equal(field.sentTo('sys_update_xml')[0].query, 'name=sys_dictionary_incident_category^ORDERBYDESCsys_updated_on')
+  assert.equal(field.sentTo('sys_update_xml')[0].query, 'name=sys_dictionary_incident_category^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id')
 
   const whole = await connect([{ table: 'sys_dictionary', rows: [{ sys_id: ID, name: 'incident', element: '' }] }, ...origin('sys_plugins', [change({ name: 'sys_dictionary_incident_null' })], [], unnamed)])
   assert.equal((await whole.answer('sn_origin', { sysId: ID })).record.updateName, 'sys_dictionary_incident_null')
@@ -3550,9 +3550,9 @@ test('sn_origin: a record without a stored name is looked up under the name its 
   const data = await delivered.answer('sn_origin', { sysId: ID })
   assert.deepEqual({ verdict: data.verdict, divergence: data.divergence, name: data.record.updateName }, { verdict: 'out_of_box_as_captured', divergence: 'no_customer_changes_captured', name: derived })
   assert.match(data.warnings.join(' '), new RegExp(`carries no update name\\. Other records of sys_security_acl_role are named "sys_security_acl_role_<sys_id>".*"${derived}"`))
-  assert.equal(delivered.sentTo('sys_update_xml')[0].query, `name=${derived}^ORDERBYDESCsys_updated_on`)
+  assert.equal(delivered.sentTo('sys_update_xml')[0].query, `name=${derived}^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id`)
   // The first and the last names of the class are asked for.
-  assert.deepEqual(delivered.sentTo('sys_metadata').slice(1).map((entry) => entry.query), ['ORDERBY', 'ORDERBYDESC'].map((order) => `sys_class_name=sys_security_acl_role^sys_update_nameISNOTEMPTY^${order}sys_update_name`))
+  assert.deepEqual(delivered.sentTo('sys_metadata').slice(1).map((entry) => entry.query), ['ORDERBY', 'ORDERBYDESC'].map((order) => `sys_class_name=sys_security_acl_role^sys_update_nameISNOTEMPTY^${order}sys_update_name^${order}sys_id`))
 
   // What was captured under that name decides, as for any other record.
   const changed = await connect([peers(peer(OTHER)), ...origin('sys_plugins', [change({ name: derived })], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')], role)])
@@ -3623,7 +3623,7 @@ test('sn_origin finds a never-captured field or label by the update name it woul
   // Every place where the table can end and the field begin, each as an exact pair.
   assert.equal(field.sentTo('sys_dictionary')[0].query, 'name=cmdb^element=ci_server_host_name^NQname=cmdb_ci^element=server_host_name^NQname=cmdb_ci_server^element=host_name^NQname=cmdb_ci_server_host^element=name')
   assert.equal(field.sentTo('sys_metadata').length, 1, 'the entry is read once, from its own table')
-  assert.equal(field.sentTo('sys_update_xml')[0].query, 'name=sys_dictionary_cmdb_ci_server_host_name^ORDERBYDESCsys_updated_on')
+  assert.equal(field.sentTo('sys_update_xml')[0].query, 'name=sys_dictionary_cmdb_ci_server_host_name^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id')
   assert.equal(field.calls.length, 5)
 
   const label = await connect(lookup('sys_documentation', [entry('sys_documentation', { name: 'incident', element: 'category', language: 'en' })]))
@@ -3966,7 +3966,7 @@ test('sn_delta lists updates, exact counts per type, system accounts, and its ow
   assert.match(data.warnings.join(' '), /4 of the 9 rows were captured under system accounts/)
   assert.ok(data.notCaptured.length >= 5)
   // A change is found by when it was last made, not by when the row was first written.
-  assert.equal(sentTo('sys_update_xml')[0].query, `${filter}^ORDERBYDESCsys_updated_on`)
+  assert.equal(sentTo('sys_update_xml')[0].query, `${filter}^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id`)
   assert.equal((await call('sn_delta', { nameContains: 'a^ORb=c' })).data.error, 'validation')
 })
 
@@ -3975,7 +3975,7 @@ test('sn_delta can leave out system accounts, and explains a type nobody uses', 
   const data = await people.answer('sn_delta', { peopleOnly: true, type: 'Report' })
   // A row counts as a person's if a person captured it first or changed it last: a union of two queries, each with the whole filter.
   const union = 'type=Report^sys_created_byNOT INsystem,guest^sys_created_byNOT LIKE@snc.^NQtype=Report^sys_updated_byNOT INsystem,guest^sys_updated_byNOT LIKE@snc.'
-  assert.equal(people.sentTo('sys_update_xml')[0].query, `${union}^ORDERBYDESCsys_updated_on`)
+  assert.equal(people.sentTo('sys_update_xml')[0].query, `${union}^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id`)
   assert.equal(people.sentTo('sys_update_xml', 'stats')[0].query, union)
   // The rows that were left out are still counted, under the conditions as given: one call answers both.
   assert.equal(people.sentTo('sys_update_xml').at(-1)!.query, 'type=Report^sys_created_byINsystem,guest^ORsys_created_byLIKE@snc.^ORsys_created_byISEMPTY^sys_updated_byINsystem,guest^ORsys_updated_byLIKE@snc.^ORsys_updated_byISEMPTY')
@@ -3986,7 +3986,7 @@ test('sn_delta can leave out system accounts, and explains a type nobody uses', 
   for (const [given, sent] of [['2026-11-01', '2026-11-01 00:00:00'], ['2026-11-01 08:30:00', '2026-11-01 08:30:00'], ['2026-11-01T08:30:00Z', '2026-11-01 08:30:00'], ['2026-11-01 08:30', '2026-11-01 08:30:00']]) {
     const dated = await connect([{ table: 'sys_update_xml', rows: [] }, stats('sys_update_xml', {})])
     await dated.answer('sn_delta', { since: given })
-    assert.equal(dated.sentTo('sys_update_xml')[0].query, `sys_updated_on>=${sent}^ORDERBYDESCsys_updated_on`, given)
+    assert.equal(dated.sentTo('sys_update_xml')[0].query, `sys_updated_on>=${sent}^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id`, given)
   }
 
   const guessed = await connect([{ table: 'sys_update_xml', rows: [] }, stats('sys_update_xml', {}, 'type=ACL'), stats('sys_update_xml', { 'Access Control': 3, Report: 1 })])
@@ -4074,7 +4074,7 @@ test('sn_upgrade_skips covers the latest change of family, not the patch after i
   assert.deepEqual(data.laterUpgrades.map((item: Data) => `${item.kind} finished ${item.finished}`), ['patch finished 2026-10-10 12:00:00'])
   assert.deepEqual(data.dispositionCodes, { skipped: { '4': 'Skipped', '9': 'Skipped Error', '10': 'Skipped Manual Merge' }, from: 'instance' })
   assert.deepEqual(data.records[0], { file: 'sys_script_1', target: 'Example rule', type: 'Business Rule', disposition: 'Skipped Manual Merge', review: 'Not Reviewed', upgrade: 'glide-australia-02-11-2026__patch1.zip', createdOn: '2026-09-25 17:00:00' })
-  assert.equal(sentTo('upgrade_history_task')[0].query, `upgrade_detail.upgrade_history=${UP.family}^upgrade_detail.dispositionIN4,9,10^ORDERBYDESCsys_created_on`)
+  assert.equal(sentTo('upgrade_history_task')[0].query, `upgrade_detail.upgrade_history=${UP.family}^upgrade_detail.dispositionIN4,9,10^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`)
   assert.equal(calls.filter((entry) => entry.table === 'upgrade_history_task' && entry.api === 'stats').length, 4)
 
   const latest = await connect(routes)
@@ -4121,10 +4121,10 @@ test('sn_upgrade_skips says who captured the changes to each skipped record, and
 
   // A file the upgrade could not apply is a failure, not a customization: left out on request, by its stored code.
   await answer('sn_upgrade_skips', { excludeErrors: true })
-  assert.equal(sentTo('upgrade_history_task').at(-1)!.query, `upgrade_detail.upgrade_history=${UP.family}^upgrade_detail.dispositionIN4,10^ORDERBYDESCsys_created_on`)
+  assert.equal(sentTo('upgrade_history_task').at(-1)!.query, `upgrade_detail.upgrade_history=${UP.family}^upgrade_detail.dispositionIN4,10^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`)
   await answer('sn_upgrade_skips', { excludeErrors: true, onlySkipped: false })
   // Measured: "NOT IN" leaves out the rows where the field is empty. An entry without a disposition is no failure.
-  assert.equal(sentTo('upgrade_history_task').at(-1)!.query, `upgrade_detail.upgrade_history=${UP.family}^upgrade_detail.dispositionNOT IN9^ORupgrade_detail.dispositionISEMPTY^ORDERBYDESCsys_created_on`)
+  assert.equal(sentTo('upgrade_history_task').at(-1)!.query, `upgrade_detail.upgrade_history=${UP.family}^upgrade_detail.dispositionNOT IN9^ORupgrade_detail.dispositionISEMPTY^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`)
   // Where the instance does not list its codes, a built-in list says what a failure is, and the answer says so.
   const noCodes = await connect(routes.filter((route) => route.table !== 'sys_choice'))
   assert.match((await noCodes.answer('sn_upgrade_skips', { excludeErrors: true, onlySkipped: false })).warnings.join(' '), /built-in list was used to find the files an upgrade could not apply/)
@@ -4192,7 +4192,7 @@ test('sn_upgrade_skips without a change of family covers the most recent upgrade
   assert.match(data.warnings.join(' '), /No change of release family/)
 
   await answer('sn_upgrade_skips', { upgrade: 'zurich', onlySkipped: false, unreviewedOnly: true, fileContains: 'sys_script' })
-  assert.equal(sentTo('upgrade_history_task').at(-1)?.query, 'upgrade_detail.upgrade_history.to_versionLIKEzurich^upgrade_detail.file_nameLIKEsys_script^stateIN1^ORDERBYDESCsys_created_on')
+  assert.equal(sentTo('upgrade_history_task').at(-1)?.query, 'upgrade_detail.upgrade_history.to_versionLIKEzurich^upgrade_detail.file_nameLIKEsys_script^stateIN1^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id')
 })
 
 test('sn_upgrade_skips says what it could not establish', async () => {

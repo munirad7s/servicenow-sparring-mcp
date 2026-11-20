@@ -1,6 +1,6 @@
 import type { Auth, InstanceConfig } from './config.js'
 import { endsTheCall, quoteInstanceText, ServiceNowError, unusableAnswer, validation, type ErrorKind } from './errors.js'
-import { assertFieldPath, assertTableName, fieldsInEncodedQuery } from './query.js'
+import { assertFieldPath, assertTableName, fieldsInEncodedQuery, withStableOrder } from './query.js'
 import { currentCall } from './trace.js'
 import { NAME, VERSION } from './version.js'
 
@@ -147,8 +147,12 @@ export class ServiceNowClient {
     const gate = this.restricted && !opts.trusted ? this.gate : null
     const query = gate ? await this.entered(gate, 'table', table, opts.query ?? '', [...named, ...(fields ?? [])], fields?.length ? fields : null) : (opts.query ?? '')
 
+    // What is sent sorts by the sys_id last, so that rows which are equal in what was asked for keep their place
+    // from one page to the next. The page names the query as it was sent.
+    const sent = withStableOrder(query)
+
     const params = new URLSearchParams()
-    if (query) params.set('sysparm_query', query)
+    if (sent) params.set('sysparm_query', sent)
     if (fields?.length) params.set('sysparm_fields', fields.join(','))
     params.set('sysparm_limit', String(limit))
     if (offset) params.set('sysparm_offset', String(offset))
@@ -156,7 +160,7 @@ export class ServiceNowClient {
     params.set('sysparm_suppress_pagination_header', 'true')
     if (display) params.set('sysparm_display_value', 'all')
 
-    const { body, headers } = await this.get('table', table, query, fields?.length ? fields : null, params)
+    const { body, headers } = await this.get('table', table, sent, fields?.length ? fields : null, params)
     if (!Array.isArray(body.result)) {
       throw new ServiceNowError(`${this.host} answered without a result list.`, 'invalid_response', table)
     }
@@ -170,7 +174,7 @@ export class ServiceNowClient {
       throw unusableAnswer(`${this.host} answered with rows that are nested deeper than a row of a table is.`, table)
     }
     if (gate && display) await this.withoutClosedNames(gate, table, records as Row[])
-    return { table, query, limit, offset, records, total }
+    return { table, query: sent, limit, offset, records, total }
   }
 
   /**

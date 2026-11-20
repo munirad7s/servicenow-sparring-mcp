@@ -42,6 +42,27 @@ test('a query is one GET to the Table API with the expected parameters', async (
   assert.equal(page.total, 42)
 })
 
+test('a sorted query is sent with the sys_id as its last key, on every page, and the page names what was sent', async () => {
+  const { sn, calls } = fakeInstance([{ table: 'sys_update_xml', rows: [{ name: 'a' }], total: 1_200 }])
+  const page = await sn.query({ table: 'sys_update_xml', query: 'type=Report^ORDERBYDESCsys_updated_on', fields: ['name'], limit: 100, offset: 300 })
+  assert.equal(calls[0].query, 'type=Report^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id')
+  assert.equal(page.query, 'type=Report^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id')
+
+  // A read of every row asks for each page the same way.
+  await sn.all({ table: 'sys_update_xml', query: 'ORDERBYtype', fields: ['name'] }, 1_000, 500)
+  assert.deepEqual(calls.slice(1).map((call) => [call.query, call.params.get('sysparm_offset')]), [['ORDERBYtype^ORDERBYsys_id', null], ['ORDERBYtype^ORDERBYsys_id', '500']])
+
+  // A query that asks for no order goes out as it is, and so does a count per value.
+  await sn.query({ table: 'sys_update_xml', query: 'type=Report', fields: ['name'], limit: 5, offset: 5 })
+  assert.equal(calls.at(-1)!.query, 'type=Report')
+
+  // The audit log is the record of what went to the instance: it names the query with the key.
+  const lines: AuditEntry[] = []
+  const logged = fakeInstance([{ table: 'sys_update_xml', rows: [] }], {}, (entry) => lines.push(entry))
+  await logged.sn.query({ table: 'sys_update_xml', query: 'ORDERBYDESCsys_updated_on', fields: ['name'] })
+  assert.deepEqual(lines.map((entry) => entry.query), ['ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id'])
+})
+
 test('a token is sent as a bearer header', async () => {
   let header = ''
   const sn = new ServiceNowClient({ ...config, auth: { kind: 'bearer', token: 'abc' } }, async (_url, init) => {

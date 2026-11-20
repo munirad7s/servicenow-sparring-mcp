@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ServiceNowError } from '../src/errors.js'
-import { assertFieldPath, assertPlainValue, assertSysId, assertTableName, fieldsInEncodedQuery, isPlainValue, parseEncodedQuery, withCondition } from '../src/query.js'
+import { assertFieldPath, assertPlainValue, assertSysId, assertTableName, fieldsInEncodedQuery, isPlainValue, parseEncodedQuery, withCondition, withStableOrder } from '../src/query.js'
 
 const refused = (run: () => unknown) =>
   assert.throws(run, (error: unknown) => error instanceof ServiceNowError && error.kind === 'validation')
@@ -298,4 +298,34 @@ test('a value read from the instance is checked before it goes into a query', ()
   for (const value of ['a^ORb=c', 'a,b', 'a\nb', '', 'javascript:x', undefined, 5, 'a'.repeat(251)]) {
     assert.equal(isPlainValue(value), false, String(value))
   }
+})
+
+test('a sorted query gets the sys_id as its last sort key, in the direction of the key before it', () => {
+  // Measured: rows that are equal in what a query sorts by change places between pages. Ten pages of a hundred
+  // captured changes, newest first, were 989 different rows; with the sys_id as a last key, a thousand.
+  const cases: Array<[given: string, sent: string]> = [
+    ['ORDERBYnumber', 'ORDERBYnumber^ORDERBYsys_id'],
+    ['active=true^ORDERBYDESCsys_updated_on', 'active=true^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id'],
+    // The key before it decides: against its direction a read of a large table took five times as long.
+    ['ORDERBYstate^ORDERBYDESCsys_created_on', 'ORDERBYstate^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id'],
+    ['ORDERBYDESCpriority^ORDERBYnumber', 'ORDERBYDESCpriority^ORDERBYnumber^ORDERBYsys_id'],
+    // A sort in one part of a query holds for all of it, and so does the key at the end.
+    ['a=1^ORDERBYDESCnumber^NQb=2', 'a=1^ORDERBYDESCnumber^NQb=2^ORDERBYDESCsys_id'],
+    ['a=1^NQORDERBYnumber^b=2', 'a=1^NQORDERBYnumber^b=2^ORDERBYsys_id'],
+    // A condition added behind the sort stays where it is.
+    ['ORDERBYvalue^typeNOT INpassword', 'ORDERBYvalue^typeNOT INpassword^ORDERBYsys_id'],
+    // A field that only begins like the sys_id, or is that of another record, is no key for these rows.
+    ['ORDERBYsys_id_copy', 'ORDERBYsys_id_copy^ORDERBYsys_id'],
+    ['ORDERBYcaller_id.sys_id', 'ORDERBYcaller_id.sys_id^ORDERBYsys_id'],
+    // A caret at the end and the one that joins the key would be read as a caret inside a value: one is taken off.
+    ['ORDERBYnumber^', 'ORDERBYnumber^ORDERBYsys_id'],
+    ['ORDERBYnumber^short_description=a^^^', 'ORDERBYnumber^short_description=a^^^ORDERBYsys_id'],
+    // Two carets at the end are one inside the last value: they stay, and the key is joined by a third.
+    ['ORDERBYnumber^short_description=a^^', 'ORDERBYnumber^short_description=a^^^ORDERBYsys_id'],
+  ]
+  for (const [given, sent] of cases) assert.equal(withStableOrder(given), sent, given)
+
+  // Nothing is added to a query that asks for no order, or that sorts by the sys_id already.
+  const untouched = ['', 'active=true', 'active=true^NQpriority=1', 'ORDERBYsys_id', 'ORDERBYDESCsys_id', 'ORDERBYnumber^ORDERBYDESCsys_id', 'ORDERBYsys_id^ORDERBYnumber', 'a=1^NQORDERBYsys_id', 'short_description=ORDERBYnumber', 'short_descriptionLIKEa^^ORDERBYnumber', 'active=true^EQ']
+  for (const query of untouched) assert.equal(withStableOrder(query), query, query)
 })

@@ -42,7 +42,12 @@ test('the source contains exactly one HTTP method, and it is GET', () => {
 
 test('only the client talks to the network, and only through fetch', () => {
   const callers = sourceFiles.filter((path) => /\bfetch\b/.test(read(path).replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, '')))
-  assert.deepEqual(callers.sort(), ['src/client.ts', 'src/smoke.ts'])
+  // Two scripts for the person who develops the server do so as well, and neither is part of what is built: the
+  // smoke test wraps fetch to record what the server sends, and the comparison asks the instance a second time,
+  // past the server, which is what it is for. Neither names a method, so both can only read.
+  assert.deepEqual(callers.sort(), ['src/client.ts', 'src/compare.ts', 'src/smoke.ts'])
+  const built = JSON.parse(read('tsconfig.build.json')).exclude as string[]
+  for (const script of ['src/compare.ts', 'src/smoke.ts']) assert.ok(built.includes(script), `${script} must stay out of the build`)
 
   const otherWays =
     /['"`](node:)?(http|https|http2|net|tls|dgram|dns|child_process|worker_threads|cluster|vm|inspector)['"`]|['"`]undici['"`]|sdk\/client\/(sse|streamableHttp|stdio|websocket)|XMLHttpRequest|WebSocket|EventSource|\beval\s*\(|\bFunction\s*\(|\bimport\s*\(|\brequire\s*\(/

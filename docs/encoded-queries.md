@@ -88,6 +88,7 @@ the same to keep one form.
 | A condition on a journal field such as `work_notes` or `comments` | does not look at that field: `work_notesISEMPTY` and `work_notesISNOTEMPTY` both returned the same 36 of 82 incidents, and `work_notesLIKEa` returned 34 incidents although only 24 work notes exist | refuses, and names the exact source: `sys_journal_field` with `element=work_notes^valueLIKE<text>` |
 | `!=`, `NOT IN`, `NOT LIKE`, `NSAMEAS` | leaves out the rows where the field is empty: of 82 incidents, 33 without an assignee, `assigned_to!=<sys_id nobody has>` returns 49. `assigned_toNSAMEASopened_by` returned 47: the 2 rows where both are the same person are left out, and the 33 without an assignee as well | sends it, with a warning that names `^OR<field>ISEMPTY`, unless the query asks for the empty rows itself |
 | A part of a query that holds no condition, joined by `^NQ` | is no part: `EQ^NQpriority=1`, `ORDERBYnumber^NQpriority=1` and `priority=1^NQ` match what `priority=1` does | where the server has to add a condition of its own, it adds it only to the parts that have one: added to an empty part it made that part match everything (29 rows where 10 was the answer) |
+| A sort by a field in which rows are equal, read page by page | gives those rows another place from one page to the next. A thousand captured changes, newest first, in ten pages of a hundred, were 989 different rows: eleven came twice and eleven never. Sorted by type it was 753, the entries of upgrades 153 of 158. Most of these rows share their time with a neighbour: 244 of 299 in a row. Asked six times, one page of them came back the same each time, and it is the next page that does not fit; a sort by the name behind a reference changed its first rows from one request to the next, three answers in six | adds the sys_id as the last sort key, in the direction of the key before it: `ORDERBYDESCsys_updated_on` is sent as `ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id`. Every such read then brought a thousand of a thousand, also in a query of several parts or with several keys. The answer names the query as it was sent |
 
 ## Runs script on the instance
 
@@ -145,6 +146,16 @@ Also measured:
 - `^NQ` works in the Aggregate API as in the Table API: the groups of a query with two parts added up to the
   3,619 rows the Table API counted, not to the sum of the parts.
 - A condition written behind an `ORDERBY` is applied.
+- A second sort key costs nothing where it runs the way of the first: on a table of 3.5 million rows, newest
+  first took 878 ms and with the sys_id falling as a second key 928 ms. With the sys_id rising it took 4,212 ms.
+- A sort in one part of a query joined by `^NQ` holds for the whole answer, and so does a key added at its end.
+- A caret at the end of a query, followed by one more sort key, is read as a caret inside a value: the key is no
+  key then, and the sort before it is dropped with it. The server takes such a caret off before it adds its key.
+- A query that asks for no order, read by pages, brought no row twice: a thousand captured changes, 186
+  dictionary entries and 110 labels. The instance does not promise that. For a list that has to be complete, give
+  an order.
+- `sys_id` as a sort key does no harm on a database view, which has no field of that name: the rows and the total
+  were the same with it and without.
 - `^OR` binds to the condition before it, tighter than `^`, in the Table API and in the Aggregate API alike. Of 82
   incidents, 10 were inactive with priority 1 and 4 had priority 2, all of them active:
   `active=false^priority=1^ORpriority=2` matched 10 in both, not 14, and so did the same conditions in another

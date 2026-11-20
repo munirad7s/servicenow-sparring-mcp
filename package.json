@@ -25,6 +25,7 @@
     "smoke": "tsx src/smoke.ts",
     "call": "tsx src/call.ts",
     "origin-check": "tsx src/origin-check.ts",
+    "compare": "tsx src/compare.ts",
     "prepare": "npm run build"
   },
   "keywords": [

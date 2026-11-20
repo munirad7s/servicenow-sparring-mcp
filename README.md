@@ -236,6 +236,10 @@ many. The npm scripts do not write it.
 
 ## Requests, caching and pauses
 
+- A list that is longer than one answer is read by pages (`nextOffset`). A sorted query is sent with the sys_id
+  as its last sort key, so that every row comes once: without it, rows that are equal in what the query sorts by
+  change places between pages (measured: 989 different rows in a thousand captured changes read newest first).
+  The `query` of an answer shows the key.
 - One `sn_query` is one request, plus five to seven the first time a table is used: to check its field names, and
   to look for rules that filter, archive or rotate it. The other functions cost more: `sn_origin` 4 to 9,
   `sn_upgrade_skips` about 10, `sn_dependencies` 25 to 35 (about 18 for one field), `sn_instance` about 50. Every
@@ -499,6 +503,7 @@ npm run typecheck
 npm run smoke         # end-to-end against the configured instance, read-only
 npm run call -- sn_schema '{"table":"incident","filter":"assign"}'
 npm run origin-check  # measures sn_origin on the configured instance, with about 1,200 requests for samples of 100
+npm run compare       # holds sn_schema and sn_query against the instance asked directly, about 1,500 requests
 ```
 
 `npm run smoke` drives the real server through an MCP client and exits with 1 if a check fails. It prints counts and
@@ -506,6 +511,14 @@ verdicts, never record content. Its last part asks the same instance through a s
 table is closed, and checks that no row and no name of a user comes back. `npm run call` runs one function from the shell and prints what an agent would
 receive. In the Windows command prompt, write the JSON with escaped double quotes instead of single quotes:
 `"{\"table\":\"incident\"}"`.
+
+`npm run compare` asks the instance a second time, past everything the server does to a request, and ends with 1
+if anything differs. It reads the dictionary one table of the parent chain after the other and compares each
+field with what `sn_schema` says: type, reference, mandatory, read-only, length, deactivated, choice list, the
+table that defines it, and its label. And it sends a few hundred encoded queries to the Table API as they are and
+through `sn_query`: one the server passes on has to bring the same total and the same first rows, and the ones it
+refuses on purpose are counted apart. It prints counts, and for a difference the field or the query concerned.
+Run it with no table closed on the machine.
 
 To check the verdicts of `sn_origin` by hand, let it write a sheet:
 
@@ -538,7 +551,15 @@ What was tested, and what was not:
   the rules are in `src/closed.ts`, and the unit tests hold them. What an account sees that may not read or
   filter by what a table extends was not tried, because the test account is an administrator: the server asks
   for proof of both and closes everything without it. Those proofs were only ever seen to pass.
-- On another release, run `npm run doctor` and `npm run smoke` first.
+- Against the instance asked directly, with `npm run compare`: 2,727 fields of 55 tables came out the same in
+  every property compared, and so did two earlier runs with other tables at random. Of 331 encoded queries, 311
+  brought the same total and the same first rows as the Table API, 18 were refused as intended, and two went out
+  with a condition added on purpose: a comparison on the value of a system property leaves out the properties
+  that hold a secret, and the answer says so. The first run showed one more difference, and it was the instance:
+  rows that are equal in what a query sorts by change places between pages. A thousand captured changes read
+  newest first, in ten pages, were 989 different rows. The server now sends the sys_id as the last sort key of
+  every sorted query, and the same read brings a thousand.
+- On another release, run `npm run doctor`, `npm run smoke` and `npm run compare` first.
 - Signing in with a token is covered by unit tests only.
 - CI runs the unit tests on Linux, Windows and macOS.
 
