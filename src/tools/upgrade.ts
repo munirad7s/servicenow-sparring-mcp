@@ -6,7 +6,7 @@ import { UPGRADE_NOTES } from '../limitations.js'
 import { assertPlainValue } from '../query.js'
 import { clip, fail, labelOf, listing, listShape, ok, rawOf, rowSchema, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { errorKind, READ_ONLY, type Context } from './shared.js'
+import { CLOSED_NAME, errorKind, isClosedRecord, READ_ONLY, type Context } from './shared.js'
 
 /** Used only if the instance does not list its own disposition codes. The answer says when that happened. */
 export const FALLBACK_SKIPPED: Record<string, string> = {
@@ -240,7 +240,7 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
 
         const rows = page.records.map(tidy).map((row) => ({
           file: rawOf(row['upgrade_detail.file_name']),
-          target: rawOf(row['upgrade_detail.target_name']),
+          target: isClosedRecord(sn, rawOf(row['upgrade_detail.file_name'])) ? CLOSED_NAME : rawOf(row['upgrade_detail.target_name']),
           type: labelOf(row['upgrade_detail.type']),
           disposition: labelOf(row['upgrade_detail.disposition']),
           review: labelOf(row.state),

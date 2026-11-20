@@ -3,9 +3,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Row } from '../client.js'
 import { DELTA_GAPS } from '../limitations.js'
 import { assertPlainValue } from '../query.js'
-import { clip, fail, listing, listShape, ok, rowSchema, tidy } from '../result.js'
+import { clip, fail, listing, listShape, ok, rawOf, rowSchema, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { BY_SYSTEM_ACCOUNT, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
+import { BY_SYSTEM_ACCOUNT, CLOSED_NAME, isClosedRecord, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
 
 export function registerDeltaTool(server: McpServer, ctx: Context) {
   const { sn } = ctx
@@ -119,7 +119,9 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
           )
         }
 
-        const updates = clip(page.records.map(tidy), warnings)
+        // The readable name of a record in a table that is closed on this machine is not passed on.
+        const rows = page.records.map(tidy).map((row) => (isClosedRecord(sn, rawOf(row.name)) ? { ...row, target_name: CLOSED_NAME } : row))
+        const updates = clip(rows, warnings)
         return ok({ ...listing(sn, page, warnings, updates.length), byType, capturedBySystemAccounts: bySystem, updates, notCaptured: DELTA_GAPS })
       } catch (error) {
         return fail(error, 'sys_update_xml')

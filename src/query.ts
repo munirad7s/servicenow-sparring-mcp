@@ -113,6 +113,8 @@ export interface ParsedQuery {
   otherFields: string[]
   /** The fields the query sorts by. */
   sorts: string[]
+  /** true if the query holds a text search (123TEXTQUERY321), which looks into fields it does not name. */
+  textSearch: boolean
   /** true if the query contains "^^", a literal ^ inside a value. */
   escapedCaret: boolean
 }
@@ -203,7 +205,7 @@ function splitTerms(query: string): string[] {
  * checked against the dictionary.
  */
 export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
-  const parsed: ParsedQuery = { fields: [], conditions: [], otherFields: [], sorts: [], escapedCaret: false }
+  const parsed: ParsedQuery = { fields: [], conditions: [], otherFields: [], sorts: [], textSearch: false, escapedCaret: false }
   if (!query) return parsed
 
   if (query.length > MAX_QUERY_LENGTH) throw validation(`The query is longer than ${MAX_QUERY_LENGTH} characters.`, table)
@@ -245,6 +247,7 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
 
     if (term.startsWith('123TEXTQUERY321=')) {
       if (joinedWithOr) throw unsupported(raw, 'a text search cannot be joined with ^OR')
+      parsed.textSearch = true
       continue
     }
 

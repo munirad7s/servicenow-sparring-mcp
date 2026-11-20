@@ -460,6 +460,78 @@ test('journal fields: a condition on one is refused, and an empty value is expla
   assert.deepEqual(shown.warnings, [])
 })
 
+test('a closed table is reached neither through its child tables nor through its parent', async () => {
+  const family: Route[] = [
+    { table: 'sys_db_object', query: 'name=customer_contact', rows: [tableRow('customer_contact', 'Contact', 'sys_user')] },
+    { table: 'sys_dictionary', query: 'nameINcustomer_contact,sys_user', rows: [column('sys_user', 'name'), column('customer_contact', 'account')] },
+    { table: 'sys_dictionary', query: 'nameINincident,task', rows: [column('task', 'number'), column('task', 'sys_class_name', 'sys_class_name'), column('incident', 'u_contact', 'reference', 'customer_contact')] },
+    { table: 'sys_dictionary', query: 'nameINtask', rows: [column('task', 'number'), column('task', 'sys_class_name', 'sys_class_name')] },
+    ...dictionaryRoutes,
+    { table: 'customer_contact', rows: [{ name: 'Abel Tuter' }] },
+    { table: 'incident', rows: [{ number: 'INC1' }] },
+    { table: 'task', rows: [{ number: 'TASK1' }] },
+    stats('task', { '1': 1 }),
+  ]
+
+  // A contact is a user: the rows of the child table are rows of the closed one.
+  const noUsers = await connect(family, { tables: { allow: [], deny: ['sys_user'] } })
+  for (const args of [{ table: 'customer_contact', fields: ['name'] }, { table: 'incident', fields: ['number', 'u_contact.account'] }]) {
+    const { data } = await noUsers.call('sn_query', args)
+    assert.equal(data.error, 'blocked', JSON.stringify(args))
+    assert.match(data.message, /"customer_contact" is a child table of sys_user/)
+  }
+  assert.equal(noUsers.sentTo('customer_contact').length + noUsers.sentTo('incident').length, 0)
+
+  // And "task" holds every incident: with incident closed, its rows are kept out of what the parent answers.
+  const noIncidents = await connect(family, { tables: { allow: [], deny: ['incident', 'sc_*'] } })
+  const LEFT_OUT = 'sys_class_nameNOT INincident^ORsys_class_nameISEMPTY^sys_class_nameNOT LIKEsc_^ORsys_class_nameISEMPTY'
+  const data = await noIncidents.answer('sn_query', { table: 'task', query: 'numberSTARTSWITHTASK^NQnumberSTARTSWITHINC', fields: ['number'] })
+  assert.equal(noIncidents.sentTo('task')[0].query, `numberSTARTSWITHTASK^${LEFT_OUT}^NQnumberSTARTSWITHINC^${LEFT_OUT}`)
+  assert.match(data.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
+  await noIncidents.answer('sn_query', { table: 'task', groupBy: 'sys_class_name' })
+  assert.equal(noIncidents.sentTo('task', 'stats')[0].query, LEFT_OUT)
+
+  // With a list of the only tables that may be read, the rows of every other child table are left out.
+  const onlyTasks = await connect(family, { tables: { allow: ['task', 'sys_*'], deny: [] } })
+  await onlyTasks.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(onlyTasks.sentTo('task')[0].query, 'sys_class_nameINtask^ORsys_class_nameSTARTSWITHsys_^ORsys_class_nameISEMPTY')
+})
+
+test('a text search is not a way to probe a field that holds a secret', async () => {
+  const LEFT_OUT = 'typeNOT INpassword,password2'
+  const { answer, call, sentTo } = await connect([
+    { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] },
+    { table: 'sys_dictionary', query: 'nameINsys_properties', rows: [column('sys_properties', 'name'), column('sys_properties', 'value'), column('sys_properties', 'type')] },
+    ...dictionaryRoutes,
+    { table: 'sys_user', rows: [{ name: 'Abel' }] },
+    { table: 'incident', rows: [{ number: 'INC1' }] },
+    { table: 'sys_properties', rows: [{ name: 'glide.war' }] },
+  ])
+  // It looks into fields the query does not name. sys_user has one that holds a secret.
+  const refused = await call('sn_query', { table: 'sys_user', query: '123TEXTQUERY321=hash', fields: ['name'] })
+  assert.equal(refused.data.error, 'validation')
+  assert.match(refused.data.message, /text search.*fields that hold secrets \(user_password\)/)
+  assert.equal(sentTo('sys_user').length, 0)
+
+  assert.equal((await answer('sn_query', { table: 'incident', query: '123TEXTQUERY321=printer', fields: ['number'] })).returned, 1)
+  // The value of a property is among the fields a text search reads: the properties that hold secrets are left out.
+  await answer('sn_query', { table: 'sys_properties', query: '123TEXTQUERY321=zurich', fields: ['name'] })
+  assert.equal(sentTo('sys_properties')[0].query, `123TEXTQUERY321=zurich^${LEFT_OUT}`)
+})
+
+test('the readable name of a record in a closed table is not passed on by the other tools either', async () => {
+  const closed = { tables: { allow: [], deny: ['sys_script'] } }
+  const row = { name: NAME, type: 'Business Rule', target_name: 'Example rule', sys_created_by: 'abel', sys_updated_by: 'abel' }
+  const delta = await connect([{ table: 'sys_update_xml', rows: [row, { ...row, name: 'sys_ui_action_' + ID, target_name: 'Example action' }] }, stats('sys_update_xml', { 'Business Rule': 2 })], closed)
+  const data = await delta.answer('sn_delta')
+  assert.deepEqual(data.updates.map((item: Data) => item.target_name), ['[withheld: the record is in a table closed on this machine]', 'Example action'])
+
+  const judged = await connect(origin('sys_plugins', [], [], {}, [skip('Skipped')]), closed)
+  const answer = await judged.answer('sn_origin', { sysId: ID })
+  assert.equal(answer.record.name, '[withheld: the record is in a table closed on this machine]')
+  assert.equal(answer.evidence.upgradeSkips.rows[0].target, '[withheld: the record is in a table closed on this machine]')
+})
+
 test('a field to count by that cannot be verified is not sent', async () => {
   // No dictionary, and no visible row to check the name against: an ignored field would give one group of all rows.
   const { call, sentTo } = await connect([{ table: 'sys_db_object', status: 403 }, { table: 'incident', rows: [null], total: 35 }, stats('incident', { '': 35 })])

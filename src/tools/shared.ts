@@ -1,7 +1,7 @@
 import type { Row, ServiceNowClient } from '../client.js'
 import type { Column, Dictionary } from '../dictionary.js'
 import { quoteInstanceText, ServiceNowError, validation } from '../errors.js'
-import { assertFieldPath, parseEncodedQuery, withCondition, type ParsedQuery } from '../query.js'
+import { assertFieldPath, isTableName, parseEncodedQuery, withCondition, type ParsedQuery } from '../query.js'
 
 export interface Context {
   sn: ServiceNowClient
@@ -76,6 +76,17 @@ export function scrubSecrets(text: string): { text: string; withheld: number } {
     return `${lead}"${WITHHELD}"`
   })
   return { text: out, withheld }
+}
+
+export const CLOSED_NAME = '[withheld: the record is in a table closed on this machine]'
+
+/**
+ * true if an update name stands for a record of a table that is closed on this machine. Such a name ends in the
+ * sys_id of the record and begins with its table. The readable name of that record is then not passed on.
+ */
+export function isClosedRecord(sn: ServiceNowClient, updateName: string): boolean {
+  const table = /^(.+)_[0-9a-f]{32}$/.exec(updateName)?.[1] ?? ''
+  return sn.restricted && isTableName(table) && !sn.allows(table)
 }
 
 /** The table of the record a payload carries: the element that has the action on it. */
@@ -224,8 +235,23 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
       table,
     )
   }
+  if (ctx.sn.restricted) {
+    // The rows of a child table are rows of its parents: "customer_contact" holds users.
+    for (const name of [table, ...check.reached]) {
+      const parent = (await ctx.dict.table(name).catch(() => null))?.chain.slice(1).find((ancestor) => !ctx.sn.allows(ancestor))
+      if (parent) {
+        throw new ServiceNowError(`"${name}" is a child table of ${parent}, which is closed on this machine: its rows are rows of that table. Nothing was sent.`, 'blocked', parent)
+      }
+    }
+  }
 
-  const sent = await keepSecretsOutOfReach(ctx, table, query, parsed, check.resolved, warnings)
+  let sent = await keepSecretsOutOfReach(ctx, table, query, parsed, check.resolved, warnings)
+  // And the other way round: a query on a parent answers with the rows of its child tables, closed ones included.
+  const classes = ctx.sn.restricted ? ctx.sn.classFilter() : null
+  if (classes && (await ctx.dict.columnSet(table).catch(() => null))?.columns.has('sys_class_name')) {
+    sent = withCondition(sent, classes)
+    warnings.push('Tables are closed on this machine. Rows that belong to a closed child table of this one were left out by a condition on sys_class_name, and the total does not count them.')
+  }
   refuseJournalConditions(table, parsed, check.resolved)
   warnAboutEmptyFields(parsed, check.resolved, warnings)
   await refuseChoiceLabels(ctx, table, parsed, check.resolved, warnings)
@@ -309,6 +335,19 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
   }
 
   const compared = new Set([...parsed.otherFields, ...parsed.conditions.filter(({ operator }) => !ASKS_IF_FILLED.has(operator)).map(({ field }) => field)])
+  // A text search looks into fields the query does not name. Where one of them holds a secret, it is a way to probe it.
+  if (parsed.textSearch) {
+    const columns = table === 'sys_properties' ? null : await ctx.dict.columnSet(table).catch(() => null)
+    const secret = [...(columns?.columns.values() ?? [])].filter((column) => SECRET_TYPES.has(column.type)).map((column) => column.name)
+    if (secret.length || (await propertyValueFields(ctx, table)).size > (table === 'sys_properties' ? 1 : 0)) {
+      throw validation(
+        `A text search looks into the fields of "${table}" without naming them, and this table has fields that hold secrets` +
+          `${secret.length ? ` (${secret.slice(0, 5).join(', ')})` : ''}. Filter on named fields instead. Nothing was sent.`,
+        table,
+      )
+    }
+    if (table === 'sys_properties') compared.add('value')
+  }
   if (!compared.size) return query
 
   const whole = [...compared].find((field) => recordPayload(table, field, resolved.get(field)))

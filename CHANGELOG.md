@@ -16,6 +16,14 @@ answer; such changes are listed under "Changed".
   payload of a record in a closed table is withheld, and a payload can no longer be searched, sorted or counted
   by. The comparison of two payloads (`payload_diff`) is not passed on. The name pattern was checked against the
   1,090 secret fields of one instance and widened; it knows all but a handful.
+- **A closed table could be read through its child tables and through its parent.** A contact is a user: with
+  `sys_user` closed, `customer_contact` answered. And `task` answers with every incident. A child of a closed
+  table is now closed too, and a query on a parent leaves the rows of closed child tables out with a condition on
+  `sys_class_name`. `sn_delta`, `sn_upgrade_skips` and `sn_origin` no longer pass on the readable name of a record
+  in a closed table.
+- **A text search could probe a field that holds a secret**, because it looks into fields the query does not name.
+  It is refused on a table that has such a field, and on `sys_properties` the properties that hold secrets are
+  left out of it.
 - A dictionary entry that came back without its type counted as proof that a field holds no secret and points into
   no closed table. Now the name of the field decides, as where the entry is missing.
 - With tables closed, a field that can point to any table could still be compared with text.

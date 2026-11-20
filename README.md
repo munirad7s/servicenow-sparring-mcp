@@ -109,7 +109,7 @@ one for every request in flight.
 ## What leaves the instance
 
 Everything a function returns goes to the MCP client, and from there to the model it uses. If that model runs at a
-provider, the data leaves your network. Four things limit what can go that way:
+provider, the data leaves your network. Five things limit what can go that way:
 
 - **The account.** The server reads what its account may read, and nothing else. This is the limit that counts.
 - **Secrets are withheld.** Fields of a password type or an encrypted type, and system properties of a password
@@ -120,16 +120,24 @@ provider, the data leaves your network. Four things limit what can go that way:
   value away piece by piece, and so would the order of rows sorted by it. A field that holds a secret can be asked
   whether it is filled, and nothing else. A query that compares or sorts by the value of system properties leaves
   out the properties of a password type and those without a type, and says so; a count per property value is
-  refused.
+  refused. So is a text search on a table that has a field with a secret.
+- **A record inside a text is cleaned.** The payload of a captured change, of a version or of an upgrade entry is
+  the whole record as text. What looks like a secret in it is taken out, by the name of its element. Such a
+  payload can be read, but not searched.
 - **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
-  away from the server: it does not ask for them, a query cannot reach them through a dot-walk, a child table or a
-  database view, and the names behind references into them are left out, for single references and for lists.
-  Such a reference can be compared with a sys_id, but not with text and not sorted by, because both work on the
-  names. Where the type of a field cannot be read, its display value is left out as well.
-  `SERVICENOW_TABLE_ALLOW` names the only tables whose rows it may read. A name can end in `*`. A closed table is
-  reported as "could not be checked". What the dictionary says about a closed table (its fields, what is attached
-  to it) can still be read, and the other functions read a fixed set of configuration tables, which
-  `npm run doctor` lists.
+  away from the server. It does not ask for them. A query cannot reach them through a dot-walk or a database view.
+  A child table of a closed table is closed too, because its rows are rows of that table. A query on a parent
+  table leaves the rows of a closed child out. The names behind references into a closed table are left out, for
+  single references and for lists, and such a reference can be compared with a sys_id, but not with text and not
+  sorted by, because both work on the names. The payload of a captured change is withheld where it carries a
+  record of a closed table. Where the type of a field cannot be read, its display value is left out as well.
+  `SERVICENOW_TABLE_ALLOW` names the only tables the server may ask for. That list has to include the tables the
+  server reads for its own checks: `npm run doctor` lists them, and `sys_*` covers most. A name can end in `*`.
+  A closed table is reported as "could not be checked".
+
+  What closing a table does not cover: a plain text field that happens to carry something from it, such as the
+  user name in `sys_created_by`; and tables that record the content of others, such as `sys_audit`,
+  `sys_history_line`, `sys_journal_field` and `live_profile`. Close those as well if they matter.
 
 Record content that comes back (names, descriptions, scripts, error texts) is data from the instance. The server
 tells the agent to treat it as data, never as an instruction, and it cuts long values. It cannot make an agent obey.

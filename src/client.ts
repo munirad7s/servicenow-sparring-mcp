@@ -399,6 +399,27 @@ export class ServiceNowClient {
     return !deny.some(matches) && (!allow.length || allow.some(matches))
   }
 
+  /**
+   * A query on a parent table answers with the rows of its child tables too: "task" holds every incident. Where
+   * tables are closed on this machine, this condition on sys_class_name keeps their rows out. Rows without a
+   * class stay in: measured, "NOT IN" alone would drop them. null if no table is closed.
+   */
+  classFilter(): string | null {
+    const { allow, deny } = this.config.tables
+    const exact = (patterns: string[]) => patterns.filter((pattern) => !pattern.endsWith('*'))
+    const prefixes = (patterns: string[]) => patterns.filter((pattern) => pattern.endsWith('*')).map((pattern) => pattern.slice(0, -1))
+    const orEmpty = '^ORsys_class_nameISEMPTY'
+    const parts: string[] = []
+    if (exact(deny).length) parts.push(`sys_class_nameNOT IN${exact(deny).join(',')}${orEmpty}`)
+    // There is no "does not start with". "Does not contain" leaves out a little more, never less.
+    for (const prefix of prefixes(deny)) if (prefix) parts.push(`sys_class_nameNOT LIKE${prefix}${orEmpty}`)
+    if (allow.length) {
+      const open = [exact(allow).length ? `sys_class_nameIN${exact(allow).join(',')}` : '', ...prefixes(allow).map((prefix) => (prefix ? `sys_class_nameSTARTSWITH${prefix}` : 'sys_class_nameISNOTEMPTY'))].filter(Boolean)
+      parts.push(`${open.join('^OR')}${orEmpty}`)
+    }
+    return parts.length ? parts.join('^') : null
+  }
+
   private assertAllowed(table: string): void {
     if (!this.allows(table)) {
       throw new ServiceNowError(`Table "${table}" is closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY). Nothing was sent.`, 'blocked', table)

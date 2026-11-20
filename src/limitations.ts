@@ -112,10 +112,11 @@ second time. sn_instance reports whether the account has that role.
 
 Everything a tool returns goes to the MCP client and from there to the model it uses. The account's access rules
 decide what can be read. On the machine that runs the server, SERVICENOW_TABLE_ALLOW and SERVICENOW_TABLE_DENY can
-keep the rows of tables away from it: also through a dot-walk or a database view, and including the names behind
-references into them, single ones and lists. A reference into a closed table can be compared with a sys_id, but
-not with text and not sorted by: both work on the names of the records there. Where tables are closed and the type
-of a field cannot be read, its display value is left out, because it is not known which table it names. A table closed that way is reported as an
+keep the rows of tables away from it: also through a dot-walk, a child table, a parent table or a database view,
+and including the names behind references into them, single ones and lists. A reference into a closed table can be
+compared with a sys_id, but not with text and not sorted by. Not covered: plain text fields that carry something
+from a closed table, such as the user name in sys_created_by, and tables that record the content of others
+(sys_audit, sys_history_line, sys_journal_field). A table closed that way is reported as an
 error of kind \`blocked\`.
 
 ## Evidence
