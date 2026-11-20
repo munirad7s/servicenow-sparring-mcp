@@ -10,6 +10,12 @@ answer; such changes are listed under "Changed".
 - **The value of a system property that holds a secret was handed out under another name.** Measured: the Table
   API accepts `ref_sys_properties.value` on `sys_properties` itself and returns the field under that name. The
   server took that for a path into a child table and passed the value on. 0.3.0 has this defect. Found by review.
+- **The payload of a captured change, of a version or of an upgrade entry carries the whole record, secrets
+  included, and was passed on as it is.** What looks like a secret is now taken out of such a text (the content of
+  an element or the value of a key whose name suggests one, and the value of a property of a password type), the
+  payload of a record in a closed table is withheld, and a payload can no longer be searched, sorted or counted
+  by. The comparison of two payloads (`payload_diff`) is not passed on. The name pattern was checked against the
+  1,090 secret fields of one instance and widened; it knows all but a handful.
 - A dictionary entry that came back without its type counted as proof that a field holds no secret and points into
   no closed table. Now the name of the field decides, as where the entry is missing.
 - With tables closed, a field that can point to any table could still be compared with text.

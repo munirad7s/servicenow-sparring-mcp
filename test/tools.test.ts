@@ -5,6 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { InstanceConfig } from '../src/config.js'
 import { buildServer } from '../src/server.js'
 import { queryByContent } from '../src/tools/origin.js'
+import { LOOKS_SECRET, scrubSecrets } from '../src/tools/shared.js'
 import { column, dictionaryRoutes, fakeInstance, labelled, tableRow, type Route } from './fake.js'
 
 type Data = Record<string, any>
@@ -610,6 +611,72 @@ test('the values of system properties that hold secrets cannot be found out by t
   // Counted by another field, a condition on the value is treated like any other.
   await answer('sn_query', { table: 'sys_properties', query: 'valueLIKEa', groupBy: 'type' })
   assert.equal(sentTo('sys_properties', 'stats')[0].query, `valueLIKEa^${LEFT_OUT}`)
+})
+
+test('the name pattern for secrets, against the names of the secret fields of one instance', () => {
+  // Measured: 1,090 fields of a password or encrypted type. These are their names, as far as the pattern knows them.
+  const secret = [
+    'user_password', 'password', 'client_secret', 'token', 'access_token', 'api_key', 'apikey', 'private_key', 'passphrase', 'credential', 'client_state', 'clientState', 'encoded_value', 'otp',
+    'property_key', 'sensitive_value', 'passcode', 'secure_notes', 'access_key', 'authentication_key', 'bluemix_key', 'code_verifier', 'encrypted_file', 'encryption_key',
+    'job_data_encryption_key', 'key_id', 'mac_key', 'nonce', 'privacy_key', 'registration_key', 'sas_key', 'secure_data', 'secure_value', 'seed', 'sensitive_content', 'shared_key',
+    'signing_key', 'softlayer_key', 'softpin', 'state_key', 'user_pwd', 'caller_id.user_password',
+  ]
+  for (const name of secret) assert.ok(LOOKS_SECRET.test(name), name)
+  // A handful it does not know (the type says so where the dictionary is readable), and everyday names it must leave alone.
+  const plain = ['key', 'answer', 'customer_uri', 'name', 'number', 'short_description', 'state', 'category', 'priority', 'sys_id', 'monkey', 'keyword', 'spinner', 'pinned', 'announcement', 'bypass', 'passed', 'opened_by']
+  for (const name of plain) assert.ok(!LOOKS_SECRET.test(name), name)
+})
+
+test('secrets are taken out of a text that carries a record', () => {
+  const xml = '<record_update table="sys_user"><sys_user action="INSERT_OR_UPDATE"><name>Abel Tuter</name><user_password>$s$hash</user_password><token><![CDATA[abc<def]]></token><email/></sys_user></record_update>'
+  const cleaned = scrubSecrets(xml)
+  assert.equal(cleaned.withheld, 2)
+  assert.equal(cleaned.text, '<record_update table="sys_user"><sys_user action="INSERT_OR_UPDATE"><name>Abel Tuter</name><user_password>[withheld]</user_password><token>[withheld]</token><email/></sys_user></record_update>')
+
+  // A system property says by its type whether its value is a secret.
+  const property = (type: string) => `<record_update table="sys_properties"><sys_properties action="INSERT_OR_UPDATE"><name>glide.smtp.pw</name><type>${type}</type><value>ciphertext</value></sys_properties></record_update>`
+  assert.match(scrubSecrets(property('password2')).text, /<value>\[withheld\]<\/value>/)
+  assert.equal(scrubSecrets(property('string')).withheld, 0)
+
+  assert.equal(scrubSecrets('{"user":"abel","api_key":"abc\\"def","nested":{"password": "x"}}').text, '{"user":"abel","api_key":"[withheld]","nested":{"password": "[withheld]"}}')
+  // A switch that has "password" in its name is no secret.
+  assert.equal(scrubSecrets('<pwd_reset action="INSERT_OR_UPDATE"><display_password>true</display_password></pwd_reset>').withheld, 0)
+  assert.deepEqual(scrubSecrets('A short text.'), { text: 'A short text.', withheld: 0 })
+  assert.deepEqual(scrubSecrets('<p>The password must be changed every 90 days.</p>'), { text: '<p>The password must be changed every 90 days.</p>', withheld: 0 })
+})
+
+test('the payload of a captured change is passed on without its secrets, and cannot be searched', async () => {
+  const payload = (table: string, inner: string) => `<?xml version="1.0"?><record_update table="${table}"><${table} action="INSERT_OR_UPDATE">${inner}</${table}></record_update>`
+  const rows = [
+    { name: 'sys_auth_profile_basic_1', payload: payload('sys_auth_profile_basic', '<name>Example</name><password>ciphertext</password>') },
+    { name: 'sys_user_2', payload: payload('sys_user', '<name>Abel Tuter</name>') },
+    { name: 'sys_script_3', payload: payload('sys_script', '<name>Example rule</name><script><![CDATA[gs.info("x")]]></script>') },
+  ]
+  const routes: Route[] = [
+    { table: 'sys_db_object', query: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Customer Update')] },
+    { table: 'sys_dictionary', query: 'nameINsys_update_xml', rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'payload'), column('sys_update_xml', 'type')] },
+    ...dictionaryRoutes,
+    { table: 'sys_update_xml', rows },
+    stats('sys_update_xml', { x: 1 }),
+  ]
+  const { answer, call, sentTo } = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
+
+  const data = await answer('sn_query', { table: 'sys_update_xml', fields: ['name', 'payload'] })
+  assert.match(data.records[0].payload, /<name>Example<\/name><password>\[withheld\]<\/password>/)
+  // The record of a table that is closed on this machine is not passed on inside a payload either.
+  assert.equal(data.records[1].payload, '[withheld: the record is in a table closed on this machine]')
+  assert.match(data.records[2].payload, /gs\.info/)
+  assert.match(data.warnings.join(' '), /1 value\(s\) inside a text were withheld/)
+  assert.match(data.warnings.join(' '), /1 payload\(s\) were withheld, because the record they carry is in a table that is closed/)
+
+  // "Contains <password>a", "contains <password>b": searching the payload would read the secret piece by piece.
+  for (const args of [{ query: 'payloadLIKE<password>a' }, { query: 'ORDERBYpayload' }, { groupBy: 'payload' }]) {
+    const { data: refused } = await call('sn_query', { table: 'sys_update_xml', ...args })
+    assert.equal(refused.error, 'validation', JSON.stringify(args))
+    assert.match(refused.message, /holds whole records as text/)
+  }
+  assert.equal(sentTo('sys_update_xml').length, 1)
+  assert.equal((await answer('sn_query', { table: 'sys_update_xml', query: 'payloadISNOTEMPTY^nameSTARTSWITHsys_script', fields: ['name'] })).returned, 3)
 })
 
 test('the value of a system property is not handed out under another name', async () => {

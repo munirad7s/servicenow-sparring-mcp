@@ -21,8 +21,67 @@ export const READ_ONLY = {
 /** Field types whose values are secrets, stored hashed or encrypted. The Table API hands them out as they are stored. */
 export const SECRET_TYPES = new Set(['password', 'password2', 'glide_encrypted'])
 export const SECRET_NOTE = '[withheld: this field holds a secret]'
-/** Where the type of a field cannot be read, its name is the only sign left. */
-export const LOOKS_SECRET = /passw(or)?d|passphrase|secret|token|credential|private_?key|api_?key/i
+/**
+ * Where the type of a field cannot be read, its name is the only sign left. Measured against the 1,090 fields of a
+ * secret type on one instance: this pattern recognises all but a handful (a field called "key", "answer", "customer_uri").
+ */
+export const LOOKS_SECRET =
+  /passw(or)?d|passphrase|passcode|pwd|secret|token|credential|api_?key|private_?key|(?:^|[_.])otp(?:$|[_.])|[a-z0-9]_key(?:$|[_.])|(?:^|[_.])key_|secure_|sensitive_|encrypt|encoded_value|client_?state|nonce|code_verifier|(?:^|[_.])seed(?:$|[_.])|(?:^|[_.]|soft)pin(?:$|[_.])/i
+
+/**
+ * Fields that hold a whole record as text: the payload of a captured change, of a version, of an upgrade entry.
+ * Whatever the record holds is in there, secrets included, under names the dictionary of this table does not know.
+ */
+const RECORD_PAYLOADS: Record<string, string[]> = {
+  sys_update_xml: ['payload'],
+  sys_update_version: ['payload'],
+  sys_update_preview_xml: ['payload', 'payload_diff'],
+  sys_upgrade_history_log: ['payload', 'payload_diff'],
+  sys_update_diff: ['payload_diff'],
+}
+
+/** "payload" or "diff" if the field carries a whole record, as itself or as a comparison of two. */
+export function recordPayload(table: string, path: string, column?: Column): 'payload' | 'diff' | null {
+  const owner = column?.definedOn && RECORD_PAYLOADS[column.definedOn] ? column.definedOn : table
+  const field = column ? (column.sourceField ?? column.name) : (path.split('.').at(-1) ?? path)
+  if (!RECORD_PAYLOADS[owner]?.includes(field)) return null
+  return field === 'payload_diff' ? 'diff' : 'payload'
+}
+
+const WITHHELD = '[withheld]'
+
+/**
+ * Takes out of a text that carries a record what looks like a secret: the content of an XML element, or the value
+ * of a JSON key, whose name suggests one, and the value of a system property of a password type. Recognised by
+ * name only: the types of the record's fields are not at hand here.
+ */
+export function scrubSecrets(text: string): { text: string; withheld: number } {
+  if (text.length < 20 || !/[<"]/.test(text)) return { text, withheld: 0 }
+  let withheld = 0
+  let out = text.replace(/<([A-Za-z_][\w.-]*)((?:\s[^<>]*)?)>(<!\[CDATA\[[\s\S]*?\]\]>|[^<]+)<\/\1>/g, (whole, tag: string, attributes: string, content: string) => {
+    // "true" and "false" are switches such as "display_password", not secrets.
+    if (!LOOKS_SECRET.test(tag) || !content.trim() || /^(true|false)$/.test(content.trim())) return whole
+    withheld++
+    return `<${tag}${attributes}>${WITHHELD}</${tag}>`
+  })
+  if (/<sys_properties[\s>]/.test(out) && /<type>password2?<\/type>/.test(out)) {
+    out = out.replace(/<value>(?:<!\[CDATA\[[\s\S]*?\]\]>|[^<]+)<\/value>/g, () => {
+      withheld++
+      return `<value>${WITHHELD}</value>`
+    })
+  }
+  out = out.replace(/("([A-Za-z_][\w.-]*)"\s*:\s*)"(?:[^"\\]|\\.)+"/g, (whole, lead: string, key: string) => {
+    if (!LOOKS_SECRET.test(key)) return whole
+    withheld++
+    return `${lead}"${WITHHELD}"`
+  })
+  return { text: out, withheld }
+}
+
+/** The table of the record a payload carries: the element that has the action on it. */
+export function payloadTable(text: string): string {
+  return /<([a-z0-9_]{1,80})\s[^<>]*\baction="/.exec(text)?.[1] ?? ''
+}
 
 /**
  * Comments, work notes and the like. Their entries are stored in sys_journal_field, not in the record. Measured: the
@@ -251,6 +310,15 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
 
   const compared = new Set([...parsed.otherFields, ...parsed.conditions.filter(({ operator }) => !ASKS_IF_FILLED.has(operator)).map(({ field }) => field)])
   if (!compared.size) return query
+
+  const whole = [...compared].find((field) => recordPayload(table, field, resolved.get(field)))
+  if (whole) {
+    throw validation(
+      `"${whole}" holds whole records as text, with everything in them, secrets included. It can be read, with secrets taken out, but not searched or sorted by: ` +
+        'the number of matches would give a value away piece by piece. Filter on the name, the type or the date of the row instead. Nothing was sent.',
+      table,
+    )
+  }
 
   const valueFields = await propertyValueFields(ctx, table)
   let propertyValues = false

@@ -6,7 +6,22 @@ import { validation } from '../errors.js'
 import { assertTableName } from '../query.js'
 import { clip, fail, listing, listShape, ok, rawOf, rowSchema, source, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { explainEmpty, guardFields, holdsSecret, JOURNAL_TYPES, LOOKS_SECRET, mayBePropertyValue, propertyValueFields, READ_ONLY, SECRET_NOTE, type Context, type Guard } from './shared.js'
+import {
+  explainEmpty,
+  guardFields,
+  holdsSecret,
+  JOURNAL_TYPES,
+  LOOKS_SECRET,
+  mayBePropertyValue,
+  payloadTable,
+  propertyValueFields,
+  READ_ONLY,
+  recordPayload,
+  scrubSecrets,
+  SECRET_NOTE,
+  type Context,
+  type Guard,
+} from './shared.js'
 
 /** System properties of these types hold credentials. Their value is never passed on. */
 const SECRET_PROPERTY_TYPES = new Set(['password', 'password2'])
@@ -34,7 +49,17 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     const byName = new Set<string>()
     const closed = new Set<string>()
     const untold = new Set<string>()
-    const counts = { typed: 0, named: 0, neither: 0 }
+    const counts = { typed: 0, named: 0, neither: 0, inText: 0, closedRecords: 0, diffs: 0 }
+    // A text that carries a record: what looks like a secret is taken out of it, in whatever field it arrives.
+    const scrub = <T>(value: T): T => {
+      if (typeof value === 'string') {
+        const cleaned = scrubSecrets(value)
+        counts.inText += cleaned.withheld
+        return cleaned.text as T
+      }
+      if (value && typeof value === 'object' && !Array.isArray(value)) return Object.fromEntries(Object.entries(value).map(([part, text]) => [part, scrub(text)])) as T
+      return value
+    }
     const propertyValues = table === 'sys_properties' ? new Set<string>() : await propertyValueFields(ctx, table)
 
     const cleaned = rows.map((row) => {
@@ -45,7 +70,14 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         // that would say whether it is a secret. Only the plain "value" of sys_properties itself is judged by its row.
         const fromProperties = propertyValues.has(key) || (!(table === 'sys_properties' && key === 'value') && mayBePropertyValue(column, key))
         const named = value && typeof value === 'object'
-        if (fromProperties || holdsSecret(column, key)) {
+        const carries = recordPayload(table, key, column)
+        if (carries && filled(value)) {
+          // The comparison of two payloads is markup around the same content: it is not passed on at all.
+          const closedRecord = carries === 'payload' && payloadTable(rawOf(value)) && !ctx.sn.allows(payloadTable(rawOf(value)))
+          if (carries === 'diff') counts.diffs++
+          else if (closedRecord) counts.closedRecords++
+          out[key] = carries === 'diff' ? '[withheld: the comparison of two payloads is not passed on]' : closedRecord ? '[withheld: the record is in a table closed on this machine]' : scrub(value)
+        } else if (fromProperties || holdsSecret(column, key)) {
           if (filled(value)) (column?.type || fromProperties ? byType : byName).add(key)
           out[key] = filled(value) ? SECRET_NOTE : value
         } else if (named && column?.reference && !ctx.sn.allows(column.reference)) {
@@ -57,7 +89,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
           untold.add(key)
           out[key] = rawOf(value)
         } else {
-          out[key] = value
+          out[key] = scrub(value)
         }
       }
 
@@ -82,6 +114,14 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     if (counts.typed) warnings.push(`The value of ${properties(counts.typed)} was withheld, because the property holds a secret.`)
     if (counts.named) warnings.push(`The value of ${properties(counts.named)} was withheld: its type did not come back, and its name suggests a secret.`)
     if (counts.neither) warnings.push(`The value of ${properties(counts.neither)} was withheld: neither type nor name came back, so it could not be told whether the property holds a secret.`)
+    if (counts.inText) {
+      warnings.push(
+        `${counts.inText} value(s) inside a text were withheld: the text carries a record, and the name of the element suggests a secret. ` +
+          'A secret under a name that does not suggest one is not recognised there.',
+      )
+    }
+    if (counts.diffs) warnings.push('The comparison of two payloads (payload_diff) is not passed on: read the payload itself.')
+    if (counts.closedRecords) warnings.push(`${counts.closedRecords} payload(s) were withheld, because the record they carry is in a table that is closed on this machine.`)
     if (closed.size) warnings.push(`The names behind references into a table that is closed on this machine were left out: ${list(closed)}.`)
     if (untold.size) warnings.push(`Tables are closed on this machine, and it could not be told which table these fields point to, so their display values were left out: ${list(untold)}.`)
     return cleaned
@@ -103,6 +143,9 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     const column = guard.resolved.get(groupBy)
     if (holdsSecret(column, groupBy)) {
       throw validation(`"${groupBy}" holds a secret. Its values are not listed, also not as groups.`, table)
+    }
+    if (recordPayload(table, groupBy, column)) {
+      throw validation(`"${groupBy}" holds whole records as text, secrets included. Its values are not listed as groups.`, table)
     }
     if (mayBePropertyValue(column, groupBy) || (table === 'sys_properties' && groupBy === 'value') || (await propertyValueFields(ctx, table)).has(groupBy)) {
       throw validation(`"${groupBy}" is the value of a system property, and some properties hold secrets. The values are not listed as groups. Read the properties with their name and type instead.`, table)
