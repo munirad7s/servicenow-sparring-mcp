@@ -81,8 +81,9 @@ export async function accountRoles(sn: ServiceNowClient): Promise<{ roles: numbe
       2_000,
     )
     if (!complete || (total !== null && records.length < total)) return null
+    // No row at all: an account that reads these tables has roles, so the lookup through the user table did not work.
     // A row without a role name: the name is hidden from this account, and it could be the one that matters.
-    if (records.some((row) => !row['role.name'])) return null
+    if (!records.length || records.some((row) => !row['role.name'])) return null
     const names = new Set(records.map((row) => row['role.name']))
     return { roles: names.size, admin: names.has('admin'), readOnlyRole: names.has('snc_read_only') }
   } catch {

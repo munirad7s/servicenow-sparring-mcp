@@ -70,6 +70,15 @@ answer; such changes are listed under "Changed".
   without a word.** Measured: `work_notesISEMPTY` and `work_notesISNOTEMPTY` return the same rows, and
   `work_notesLIKEa` finds more incidents than there are work notes. Such a condition is refused, with the query on
   `sys_journal_field` that answers the question exactly. An empty journal field in an answer is explained.
+- `sn_dependencies` with a field listed the choices of a parent table next to the table's own, which replace
+  them, and never flagged a captured change for choices and form sections, because those carry no update name of
+  their own. Their changes are captured under the name of the choice list or of the form section, and are found
+  there now.
+- `sn_dependencies` listed, as fields that reference a table, every field that references one of its parents too:
+  496 for incident, of which 172 point at incident itself. It lists those that point at the table itself.
+- `sn_instance` reported "0 roles" where the lookup of the account through the user table returned nothing.
+- A timestamp was returned with both its stored and its shown form where the account shows dates in another
+  format. A count per value of a list field now says that it counts whole lists, not entries.
 - When the instance refuses a request because of one field in it, the hint said the table could not be read.
   Measured: the Aggregate API refuses to count `sys_metadata` by `sys_class_name` with "Field(s) present in the
   query do not have permission to be read", while the table and the same field in a condition are readable. The

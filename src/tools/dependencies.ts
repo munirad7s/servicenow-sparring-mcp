@@ -32,6 +32,15 @@ interface Category {
   label?: string[]
   /** Name of an item whose label fields are all empty. */
   unnamed?: string
+  /** Fields read along because another one is built from them. */
+  also?: string[]
+  /**
+   * The name a change to the item is captured under, where the item itself carries none. Measured: the choices of
+   * a field are captured together as "sys_choice_<table>_<field>", a form section as "sys_ui_section_<sys_id>".
+   */
+  updateName?: (row: Row) => string
+  /** true where the items of the nearest table in the parent chain replace those of the tables above it. */
+  nearestWins?: boolean
 }
 
 const CATEGORIES: Category[] = [
@@ -69,7 +78,9 @@ const CATEGORIES: Category[] = [
     table: 'sys_dictionary',
     tableField: 'reference',
     parents: 'always',
-    match: (_table, chain) => `referenceIN${chain.join(',')}^internal_typeINreference,glide_list`,
+    // Fields that point at this table itself. A field that points at a parent, at task for example, can hold any
+    // record of that parent: asking for the parent lists those.
+    match: (table) => `reference=${table}^internal_typeINreference,glide_list`,
     show: ['internal_type'],
     label: ['name', 'element'],
   },
@@ -91,8 +102,32 @@ const FIELD_CATEGORIES: Category[] = [
     label: ['name'],
   },
   { key: 'dictionaryOverrides', table: 'sys_dictionary_override', tableField: 'name', fieldField: 'element', parents: 'always', active: null, label: ['name', 'element'] },
-  { key: 'choices', table: 'sys_choice', tableField: 'name', fieldField: 'element', parents: 'always', active: 'inactive=false^language=en', label: ['label'], show: ['value'] },
-  { key: 'formSections', table: 'sys_ui_element', tableField: 'sys_ui_section.name', fieldField: 'element', parents: 'always', active: null, label: ['sys_ui_section.view_name'], unnamed: 'default view', show: ['sys_ui_section.caption'] },
+  {
+    key: 'choices',
+    table: 'sys_choice',
+    tableField: 'name',
+    fieldField: 'element',
+    parents: 'always',
+    // A table that has choices of its own for a field does not use those of its parent.
+    nearestWins: true,
+    active: 'inactive=false^language=en',
+    label: ['label'],
+    show: ['value'],
+    updateName: (row) => `sys_choice_${rawOf(row.name)}_${rawOf(row.element)}`,
+  },
+  {
+    key: 'formSections',
+    table: 'sys_ui_element',
+    tableField: 'sys_ui_section.name',
+    fieldField: 'element',
+    parents: 'always',
+    active: null,
+    label: ['sys_ui_section.view_name'],
+    unnamed: 'default view',
+    show: ['sys_ui_section.caption'],
+    also: ['sys_ui_section'],
+    updateName: (row) => `sys_ui_section_${rawOf(row.sys_ui_section)}`,
+  },
   { key: 'listLayouts', table: 'sys_ui_list_element', tableField: 'list_id.name', fieldField: 'element', parents: 'always', active: null, label: ['list_id.view_name'], unnamed: 'default view', show: ['list_id.parent'] },
   { key: 'dependentFields', table: 'sys_dictionary', tableField: 'name', fieldField: 'dependent_on_field', parents: 'always', label: ['name', 'element'] },
 ]
@@ -141,7 +176,14 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
     return [branch(`${attachedTo}=${table}`), branch(`${attachedTo}IN${parents.join(',')}^${category.parents.flag}=true`)].join('^NQ')
   }
 
-  async function readCategory(category: Category, table: string, chain: string[], field: string, limit: number, activeOnly: boolean): Promise<{ result: CategoryResult; rows: Row[] }> {
+  async function readCategory(category: Category, table: string, all: string[], field: string, limit: number, activeOnly: boolean): Promise<{ result: CategoryResult; rows: Row[] }> {
+    let chain = all
+    if (category.nearestWins && all.length > 1) {
+      // Which tables of the chain have any items: the nearest of them is the one that counts.
+      const perTable = await sn.groupCount(category.table, category.tableField, queryFor(category, table, all, field, activeOnly)).catch(() => null)
+      const nearest = perTable && all.find((name) => perTable.some((group) => group.value === name && group.count > 0))
+      if (nearest) chain = [nearest]
+    }
     const query = queryFor(category, table, chain, field, activeOnly)
     const empty = { table: category.table, query, total: null, returned: 0, truncated: false, items: [] }
     const notChecked = (reason: string) => ({ result: { status: 'not_checked' as const, reason, ...empty }, rows: [] })
@@ -152,7 +194,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
       const page = await sn.query<Row>({
         table: category.table,
         query,
-        fields: [...new Set(['sys_id', 'sys_name', 'sys_update_name', 'active', ...required, ...(category.show ?? []), ...(category.label ?? [])])],
+        fields: [...new Set(['sys_id', 'sys_name', 'sys_update_name', 'active', ...required, ...(category.show ?? []), ...(category.label ?? []), ...(category.also ?? [])])],
         limit,
         display: true,
       })
@@ -177,7 +219,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
         return {
           name: (category.label ?? []).map((field) => labelOf(row[field])).filter(Boolean).join('.') || (named && category.unnamed) || rawOf(row.sys_name) || rawOf(row.sys_id),
           sysId: rawOf(row.sys_id),
-          ...(chain.includes(attachedTo) ? { definedOn: attachedTo } : {}),
+          ...(all.includes(attachedTo) ? { definedOn: attachedTo } : {}),
           ...(rawOf(row.active) ? { active: rawOf(row.active) === 'true' } : {}),
           ...(Object.keys(details).length ? { details } : {}),
         }
@@ -310,11 +352,12 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
           sn.query<Row>({ table: 'sys_db_object', query: levels.join('^OR'), fields: ['sys_id'], limit: 1 }).catch(() => null),
         ])
 
-        const names = read.flatMap(([, { rows }]) => rows.map((row) => rawOf(row.sys_update_name))).filter(isPlainValue)
+        const nameOf = (category: Category, row: Row) => (category.updateName ? category.updateName(row) : rawOf(row.sys_update_name))
+        const names = read.flatMap(([category, { rows }]) => rows.map((row) => nameOf(category, row))).filter(isPlainValue)
         const captured = names.length ? await capturedNames(names, warnings) : new Map<string, boolean>()
-        for (const [, { result, rows }] of read) {
+        for (const [category, { result, rows }] of read) {
           result.items = result.items.map((item, index) => {
-            const flag = captured.get(rawOf(rows[index].sys_update_name))
+            const flag = captured.get(nameOf(category, rows[index]))
             return flag === undefined ? item : { ...item, customerUpdate: flag }
           })
         }

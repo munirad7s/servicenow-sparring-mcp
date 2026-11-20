@@ -37,6 +37,7 @@ export const DEPENDENCIES_NOT_COVERED = [
   'CMDB identification and reconciliation rules',
   'integrations that write to the table from outside',
   'anything on a child table (child tables are counted and listed by name only)',
+  'fields of other tables that point at a parent table, such as task: they can hold a record of this table too. referencedBy lists the fields that point at the table itself',
 ]
 
 export const FIELD_DEPENDENCIES_NOT_COVERED = [

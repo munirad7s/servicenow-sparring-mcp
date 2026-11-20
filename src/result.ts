@@ -98,11 +98,13 @@ export function withheldWarning(what: string, page: Page<unknown>, warnings: str
  */
 export function tidy(record: Row): Row {
   const DATE = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?$/
+  // The display value follows the date format of the account: 01.06.2026, 06/01/2026, 2026-06-01, with or without a time.
+  const SHOWN_DATE = /^\d{1,4}[./-]\d{1,2}[./-]\d{1,4}( \d{1,2}:\d{2}(:\d{2})?( ?[AP]M)?)?$/i
   return Object.fromEntries(
     Object.entries(record).map(([key, field]) => {
       if (!field || typeof field !== 'object' || !('value' in field)) return [key, field]
       const { value, display_value: display } = field as { value?: unknown; display_value?: unknown }
-      const sameMoment = typeof value === 'string' && DATE.test(value) && typeof display === 'string' && DATE.test(display)
+      const sameMoment = typeof value === 'string' && DATE.test(value) && typeof display === 'string' && SHOWN_DATE.test(display)
       if (display === undefined || display === null || display === '' || display === value || sameMoment) return [key, value]
       return [key, { value, display }]
     }),

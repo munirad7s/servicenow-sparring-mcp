@@ -180,6 +180,9 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     const groups = (await ctx.sn.groupCount(table, groupBy, guard.query, labels)).sort((a, b) => b.count - a.count)
     const shown = groups.slice(0, limit)
     const warnings = [...guard.warnings]
+    if (column?.type === 'glide_list') {
+      warnings.push(`"${groupBy}" is a list. It is counted by its whole content: a row with "a,b" and a row with "a" are two groups. This does not say how often each entry occurs.`)
+    }
     await warnAboutQueryRules(table, warnings)
     return ok({
       ...source(ctx.sn, warnings),

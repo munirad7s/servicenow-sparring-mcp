@@ -368,6 +368,7 @@ test('a closed table gives away no names through a list of references, an unknow
   assert.match(listed.warnings.join(' '), /closed on this machine were left out: watch_list/)
   await noUsers.answer('sn_query', { table: 'incident', groupBy: 'watch_list' })
   assert.equal(noUsers.sentTo('incident', 'stats')[0].params.get('sysparm_display_value'), null, 'the groups are not asked for their names')
+  assert.match((await noUsers.answer('sn_query', { table: 'incident', groupBy: 'watch_list' })).warnings.join(' '), /"watch_list" is a list\. It is counted by its whole content/)
 
   // "Starts with A" on the reference compares with the names in the closed table, and a sort orders the rows by them.
   for (const query of ['caller_idSTARTSWITHAb', 'caller_idLIKEbel', 'watch_listLIKEAbel', 'ORDERBYcaller_id', 'active=true^ORDERBYDESCassigned_to', 'numberGT_FIELDcaller_id']) {
@@ -1892,7 +1893,8 @@ test('sn_dependencies follows how each kind of configuration reaches a child tab
   assert.equal(query('recordProducers'), 'table_name=incident^active=true')
   assert.equal(query('databaseViews'), 'table=incident^active=true')
   assert.equal(query('workflows'), 'tableINincident,task^published=true^active=true')
-  assert.equal(query('referencedBy'), 'referenceINincident,task^internal_typeINreference,glide_list^active=true')
+  // The fields that point at the table itself. A field that points at task can hold any task: that is the parent's list.
+  assert.equal(query('referencedBy'), 'reference=incident^internal_typeINreference,glide_list^active=true')
   assert.equal(Object.keys(data.categories).length, 21)
 })
 
@@ -1985,6 +1987,27 @@ test('sn_dependencies with a field lists what is tied to that one field', async 
   assert.equal((await call('sn_dependencies', { table: 'incident', field: 'caller_id.email' })).data.error, 'validation')
   assert.match((await call('sn_dependencies', { table: 'incident', field: 'category', categories: ['businessRules'] })).data.message, /not available for a field/)
   assert.match((await call('sn_dependencies', { table: 'incident', categories: ['choices'] })).data.message, /not available without "field"/)
+})
+
+test('sn_dependencies with a field: the choices of the nearest table count, and captured changes are flagged', async () => {
+  // Measured: the choices of a field are captured together under "sys_choice_<table>_<field>", a form section under
+  // "sys_ui_section_<sys_id>". Neither a choice nor a form element carries an update name of its own.
+  const section = 'c'.repeat(32)
+  const { answer, sentTo } = await connect([
+    { table: 'sys_choice', api: 'stats', rows: [{ stats: { count: '6' }, groupby_fields: [{ value: 'incident' }] }, { stats: { count: '4' }, groupby_fields: [{ value: 'task' }] }] },
+    { table: 'sys_choice', query: 'nameINincident^element=state', rows: [{ sys_id: 'c1', name: 'incident', element: 'state', label: 'New', value: '1', inactive: 'false', language: 'en' }], total: 6 },
+    { table: 'sys_ui_element', rows: [{ sys_id: 'e1', element: 'state', sys_ui_section: section, 'sys_ui_section.name': 'incident', 'sys_ui_section.view_name': '', 'sys_ui_section.caption': '' }] },
+    { table: 'sys_update_xml', api: 'stats', rows: [{ stats: { count: '2' }, groupby_fields: [{ value: 'sys_choice_incident_state' }] }, { stats: { count: '1' }, groupby_fields: [{ value: `sys_ui_section_${section}` }] }] },
+    ...dictionaryRoutes,
+  ])
+  const data = await answer('sn_dependencies', { table: 'incident', field: 'state', categories: ['choices', 'formSections'] })
+
+  // incident has choices of its own for the field: those of task are not used on incident.
+  assert.equal(data.categories.choices.query, 'nameINincident^element=state^inactive=false^language=en')
+  assert.equal(data.categories.choices.total, 6)
+  assert.deepEqual(data.categories.choices.items[0], { name: 'New', sysId: 'c1', definedOn: 'incident', customerUpdate: true, details: { value: '1' } })
+  assert.equal(data.categories.formSections.items[0].customerUpdate, true)
+  assert.match(sentTo('sys_update_xml', 'stats')[0].query, new RegExp(`^nameIN(sys_choice_incident_state,sys_ui_section_${section}|sys_ui_section_${section},sys_choice_incident_state)$`))
 })
 
 test('sn_dependencies says so when some rows of a category are hidden', async () => {
@@ -2100,7 +2123,8 @@ test('sn_instance says so when the release property is hidden', async () => {
   assert.equal(data.account, null)
 
   const none = await connect([{ table: 'sys_user_has_role', rows: [] }, ...sourceTables.filter((table) => table !== 'sys_user_has_role').map((table) => ({ table, rows: [{ sys_id: '1' }] }))])
-  assert.deepEqual((await none.answer('sn_instance')).account, { roles: 0, admin: false, readOnlyRole: false })
+  // No role row at all for an account that reads these tables: the lookup through the user table did not work.
+  assert.equal((await none.answer('sn_instance')).account, null)
 
   // One name is visible, one is hidden: the hidden one could be "admin", so nothing is claimed.
   const some = await connect([{ table: 'sys_user_has_role', rows: [{ 'role.name': 'snc_read_only' }, { 'role.name': '' }] }, ...sourceTables.filter((table) => table !== 'sys_user_has_role').map((table) => ({ table, rows: [{ sys_id: '1' }] }))])
