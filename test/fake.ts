@@ -178,9 +178,10 @@ export const dictionaryRoutes: Route[] = [
     table: 'sys_choice',
     query: 'element=state',
     rows: [
-      { name: 'task', value: '1', label: 'Open' },
-      { name: 'incident', value: '1', label: 'New' },
-      { name: 'incident', value: '6', label: 'Resolved' },
+      { name: 'task', value: '1', label: 'Open', language: 'en' },
+      { name: 'incident', value: '1', label: 'New', language: 'en' },
+      { name: 'incident', value: '6', label: 'Resolved', language: 'en' },
+      { name: 'incident', value: '6', label: 'Gelöst', language: 'de' },
     ],
   },
   { table: 'sys_choice', rows: [] },

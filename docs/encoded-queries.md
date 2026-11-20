@@ -147,5 +147,5 @@ names against the dictionary. Tags and variables are refused wherever a field ca
 dot-walk, in a sort, and as the second field of a comparison. `IN_HIERARCHY` with a sys_id is accepted on the
 strength of its documentation only.
 
-The refusal of a choice label looks at the English labels of fields of the queried table, and of fields a database
-view takes from its tables. A field reached by a dot-walk is not checked, and the answer says so.
+The refusal of a choice label looks at the labels, in every language the instance has, of fields of the queried
+table, and of fields a database view takes from its tables. A field reached by a dot-walk is not checked, and the answer says so.

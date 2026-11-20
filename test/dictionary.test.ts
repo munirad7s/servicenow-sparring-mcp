@@ -229,12 +229,17 @@ test('a view that names itself or another view as a part does not send the serve
 test('choices come from the nearest table that defines any', async () => {
   const { sn } = fakeInstance(dictionaryRoutes)
   const dict = new Dictionary(sn)
-  assert.deepEqual(await dict.choices('incident', 'state'), [{ value: '1', label: 'New' }, { value: '6', label: 'Resolved' }])
-  assert.deepEqual(await dict.choices('task', 'state'), [{ value: '1', label: 'Open' }])
+  // In every language the instance has a label in.
+  assert.deepEqual(await dict.choices('incident', 'state'), [
+    { value: '1', label: 'New', language: 'en' },
+    { value: '6', label: 'Resolved', language: 'en' },
+    { value: '6', label: 'Gelöst', language: 'de' },
+  ])
+  assert.deepEqual(await dict.choices('task', 'state'), [{ value: '1', label: 'Open', language: 'en' }])
   assert.deepEqual(await dict.choices('incident', 'category'), [])
 })
 
 test('choices defined only on a parent table apply to the child', async () => {
-  const { sn } = fakeInstance([{ table: 'sys_choice', query: 'element=priority', rows: [{ name: 'task', value: '1', label: 'Critical' }] }, ...dictionaryRoutes])
-  assert.deepEqual(await new Dictionary(sn).choices('incident', 'priority'), [{ value: '1', label: 'Critical' }])
+  const { sn } = fakeInstance([{ table: 'sys_choice', query: 'element=priority', rows: [{ name: 'task', value: '1', label: 'Critical', language: 'en' }] }, ...dictionaryRoutes])
+  assert.deepEqual(await new Dictionary(sn).choices('incident', 'priority'), [{ value: '1', label: 'Critical', language: 'en' }])
 })

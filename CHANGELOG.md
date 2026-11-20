@@ -70,6 +70,8 @@ answer; such changes are listed under "Changed".
   without a word.** Measured: `work_notesISEMPTY` and `work_notesISNOTEMPTY` return the same rows, and
   `work_notesLIKEa` finds more incidents than there are work notes. Such a condition is refused, with the query on
   `sys_journal_field` that answers the question exactly. An empty journal field in an answer is explained.
+- The label of a choice was recognised in English only. An account that reads another language is shown other
+  labels, and a choice made in a German session has no English one. Labels of every language count now.
 - `sn_dependencies` with a field listed the choices of a parent table next to the table's own, which replace
   them, and never flagged a captured change for choices and form sections, because those carry no update name of
   their own. Their changes are captured under the name of the choice list or of the form section, and are found

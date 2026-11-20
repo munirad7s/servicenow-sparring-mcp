@@ -230,6 +230,14 @@ test('the check of choice labels also runs for a database view and with a partly
   assert.match((await walked.call('sn_query', { table: 'problem', query: 'first_incident.state=Resolved' })).data.message, /holds a number, and "Resolved" is not one/)
 })
 
+test('the label of a choice is recognised in any language the instance has one in', async () => {
+  // An account that reads German is shown "Gelöst", and an agent copies that into a query.
+  const { call } = await connect([...dictionaryRoutes, { table: 'incident', rows: [] }])
+  const { data } = await call('sn_query', { table: 'incident', query: 'state=Gelöst' })
+  assert.equal(data.error, 'validation')
+  assert.match(data.message, /"Gelöst" is the label of "6"/)
+})
+
 test('an empty result is explained when a value has the wrong shape', async () => {
   const { answer } = await connect([...dictionaryRoutes, { table: 'incident', rows: [] }])
 

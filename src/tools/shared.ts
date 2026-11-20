@@ -487,7 +487,8 @@ const COMPARES_VALUES = new Set(['=', '!=', 'IN', 'NOT IN'])
  * "state=Resolved" matches nothing, because a choice field stores "6", and
  * "state!=Resolved" matches nothing either where the stored value is a number.
  * The answer would be a correct-looking zero. Where the value is plainly a label,
- * the query is refused and the stored value is named.
+ * in whatever language the instance has one, the query is refused and the stored
+ * value is named.
  */
 async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQuery, resolved: Map<string, Column>, warnings: string[]): Promise<void> {
   for (const { field, operator, value } of parsed.conditions) {
@@ -546,7 +547,10 @@ export async function explainEmpty(ctx: Context, table: string, guard: Guard): P
       const stored = new Set(choices.map((choice) => choice.value.toLowerCase()))
       const odd = given.find((item) => !stored.has(item.toLowerCase()))
       if (choices.length && odd) {
-        const list = choices.slice(0, 15).map((choice) => `${quoteInstanceText(choice.value, 80)} (${quoteInstanceText(choice.label, 80)})`).join(', ')
+        // One entry per value: its English label where it has one.
+        const labels = new Map<string, string>()
+        for (const choice of choices) if (!labels.has(choice.value) || choice.language === 'en') labels.set(choice.value, choice.label)
+        const list = [...labels].slice(0, 15).map(([stored, label]) => `${quoteInstanceText(stored, 80)} (${quoteInstanceText(label, 80)})`).join(', ')
         notes.push(`"${odd}" is not among the choice values of "${field}": that can be why nothing matched. Its values: ${list}.`)
       }
     }

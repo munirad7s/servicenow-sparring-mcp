@@ -57,6 +57,8 @@ export interface FieldCheck {
 export interface Choice {
   value: string
   label: string
+  /** Language of the label. A value has one entry per language it is labelled in. */
+  language: string
 }
 
 export interface ColumnSet {
@@ -256,7 +258,9 @@ export class Dictionary {
 
   /**
    * The choices of a field, from the nearest table in the parent chain that defines any. Empty if there are none.
-   * Fails if the list is only partly readable: a missing choice would look like a value that does not exist.
+   * In every language: a choice made in a German session has no English label, and an agent may be shown the
+   * label of another language. Fails if the list is only partly readable: a missing choice would look like a
+   * value that does not exist.
    */
   async choices(table: string, field: string): Promise<Choice[]> {
     const info = await this.table(table)
@@ -266,8 +270,8 @@ export class Dictionary {
       const { records, total, complete } = await this.sn.all<Record<string, string>>(
         {
           table: 'sys_choice',
-          query: `nameIN${info.chain.join(',')}^element=${field}^inactive=false^language=en^ORDERBYsequence`,
-          fields: ['name', 'value', 'label'],
+          query: `nameIN${info.chain.join(',')}^element=${field}^inactive=false^ORDERBYsequence`,
+          fields: ['name', 'value', 'label', 'language'],
         },
         2_000,
       )
@@ -277,7 +281,7 @@ export class Dictionary {
       const owner = info.chain.find((name) => records.some((row) => row.name === name))
       return records
         .filter((row) => row.name === owner && typeof row.value === 'string')
-        .map((row) => ({ value: row.value, label: String(row.label ?? '') }))
+        .map((row) => ({ value: row.value, label: String(row.label ?? ''), language: String(row.language ?? '') }))
     })
   }
 
