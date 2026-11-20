@@ -1414,6 +1414,25 @@ test('the tables of a page of update names are asked for together, not name by n
   assert.ok(calls.length < 40, `${calls.length} requests in all`)
 })
 
+test('with a deny list, what stands before the sys_id of each name on a page is asked for once', async () => {
+  // Two hundred script includes with business rules closed: each name begins with "sys_script" as well, so each
+  // needs to know whether "sys_script_include" is a table. Asked for the page, that is one request.
+  const rows = Array.from({ length: 200 }, (_, index) => ({ name: `sys_script_include_${String(index).padStart(32, '0')}`, type: 'Script Include', target_name: `Util ${index}`, sys_created_by: 'abel', sys_updated_by: 'abel' }))
+  const world: Route[] = [
+    closedTables(tableRow('sys_script', 'Business Rule', 'sys_metadata')),
+    knownTables('sys_script_include'),
+    { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Update')] },
+    { table: 'sys_dictionary', query: 'nameINsys_update_xml', rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'target_name'), column('sys_update_xml', 'type'), column('sys_update_xml', 'sys_created_by'), column('sys_update_xml', 'sys_updated_by')] },
+    ...dictionaryRoutes,
+    { table: 'sys_update_xml', rows },
+    stats('sys_update_xml', { 'Script Include': 200 }),
+  ]
+  const { answer, calls } = await connect(world, { tables: { allow: [], deny: ['sys_script'] } })
+  const data = await answer('sn_delta', { limit: 200 })
+  assert.equal(data.updates[7].target_name, 'Util 7')
+  assert.equal(calls.filter((call) => call.table === 'sys_db_object' && /^nameIN[^^]*$/.test(call.query)).length, 1)
+})
+
 test('an update name is taken for a record of a closed table in every way it can be cut', async () => {
   const deny = (list: string[], closed: Route) => createContext(fakeInstance([closed, ...dictionaryRoutes], { tables: { allow: [], deny: list } }).sn)
   // With a deny list the closed tables are known by name, their child tables included.
@@ -2556,6 +2575,10 @@ test('a text search is refused on a table below the table of system properties',
   assert.equal(sentTo('u_props').length, 0)
   // Read, the value comes without the type that would say whether it is a secret, so it is withheld whatever it holds.
   assert.equal((await answer('sn_query', { table: 'u_props', fields: ['name', 'value'] })).records[0].value, '[withheld: this field holds a secret]')
+  // Also where the fields of the table cannot be read: that it extends the table of properties says enough.
+  const hidden = await connect([{ table: 'sys_dictionary', query: 'nameINu_props,sys_properties', status: 403 }, ...below])
+  assert.equal((await hidden.answer('sn_query', { table: 'u_props' })).records[0].value, '[withheld: this field holds a secret]')
+  assert.equal((await hidden.call('sn_query', { table: 'u_props', groupBy: 'value' })).data.error, 'validation')
 })
 
 test('the value of a system property is not handed out under another name', async () => {
@@ -3142,6 +3165,16 @@ test('a login that is rejected in the middle of a call is passed on as that', as
   const partly = await lists.call('sn_plugins')
   assert.equal(partly.isError, true)
   assert.equal(partly.data.error, 'auth')
+  // The same for an instance that can no longer be reached, and for one that answers with a page in place of data.
+  for (const [kind, broken] of [['network', { unreachable: true }], ['invalid_response', { body: '<html>Your instance is hibernating</html>' }]] as const) {
+    const gone = await connect([{ table: 'v_plugin', rows: [{ id: 'com.example', name: 'Example', active: 'active', version: '1.0' }] }, ...['sys_store_app', 'sys_scope', 'sys_app'].map((table): Route => ({ table, ...broken }))])
+    const answer = await gone.call('sn_plugins')
+    assert.equal(answer.isError, true, kind)
+    assert.equal(answer.data.error, kind)
+  }
+  // One request that runs out of answers of its own kind, a table this account may not read, ends nothing.
+  const forbiddenApps = await connect([{ table: 'v_plugin', rows: [{ id: 'com.example', name: 'Example', active: 'active', version: '1.0' }] }, ...['sys_store_app', 'sys_scope', 'sys_app'].map((table): Route => ({ table, status: 403 }))])
+  assert.equal((await forbiddenApps.call('sn_plugins')).isError, false)
   const witness = await connect([{ table: 'upgrade_history_task', status: 401 }, ...origin('sys_plugins', [], [])])
   assert.equal((await witness.call('sn_origin', { sysId: ID })).data.error, 'auth')
   const unreadable = await connect([{ table: 'upgrade_history_task', status: 403 }, ...origin('sys_plugins', [], [])])

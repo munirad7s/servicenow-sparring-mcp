@@ -549,3 +549,12 @@ test('names that look like an unknown field are searched for the first few only'
   assert.equal(check.unknown.length, 8)
   assert.deepEqual(check.unknown.map((item) => item.suggestions.length > 0), [true, true, true, true, true, false, false, false])
 })
+
+test('a row that is not the table that was asked for is not taken for it', async () => {
+  // An instance that drops the condition answers with some table. Its parents are not those of the one asked for.
+  const { sn } = fakeInstance([{ table: 'sys_db_object', exact: 'name=u_notes', rows: [tableRow('task', 'Task')] }])
+  await assert.rejects(new Dictionary(sn).table('u_notes'), (error: unknown) => error instanceof ServiceNowError && error.kind === 'invalid_response')
+  // A table that names itself among its parents, or one of them twice, has no chain that ends.
+  const circle = fakeInstance([{ table: 'sys_db_object', exact: 'name=u_a', rows: [tableRow('u_a', 'A', 'u_b', 'u_a')] }])
+  await assert.rejects(new Dictionary(circle.sn).table('u_a'), (error: unknown) => error instanceof ServiceNowError && error.kind === 'invalid_response')
+})

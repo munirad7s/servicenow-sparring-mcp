@@ -20,6 +20,8 @@ export interface Route {
   status?: number
   /** Raw body, for answers that are not the usual JSON. */
   body?: string
+  /** true for a request that never gets an answer: the connection fails. */
+  unreachable?: boolean
   api?: 'table' | 'stats'
 }
 
@@ -89,6 +91,7 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     const route = impossible ? (routes.find((candidate) => candidate.exact === query && fits(candidate)) ?? (routes.some((candidate) => candidate.table === table) ? { table, rows: [] } : undefined)) : routes.find(fits)
 
     if (!route) return json({ error: { message: `Invalid table ${table}`, detail: null }, status: 'failure' }, 400)
+    if (route.unreachable) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } })
     const status = route.status ?? 200
     if (route.body !== undefined) return new Response(route.body, { status, headers: { 'content-type': 'text/html' } })
     if (status !== 200) return json({ error: ERRORS[status] ?? { message: `HTTP ${status}`, detail: '' }, status: 'failure' }, status)
