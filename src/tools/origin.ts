@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Page, Row, ServiceNowClient } from '../client.js'
+import { PROPERTY_FIELDS, plainValue } from '../dictionary.js'
 import { noConnection, quoteInstanceText, ServiceNowError, unlessNoConnection, validation } from '../errors.js'
 import { ORIGIN_CAVEATS } from '../limitations.js'
 import { assertSysId, isGeneratedSysId, isTableName, withStableOrder } from '../query.js'
@@ -158,13 +159,13 @@ function companyPrefix(sn: ServiceNowClient): Promise<string> {
   let known = prefixCache.get(sn)
   if (!known) {
     known = sn
-      .query<Record<string, string>>({ table: 'sys_properties', query: 'name=glide.appcreator.company.code', fields: ['name', 'value'], limit: 1 })
+      .query<Record<string, string>>({ table: 'sys_properties', query: 'name=glide.appcreator.company.code', fields: PROPERTY_FIELDS, limit: 1 })
       .then((page) => {
         const row = page.records.find((item) => item.name === 'glide.appcreator.company.code')
         // A property that matches and did not come back is hidden from this account. That is not "not set".
         if (!row && page.total !== 0) throw new ServiceNowError('The company code is hidden from this account, or the instance gave no total.', 'acl', 'sys_properties')
-        // As text, whatever the instance answered with.
-        return typeof row?.value === 'string' ? row.value : ''
+        // As text, whatever the instance answered with, and not where its type says it holds a secret.
+        return plainValue(row) ?? ''
       })
       .then((code) => (/^[a-z0-9]{1,40}$/i.test(code.trim()) ? `x_${code.trim().toLowerCase()}_` : ''))
     prefixCache.set(sn, known)

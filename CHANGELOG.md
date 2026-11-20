@@ -22,6 +22,20 @@ answer; such changes are listed under "Changed".
   its name. The name is held against the names of the rotated tables now, and the rotations themselves are read
   as well: 3 of 49 on the test instance have no part yet, so their first part would have been a table nobody knew
   as one.
+- **What looks like a secret was taken out of a text only by `sn_query`.** The name of a captured change, of a
+  record or of an upgrade entry is a text as well, and `sn_delta`, `sn_origin`, `sn_dependencies` and
+  `sn_upgrade_skips` passed such texts on as they came. Every text of every answer is read now, and the words of
+  an instance in an error message too. An answer says so where that changed a text.
+- **A list or an object behind a key that looks like a secret stayed.** `"tokens": ["…"]` and
+  `"credentials": {…}` are the usual forms, and only a text or a number behind such a key was taken out. The
+  whole list or object is taken out now, up to the bracket that closes it; where none does, the text is cut
+  there.
+- **A system property the server reads by name was passed on whatever its type.** `sn_instance`, `sn_origin` and
+  the doctor read a few properties by fixed names. The names are fixed, the type of a property is set on the
+  instance: one of a password type is not passed on now, as `sn_query` always held it.
+- In a payload, the name behind a reference is taken out also where the quotes around it are written as numbered
+  entities (`&#34;`, `&#x27;`). Measured on 6,631 captured changes: 6,611 write the quote plain and none as an
+  entity, so this is for an instance that writes them otherwise.
 - A row of the table of tables that came without a parent field it was asked for counted as a table without that
   parent. It counts as unread now, as a row without the table name always did.
 - A view that joins a table whose place could not be read: its fields named like the value of a system property

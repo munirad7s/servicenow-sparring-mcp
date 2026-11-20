@@ -349,7 +349,65 @@ function scrubOnce(text: string): { text: string; withheld: number } {
       return `${lead}${mark}${WITHHELD}${mark}`
     })
   }
+  // A key whose value is a list or an object: all of it is the secret. "tokens": ["a", "b"] is the usual form.
+  out = withoutContainers(out, () => withheld++)
   return { text: out, withheld }
+}
+
+/**
+ * Takes out the list or the object behind a JSON key whose name suggests a secret, up to the bracket that closes
+ * it. Where none does, the text is cut there: the rest of it is inside. Read once, from front to back.
+ */
+function withoutContainers(text: string, found: () => void): string {
+  if (!/[\[{]/.test(text)) return text
+  const opening = /(\\?")([A-Za-z_][\w.-]*)\1(?:\s|\\[nrt])*:(?:\s|\\[nrt])*[\[{]/g
+  let out = ''
+  let last = 0
+  for (let match = opening.exec(text); match; match = opening.exec(text)) {
+    if (!LOOKS_SECRET.test(match[2])) continue
+    const bracket = match.index + match[0].length - 1
+    const escaped = match[1] !== '"'
+    const end = endOfContainer(text, bracket, escaped)
+    const mark = escaped ? String.raw`\"` : '"'
+    out += `${text.slice(last, bracket)}${mark}${WITHHELD}${mark}`
+    found()
+    if (end < 0) return out
+    last = end + 1
+    opening.lastIndex = last
+  }
+  return last ? out + text.slice(last) : text
+}
+
+/**
+ * Where the list or object that opens at "from" closes, or -1. Brackets inside a text do not count. "escaped" for
+ * JSON that stands inside a text of another JSON: there a quote is written \" and an escape of the inner text
+ * with two backslashes.
+ */
+function endOfContainer(text: string, from: number, escaped: boolean): number {
+  let depth = 0
+  // The quote that opened the text the scan is inside of. A script writes texts with apostrophes as well.
+  let within: string | null = null
+  const quote = (sign: string) => {
+    if (within === null) within = sign
+    else if (within === sign) within = null
+  }
+  for (let at = from; at < text.length; at++) {
+    const sign = text[at]
+    if (sign === '\\') {
+      const next = text[at + 1]
+      if (escaped && next === '"') quote('"')
+      // An escape of the inner text: two backslashes and what they escape, which can be a quote or a backslash again.
+      if (escaped && next === '\\') at += text[at + 2] === '\\' ? 2 : 1
+      at++
+    } else if ((sign === '"' && !escaped) || sign === "'") {
+      quote(sign)
+    } else if (within === null && (sign === '[' || sign === '{')) {
+      depth++
+    } else if (within === null && (sign === ']' || sign === '}')) {
+      if (--depth === 0) return at
+    }
+  }
+  return -1
 }
 
 export const CLOSED_NAME = '[withheld: the record is in a table closed on this machine]'

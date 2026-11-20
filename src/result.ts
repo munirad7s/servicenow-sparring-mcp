@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { Page, Row, ServiceNowClient } from './client.js'
 import { ServiceNowError } from './errors.js'
+import { scrubSecrets } from './tools/shared.js'
 import { currentCall } from './trace.js'
 
 export type ToolResult = {
@@ -225,7 +226,29 @@ export function ok(payload: Record<string, unknown>): ToolResult {
   // that caught such a failure, where it meant to catch "this table is not readable", does not make it an answer.
   const ended = currentCall()?.ended
   if (ended) return fail(ended)
-  return { content: [{ type: 'text', text: JSON.stringify(payload) }], structuredContent: payload }
+  // Every text of an answer is read once more for what looks like a secret, whichever tool put it there: the
+  // name of a record can be such a text as well as a script can. What a tool took out itself reads the same
+  // the second time. Not the query: that is what was sent, in the words of the call.
+  let taken = 0
+  const read = (value: unknown, key?: string): unknown => {
+    if (key === 'query') return value
+    if (typeof value === 'string') {
+      const cleaned = scrubSecrets(value).text
+      if (cleaned !== value) taken++
+      return cleaned
+    }
+    if (Array.isArray(value)) return value.map((item) => read(item))
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, read(item, name)]))
+    return value
+  }
+  const answer = read(payload) as Record<string, unknown>
+  if (taken) {
+    answer.warnings = [
+      ...(Array.isArray(answer.warnings) ? answer.warnings : []),
+      `${taken} text(s) of this answer carried what looks like a secret by its name (the content of an XML element or the value of a JSON key): that part is replaced by "[withheld]".`,
+    ]
+  }
+  return { content: [{ type: 'text', text: JSON.stringify(answer) }], structuredContent: answer }
 }
 
 /**
@@ -241,7 +264,8 @@ export function fail(error: unknown, table?: string, sn?: ServiceNowClient, aske
   const known = error instanceof ServiceNowError ? error : undefined
   const kind = known?.kind ?? 'unknown'
   const about = known?.table ?? (kind === 'validation' || kind === 'config' ? undefined : table)
-  const message = error instanceof Error ? error.message : String(error)
+  // The words of an instance are part of a message, and an instance can quote anything: read like any other text.
+  const message = scrubSecrets(error instanceof Error ? error.message : String(error)).text
   const payload = {
     error: kind,
     message: message.length > 1_000 ? `${message.slice(0, 1_000)}…` : message,

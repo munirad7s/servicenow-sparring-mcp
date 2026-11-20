@@ -151,6 +151,17 @@ const NO_SUCH_TABLE = ['zz__no_such_table_a', 'zz__no_such_table_b']
 /** As many names as are remembered to be a table or none. An entry is a name and a flag. */
 const MAX_KNOWN_NAMES = 5_000
 /** The fields the platform shows as the name of a row where the dictionary marks none, by their names. */
+/** The types of a system property whose value is a secret. */
+export const SECRET_PROPERTY_TYPES: ReadonlySet<string> = new Set(['password', 'password2'])
+/** What is read of a system property that the server asks for by name. */
+export const PROPERTY_FIELDS = ['name', 'value', 'type']
+/**
+ * The value of a system property as text, or undefined: not returned, no text, or of a type that says it holds a
+ * secret. The names the server asks for are fixed, but the type of a property is set on the instance.
+ */
+export const plainValue = (row: Record<string, unknown> | undefined): string | undefined =>
+  row && typeof row.value === 'string' && !SECRET_PROPERTY_TYPES.has(String(row.type ?? '')) ? row.value : undefined
+
 /** The tables the definition of a database view is read from. */
 const DEFINE_A_VIEW = new Set(['sys_db_view', 'sys_db_view_table', 'sys_db_view_table_field'])
 /** As wide as an instance stores the name of a table or a field. */
@@ -831,9 +842,9 @@ export class Dictionary {
   emptyOnInvalidQuery(): Promise<boolean | null> {
     return this.cached(this.settings, 'emptyOnInvalidQuery', async () => {
       const name = 'glide.invalid_query.returns_no_rows'
-      const page = await this.gated.query<Record<string, string>>({ table: 'sys_properties', query: `name=${name}`, fields: ['name', 'value'], limit: 1 }).catch(unlessNoConnection(null))
+      const page = await this.gated.query<Record<string, string>>({ table: 'sys_properties', query: `name=${name}`, fields: PROPERTY_FIELDS, limit: 1 }).catch(unlessNoConnection(null))
       if (!page || (page.records.length === 0 && (page.total ?? 0) > 0)) return null
-      return page.records.find((row) => row.name === name)?.value === 'true'
+      return plainValue(page.records.find((row) => row.name === name)) === 'true'
     })
   }
 

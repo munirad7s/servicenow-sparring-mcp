@@ -3137,7 +3137,7 @@ test('the payload of a captured change is passed on without its secrets, and can
       name: 'sys_script_3',
       payload: payload(
         'sys_script',
-        '<name>Example rule</name><sys_created_by display_value="Beth Anglin">beth</sys_created_by><script><![CDATA[gs.info("x")]]></script><note>&lt;owner display_value=&quot;Carol Coughlin&quot;&gt;c&lt;/owner&gt;</note>',
+        '<name>Example rule</name><sys_created_by display_value="Beth Anglin">beth</sys_created_by><script><![CDATA[gs.info("x")]]></script><note>&lt;owner display_value=&quot;Carol Coughlin&quot;&gt;c&lt;/owner&gt;&lt;a display_value=&#34;Eva Seahorn&#34;&gt;e&lt;/a&gt;&lt;b display_value=&#x27;Fred Luddy&#x27;&gt;f&lt;/b&gt;&lt;c display_value=&amp;#039;Gil Bates&amp;#039;&gt;g&lt;/c&gt;</note>',
       ),
     },
     // A linked application file is a copy of a record of another table. This one does not say of which.
@@ -3170,7 +3170,9 @@ test('the payload of a captured change is passed on without its secrets, and can
 
   // A payload that is passed on names the record behind each of its references. Those names are taken out, also
   // where the markup of a record inside it is written with entities.
-  assert.doesNotMatch(JSON.stringify(data.records[2]), /Beth Anglin|Carol Coughlin/)
+  assert.doesNotMatch(JSON.stringify(data.records[2]), /Beth Anglin|Carol Coughlin|Eva Seahorn|Fred Luddy|Gil Bates/)
+  // A quote can be written as an entity by its number as well as by its name.
+  assert.match(data.records[2].payload, /display_value=&#34;\[withheld\]&#34;.*display_value=&#x27;\[withheld\]&#x27;.*display_value=&amp;#039;\[withheld\]&amp;#039;/)
   assert.match(data.records[2].payload, /display_value="\[withheld\]"/)
   assert.match(data.records[2].payload, /display_value=&quot;\[withheld\]&quot;/)
 
@@ -5703,4 +5705,67 @@ test('a text made to be read slowly is read in the time its length takes', { tim
   const escaped = '&lt;sys_properties action="INSERT_OR_UPDATE"&gt;&lt;name&gt;x.password&lt;/name&gt;&lt;type&gt;password2&lt;/type&gt;&lt;value&gt;hunter2hunter2&lt;/value&gt;&lt;/sys_properties&gt;'
   assert.doesNotMatch(scrubSecrets(escaped).text, /hunter2/)
   assert.ok(Date.now() - started < 10_000)
+})
+
+test('a list or an object behind a key that looks like a secret is taken out whole', () => {
+  const clean = (text: string) => scrubSecrets(text)
+  // The usual forms: a list of tokens, an object of credentials. All of it is the secret.
+  assert.deepEqual(clean('{"tokens":["TOPSECRET","OTHER"],"name":"x"}'), { text: '{"tokens":"[withheld]","name":"x"}', withheld: 1 })
+  assert.deepEqual(clean('{"name":"x","credentials": {"user":"u","pass":["a",{"b":"c"}]}, "n": 1}'), { text: '{"name":"x","credentials": "[withheld]", "n": 1}', withheld: 1 })
+  // What is taken out is not read again: a key inside it that looks like a secret as well is gone with it.
+  assert.deepEqual(clean('{"credentials":{"password":["a"],"token":{"x":1}},"n":1}'), { text: '{"credentials":"[withheld]","n":1}', withheld: 1 })
+  // A bracket inside a text closes nothing, whichever quote the text is written with.
+  assert.equal(clean('{"tokens":["a]b","c\\"]d"],"name":"x"}').text, '{"tokens":"[withheld]","name":"x"}')
+  assert.equal(clean(`var cfg = {"api_keys": ['a]b', 'c'], "name": "x"}`).text, 'var cfg = {"api_keys": "[withheld]", "name": "x"}')
+  // JSON inside a text of another JSON, where a quote is written \" and an inner escape with two backslashes.
+  assert.equal(clean(String.raw`{"body":"{\"secrets\":[\"TOP\\\"]SECRET\",\"x\"],\"name\":\"x\"}"}`).text, String.raw`{"body":"{\"secrets\":\"[withheld]\",\"name\":\"x\"}"}`)
+  // What never closes holds the rest of the text.
+  assert.equal(clean('{"name":"x","tokens":["TOPSECRET","OTHER"').text, '{"name":"x","tokens":"[withheld]"')
+  // A key that suggests nothing keeps its list, and a second reading changes nothing.
+  assert.deepEqual(clean('{"names":["a","b"],"token_list":{"a":1}}'), { text: '{"names":["a","b"],"token_list":"[withheld]"}', withheld: 1 })
+  assert.equal(clean(clean('{"tokens":["TOPSECRET"]}').text).text, '{"tokens":"[withheld]"}')
+  // Many of them, none of which closes: read once, not once for each.
+  const started = Date.now()
+  assert.equal(clean('{"tokens":['.repeat(50_000)).text, '{"tokens":"[withheld]"')
+  assert.ok(Date.now() - started < 5_000)
+})
+
+test('every text of an answer is read for what looks like a secret, whichever tool it comes from', async () => {
+  // The name of a record is a text like any other: a change named after a piece of JSON.
+  const { answer } = await connect([
+    { table: 'sys_update_xml', query: 'sys_created_byINsystem', rows: [], total: 0 },
+    { table: 'sys_update_xml', rows: [{ name: 'sys_script_1', type: 'Business Rule', target_name: '{"api_key":"TOPSECRET"}', action: 'INSERT_OR_UPDATE', sys_updated_on: '2026-02-01 00:00:00' }], total: 1 },
+    stats('sys_update_xml', { 'Business Rule': 1 }, undefined, 'type'),
+  ])
+  const data = await answer('sn_delta', {})
+  assert.doesNotMatch(JSON.stringify(data), /TOPSECRET/)
+  assert.equal(data.updates[0].target_name, '{"api_key":"[withheld]"}')
+  assert.match(data.warnings.join(' '), /1 text\(s\) of this answer carried what looks like a secret by its name/)
+
+  // The words of an instance in an error are read the same way.
+  const refusing = await connect([...dictionaryRoutes, { table: 'incident', status: 400, body: JSON.stringify({ error: { message: 'Bad value {"api_key":"TOPSECRET"} in the request', detail: '<password>hunter2</password>' }, status: 'failure' }) }])
+  const refused = await refusing.call('sn_query', { table: 'incident', fields: ['number'] })
+  assert.equal(refused.data.error, 'bad_request')
+  assert.doesNotMatch(JSON.stringify(refused.data), /TOPSECRET|hunter2/)
+  assert.match(refused.data.message, /"api_key":"\[withheld\]"/)
+
+  // The query of an answer is what was sent: it stays as the call wrote it.
+  const echoed = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  const same = await echoed.answer('sn_query', { table: 'incident', query: 'short_descriptionLIKE"token":"a"', fields: ['number'] })
+  assert.equal(same.query, 'short_descriptionLIKE"token":"a"')
+  assert.deepEqual(same.warnings, [])
+})
+
+test('a system property the server reads by name is not passed on where its type says it holds a secret', async () => {
+  // The names are fixed, but a type is set on the instance.
+  const routes = (type: string): Route[] => [
+    { table: 'sys_properties', rows: [{ name: 'glide.war', value: 'CIPHERTEXT', type }, { name: 'glide.invalid_query.returns_no_rows', value: 'true', type }] },
+    ...sourceTables.map((table) => ({ table, rows: [{ sys_id: '1' }] })),
+  ]
+  const plain = await (await connect(routes('string'))).answer('sn_instance')
+  assert.deepEqual({ build: plain.release.build, invalid: plain.invalidQueryReturnsNoRows }, { build: 'CIPHERTEXT', invalid: 'true' })
+  const secret = await (await connect(routes('password2'))).answer('sn_instance')
+  assert.doesNotMatch(JSON.stringify(secret), /CIPHERTEXT/)
+  assert.equal(secret.release.build, null)
+  assert.match(secret.warnings.join(' '), /glide\.war was not returned/)
 })

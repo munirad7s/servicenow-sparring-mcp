@@ -6,7 +6,7 @@
  * Run this against a new instance before trusting answers from it.
  */
 import { ServiceNowClient } from './client.js'
-import { proveCondition } from './dictionary.js'
+import { PROPERTY_FIELDS, plainValue, proveCondition } from './dictionary.js'
 import { loadSettings } from './config.js'
 import { createContext } from './server.js'
 import { accountRoles, FILTERED_BY, probe, SOURCES } from './tools/instance.js'
@@ -48,8 +48,8 @@ export async function runDoctor(given?: ServiceNowClient, print: (line: string) 
 
   // The row is taken by its name, not by its place: an ignored condition would hand back some other property.
   const release = await sn
-    .query<{ name: string; value: string }>({ table: 'sys_properties', query: 'name=glide.war', fields: ['name', 'value'], limit: 1 })
-    .then((page) => page.records.find((row) => row.name === 'glide.war')?.value || 'not returned (hidden from this account, or not set)')
+    .query<Record<string, unknown>>({ table: 'sys_properties', query: 'name=glide.war', fields: PROPERTY_FIELDS, limit: 1 })
+    .then((page) => plainValue(page.records.find((row) => row.name === 'glide.war')) || 'not returned (hidden from this account, or not set)')
     .catch((error) => `not readable (${errorKind(error)})`)
   line('release (glide.war)', release)
 

@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Page, Row, ServiceNowClient } from '../client.js'
+import { PROPERTY_FIELDS, plainValue } from '../dictionary.js'
 import { ServiceNowError, unlessNoConnection } from '../errors.js'
 import { assertPlainValue, isPlainValue } from '../query.js'
 import { fail, ok, rowSchema, source, sourceShape, withheldWarning } from '../result.js'
@@ -222,14 +223,15 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         const GLOBAL_QUERY_RULES = 'collection=global^action_query=true^active=true'
         const [properties, upgrades, storeApps, scopeApps, plugins, account, domains, globalRules] = await Promise.all([
           sn
-            .query<{ name: string; value: string }>({
+            .query<Record<string, unknown>>({
               table: 'sys_properties',
               query: 'nameINglide.war,glide.script.use.sandbox,glide.invalid_query.returns_no_rows',
-              fields: ['name', 'value'],
+              fields: PROPERTY_FIELDS,
               limit: 5,
             })
-            // As text, whatever the instance answered with: the answer of this tool promises text.
-            .then((page) => new Map(page.records.filter((row) => typeof row.name === 'string' && typeof row.value === 'string').map((row) => [row.name, row.value])))
+            // As text, whatever the instance answered with: the answer of this tool promises text. Not the value of
+            // a property whose type says it holds a secret, whatever its name.
+            .then((page) => new Map(page.records.flatMap((row) => (typeof row.name === 'string' && plainValue(row) !== undefined ? [[row.name, plainValue(row) as string] as const] : []))))
             .catch(() => null),
           recentUpgrades(sn).catch(() => null),
           probe(sn, 'sys_store_app', 'active=true'),
