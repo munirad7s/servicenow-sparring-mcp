@@ -66,12 +66,13 @@ const MAX_PROOFS = 400
 const NO_SUCH_CLASS = ['zz__no_such_class_a', 'zz__no_such_class_b']
 
 /**
- * A table that holds rows of another without being its child table. A rotated table is spread over parts named
- * after it with four digits, and an archive rule moves rows into "ar_<table>". Measured on one instance: of 357
- * parts, every one is named that way or is the table itself; "syslog0003" has no parent, is read like any table,
- * and answered with 655,964 rows of syslog and of its child tables.
+ * The tables a table can hold rows of without being their child table, by its name. A rotated table is spread
+ * over parts named after it with four digits, and an archive rule moves rows into "ar_<table>". Measured on one
+ * instance: of 357 parts, every one is named that way or is the table itself; "syslog0003" has no parent, is read
+ * like any table, and answered with 655,964 rows of syslog and of its child tables. A name can be read both ways
+ * ("ar_incident0001" as the archive of a part, or as a part of the archive), so both are given.
  */
-const holdsRowsOf = (name: string): string | null => /^ar_(.+)$/.exec(name)?.[1] ?? /^(.+)\d{4}$/.exec(name)?.[1] ?? null
+export const holdsRowsOf = (name: string): string[] => [/^ar_(.+)$/.exec(name)?.[1], /^(.+)\d{4}$/.exec(name)?.[1]].filter((base): base is string => Boolean(base) && isTableName(base))
 
 export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTables {
   const blocked = (message: string, table: string) => new ServiceNowError(`${message} Nothing was sent.`, 'blocked', table)
@@ -129,9 +130,7 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
       if (why) return `"${table}" is a database view, and ${why}`
     }
     // A part of a rotated table, or the archive of a table, holds the rows of that table and of its child tables.
-    for (const name of info.chain) {
-      const base = holdsRowsOf(name)
-      if (!base || !isTableName(base) || seen.has(base)) continue
+    for (const [name, base] of info.chain.flatMap((name) => holdsRowsOf(name).map((base) => [name, base]))) {
       let known
       try {
         known = await dict.table(base)
@@ -141,6 +140,8 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
       }
       // No such table: the name only looks like a part or an archive.
       if (!known || known.kind === 'database_view') continue
+      // A table that was looked at before in this question was found open, or the question would have ended there.
+      // Whether it has a closed table below it is asked all the same: a view can join a table and its archive.
       const why = await reason(base, seen)
       if (why) return `"${name}" holds rows of ${base} (a part of a rotated table, or its archive), and ${why}`
       if (await holdsClosedBelow(base)) {

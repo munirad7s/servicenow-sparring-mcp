@@ -1,5 +1,5 @@
 import type { Row, ServiceNowClient } from '../client.js'
-import type { ClosedTables } from '../closed.js'
+import { holdsRowsOf, type ClosedTables } from '../closed.js'
 import type { Choice, Column, Dictionary, FieldCheck } from '../dictionary.js'
 import { quoteInstanceText, ServiceNowError, unlessNoConnection, validation } from '../errors.js'
 import { assertFieldPath, isPlainValue, isTableName, parseEncodedQuery, withCondition, type Condition, type ParsedQuery } from '../query.js'
@@ -272,16 +272,20 @@ export async function isClosedRecord(ctx: Context, updateName: string): Promise<
   const exact = tableBeforeId(name)
   // "sys_script_include_<sys_id>" is no business rule: with a sys_id at the end only one cut is the table.
   const candidates = exact && cuts.includes(exact) ? [exact] : cuts
-  if (candidates.some((table) => ctx.sn.denies(table) || COPIES_OF_RECORDS.has(table))) return true
+  // A part of a rotated table and the archive of a table hold its rows: a record there is one of that table, and
+  // so is one in a part of its archive.
+  const withBases = (table: string): string[] => [table, ...holdsRowsOf(table).flatMap(withBases)]
+  const tables = [...new Set(candidates.flatMap(withBases))]
+  if (tables.some((table) => ctx.sn.denies(table) || COPIES_OF_RECORDS.has(table))) return true
   const denied = await ctx.dict.closedTables().catch(unlessNoConnection(null))
   if (!denied) return true
-  if (candidates.some((table) => denied.has(table))) return true
+  if (tables.some((table) => denied.has(table))) return true
   if (!ctx.sn.openClasses()) return false
 
   const known = await ctx.dict.knownTables(candidates).catch(unlessNoConnection(null))
-  const tables = candidates.filter((table) => known?.has(table))
-  if (!tables.length) return true
-  for (const table of tables) {
+  const found = candidates.filter((table) => known?.has(table))
+  if (!found.length) return true
+  for (const table of found) {
     if ((await ctx.closed.reason(table)) !== null) return true
   }
   return false

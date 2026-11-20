@@ -1033,6 +1033,28 @@ test('a part of a rotated table, and the archive of a table, are closed with the
   assert.equal((await below.answer('sn_query', { table: 'syslog0003', fields: ['sys_id'] })).returned, 1)
   assert.equal((await below.answer('sn_query', { table: 'ar_syslog', fields: ['sys_id'] })).returned, 1)
 
+  // A database view that joins a table and its archive: the table was looked at first and found open, and its
+  // archive is closed all the same, because the table has a closed one below it.
+  const view: Route[] = [
+    { table: 'sys_db_object', exact: 'name=v_tasks', rows: [] },
+    { table: 'sys_db_view', query: 'name=v_tasks', rows: [{ sys_id: 'b'.repeat(32), name: 'v_tasks', label: 'Tasks and archive' }] },
+    { table: 'sys_db_view_table', rows: [{ table: 'task', variable_prefix: 'tsk' }, { table: 'ar_task', variable_prefix: 'old' }] },
+    { table: 'v_tasks', rows: [{ tsk_number: 'TASK1' }] },
+  ]
+  const joined = await connect([closedTables(tableRow('incident', 'Incident', 'task')), ...view, ...tables, ...dictionary, ...rows, ...dictionaryRoutes], { tables: { allow: [], deny: ['incident'] } })
+  const refused = await joined.call('sn_query', { table: 'v_tasks' })
+  assert.equal(refused.data.error, 'blocked')
+  assert.match(refused.data.message, /"ar_task" holds rows of task/)
+  assert.equal(joined.sentTo('v_tasks').length, 0)
+
+  // A name that can be read two ways is read both ways: "ar_syslog0003" is the archive of a part, or a part of
+  // the archive. No table "syslog0003" need exist for the second.
+  const twice = await connect(
+    [closedTables(tableRow('syslog', 'Log')), one('syslog'), one('ar_syslog'), one('ar_syslog0003'), { table: 'sys_dictionary', query: 'nameINar_syslog0003^', rows: [column('ar_syslog0003', 'sys_id', 'GUID')] }, { table: 'ar_syslog0003', rows: [{ sys_id: '1' }] }, ...dictionaryRoutes],
+    { tables: { allow: [], deny: ['syslog'] } },
+  )
+  assert.equal((await twice.call('sn_query', { table: 'ar_syslog0003', fields: ['sys_id'] })).data.error, 'blocked')
+
   // Without closed tables nothing of this is asked.
   const open = await connect([...tables, ...dictionary, ...rows, ...dictionaryRoutes])
   await open.answer('sn_query', { table: 'syslog0003', fields: ['sys_id'] })
@@ -1335,6 +1357,9 @@ test('an update name is taken for a record of a closed table in every way it can
   // Measured: a linked application file is named after the record it links to, and its update name does not say
   // which table that record is of. While any table is closed, it counts as a record of a closed one.
   assert.equal(await isClosedRecord(noRules, `sys_metadata_link_${ID}`), true)
+  // A record in a part of a rotated table, or in the archive of a table, is a record of that table.
+  for (const name of [`ar_sys_script_${ID}`, `sys_script0003_${ID}`, `ar_sys_script0003_${ID}`]) assert.equal(await isClosedRecord(noRules, name), true, name)
+  assert.equal(await isClosedRecord(noRules, `ar_sys_script_include_${ID}`), false)
 
   // A table the deny list names counts whether or not the instance still lists it: the captured changes of a
   // table that was dropped are still there, with the names of its records.
