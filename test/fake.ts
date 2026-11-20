@@ -143,7 +143,9 @@ export function isProof(call: Call): boolean {
  * a class and not that class.
  */
 const IMPOSSIBLE = [
-  /^([a-z0-9_.]+)ISEMPTY\^\1ISNOTEMPTY$/,
+  // Also with conditions joined behind it by "and", as the rule for closed tables adds them: still no row. Not with
+  // a second part of the query behind it, which would match rows of its own.
+  /^([a-z0-9_.]+)ISEMPTY\^\1ISNOTEMPTY(?!.*\^NQ)(\^.*)?$/,
   /^([a-z0-9_.]+)(IN|STARTSWITH)zz__no_such_[a-z_]+\^\1\2zz__no_such_[a-z_]+$/,
   /^([a-z0-9_.]+)=([a-z0-9_]+)\^\1NOT IN\2$/,
 ]
@@ -219,6 +221,8 @@ export const dictionaryRoutes: Route[] = [
   knownTables('incident', 'task', 'sys_user', 'sys_script', 'sys_archive', 'sys_table_rotation', 'sys_properties', 'sys_choice', 'sys_documentation', 'sys_dictionary_override'),
   { table: 'sys_db_object', rows: [] },
   { table: 'sys_db_view', rows: [] },
+  // No view of this small world lists the fields it takes from a table, unless a test says so with a route of its own.
+  { table: 'sys_db_view_table_field', rows: [] },
   {
     table: 'sys_dictionary',
     query: 'nameINincident,task',

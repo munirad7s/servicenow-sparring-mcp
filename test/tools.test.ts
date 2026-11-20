@@ -228,7 +228,7 @@ test('the check of choice labels also runs for a database view and with a partly
   const view: Route[] = [
     { table: 'sys_db_object', query: 'name=incident_view', rows: [] },
     { table: 'sys_db_view', query: 'name=incident_view', rows: [{ sys_id: 'c'.repeat(32), name: 'incident_view', label: 'Incidents' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'f465a118eb100ae3d2798d4c5296a09c', table: 'incident', variable_prefix: 'inc' }] },
   ]
   const onView = await connect([...view, ...dictionaryRoutes, { table: 'incident_view', rows: [{ inc_number: 'INC1' }] }])
   const refused = await onView.call('sn_query', { table: 'incident_view', query: 'inc_state=Resolved' })
@@ -374,11 +374,90 @@ test('a table closed on this machine is never asked for', async () => {
   assert.equal(calls.length, 0)
 })
 
+test('a view that lists the fields it takes from a table has no other field of that table', async () => {
+  // Measured on 40 views of one instance (103 of its 558 views carry such a list): a condition on a field outside
+  // the list is dropped and the answer is unfiltered, 11,759 of 11,759 rows for a value nobody has, unless a row
+  // of the view carries the field all the same, as it does for the sys_id of some joined tables.
+  const MEMBER = 'b'.repeat(32)
+  const world = (lists: Route, ...more: Route[]): Route[] => [
+    ...more,
+    { table: 'sys_db_object', query: 'name=incident_caller', rows: [] },
+    { table: 'sys_db_view', query: 'name=incident_caller', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_caller', label: 'Incident with caller' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: MEMBER, table: 'incident', variable_prefix: 'inc' }, { sys_id: 'c'.repeat(32), table: 'sys_user', variable_prefix: 'usr' }] },
+    lists,
+    ...dictionaryRoutes,
+  ]
+  const listed: Route = { table: 'sys_db_view_table_field', rows: [{ view_table: MEMBER, field: 'number' }, { view_table: MEMBER, field: 'state' }] }
+  const rows: Route = { table: 'incident_caller', rows: [{ inc_number: 'INC1' }] }
+  // The instance drops a condition it cannot use: "empty and filled at once" then matches every row.
+  const dropped = (field: string): Route => ({ table: 'incident_caller', exact: `${field}ISEMPTY^${field}ISNOTEMPTY`, rows: [{ inc_number: 'INC1' }] })
+  const proof = (field: string) => `${field}ISEMPTY^${field}ISNOTEMPTY`
+
+  // sn_schema lists the fields on the list, and every field of a joined table that has no list.
+  const described = await connect(world(listed, rows))
+  const schema = await described.answer('sn_schema', { table: 'incident_caller' })
+  const names = schema.columns.map((column: Data) => column.name)
+  assert.deepEqual(names.filter((name: string) => name.startsWith('inc_')), ['inc_number', 'inc_state'])
+  assert.deepEqual(names.filter((name: string) => name.startsWith('usr_')), ['usr_email', 'usr_name', 'usr_sys_id', 'usr_user_password'])
+  assert.match(schema.warnings.join(' '), /This view lists the fields it takes from incident\. 7 other field\(s\) of that table are left out here: ServiceNow drops a condition on such a field/)
+
+  // A field on the list, and a field of a table without a list, go out without a question.
+  await described.answer('sn_query', { table: 'incident_caller', query: 'inc_number=INC1^usr_nameLIKEa', fields: ['inc_number'] })
+  assert.deepEqual(described.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), ['inc_number=INC1^usr_nameLIKEa'])
+
+  // A field outside the list, and the instance drops the condition: refused, in a condition, a sort, a field to
+  // count by and a field to return alike. Nothing but the question went to the view.
+  for (const args of [{ query: 'inc_short_descriptionLIKEprinter' }, { query: 'ORDERBYinc_short_description' }, { groupBy: 'inc_short_description' }, { fields: ['inc_short_description'] }, { query: 'inc_caller_id.name=Abel' }]) {
+    const first = Object.values(args)[0]
+    const field = /inc_caller_id/.test(String(first)) ? 'inc_caller_id' : 'inc_short_description'
+    const outside = await connect(world(listed, dropped(field), rows))
+    const refused = await outside.call('sn_query', { table: 'incident_caller', ...args })
+    assert.deepEqual({ isError: refused.isError, error: refused.data.error }, { isError: true, error: 'validation' }, JSON.stringify(args))
+    assert.match(refused.data.message, /is a field of "incident", which the view "incident_caller" joins, but the view lists the fields it takes from that table and this is not one of them/, JSON.stringify(args))
+    assert.deepEqual(outside.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof(field)], JSON.stringify(args))
+  }
+
+  // A field outside the list that a row carries all the same: the instance applies the condition, which it proves
+  // by matching nothing for "empty and filled at once". Asked once, while the view has rows.
+  const carried = await connect(world(listed, rows))
+  for (let run = 0; run < 2; run++) await carried.answer('sn_query', { table: 'incident_caller', query: 'inc_sys_id=x', fields: ['inc_number'] })
+  assert.deepEqual(carried.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_sys_id'), '', 'inc_sys_id=x', 'inc_sys_id=x'])
+
+  // A view without a row proves nothing: the query goes out, and the question is asked again the next time.
+  const empty = await connect(world(listed, { table: 'incident_caller', rows: [] }))
+  for (let run = 0; run < 2; run++) await empty.answer('sn_query', { table: 'incident_caller', query: 'inc_sys_id=x', fields: ['inc_number'] })
+  assert.equal(empty.calls.filter((entry) => entry.table === 'incident_caller' && entry.query === proof('inc_sys_id')).length, 2)
+
+  // The question is refused by the instance, as measured for some views (403): the field is not used.
+  const forbidden = await connect(world(listed, { table: 'incident_caller', exact: proof('inc_sys_id'), status: 403 }, rows))
+  assert.equal((await forbidden.call('sn_query', { table: 'incident_caller', query: 'inc_sys_id=x', fields: ['inc_number'] })).data.error, 'validation')
+  // An instance that cannot be reached is no answer to the question: the call fails as that.
+  const gone = await connect(world(listed, { table: 'incident_caller', exact: proof('inc_sys_id'), unreachable: true }, rows))
+  assert.equal((await gone.call('sn_query', { table: 'incident_caller', query: 'inc_sys_id=x', fields: ['inc_number'] })).data.error, 'network')
+
+  // The lists cannot be read: every field stays in sn_schema, with a warning, and none is used without proof.
+  for (const lists of [{ table: 'sys_db_view_table_field', status: 403 }, { table: 'sys_db_view_table_field', rows: [null] }, { table: 'sys_db_view_table_field', rows: [], noTotal: true }] as Route[]) {
+    const unread = await connect(world(lists, dropped('inc_category'), rows))
+    const all = await unread.answer('sn_schema', { table: 'incident_caller' })
+    assert.ok(all.columns.some((column: Data) => column.name === 'inc_short_description'))
+    assert.match(all.warnings.join(' '), /It could not be read whether this view lists the fields it takes from incident, sys_user \(sys_db_view_table_field\)/)
+    await unread.answer('sn_query', { table: 'incident_caller', query: 'inc_number=INC1', fields: ['inc_number'] })
+    assert.ok(unread.calls.some((entry) => entry.query === proof('inc_number')))
+    const unproven = await unread.call('sn_query', { table: 'incident_caller', query: 'inc_category=network', fields: ['inc_number'] })
+    assert.equal(unproven.data.error, 'validation')
+    assert.match(unproven.data.message, /it could not be read which fields the view takes from that table, and the instance did not prove that it applies a condition on this one/)
+  }
+
+  // A table of the view whose own id cannot be used: whether it has a list is not known.
+  const noId = await connect(world(listed, dropped('usr_name'), rows).map((route) => (route.table === 'sys_db_view_table' ? { ...route, rows: [{ sys_id: MEMBER, table: 'incident', variable_prefix: 'inc' }, { sys_id: 'not an id', table: 'sys_user', variable_prefix: 'usr' }] } : route)))
+  assert.equal((await noId.call('sn_query', { table: 'incident_caller', query: 'usr_nameLIKEa', fields: ['inc_number'] })).data.error, 'validation')
+})
+
 test('a closed table cannot be read through a dot-walk, a child table, a view or a display value', async () => {
   const view: Route[] = [
     { table: 'sys_db_object', query: 'name=incident_caller', rows: [] },
     { table: 'sys_db_view', query: 'name=incident_caller', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_caller', label: 'Incident with caller' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }, { table: 'sys_user', variable_prefix: 'usr' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'f465a118eb100ae3d2798d4c5296a09c', table: 'incident', variable_prefix: 'inc' }, { sys_id: 'bf55059b290ba44777f3ddd89b854c4e', table: 'sys_user', variable_prefix: 'usr' }] },
   ]
   const rows = [{ number: 'INC1', caller_id: labelled(ID, 'Abel Tuter'), assigned_to: labelled(ID, 'Beth Anglin') }]
   const routes = [...view, ...dictionaryRoutes, { table: 'incident', rows }, { table: 'incident_caller', rows: [{ inc_number: 'INC1' }] }, { table: 'task', rows: [{ number: 'TASK1' }] }]
@@ -685,6 +764,8 @@ function familyWorld(extra: Route[] = []): Route[] {
   return [
     ...extra,
     one('customer_contact', 'sys_user'),
+    one('sys_db_view_table_field'),
+    { table: 'sys_db_view_table_field', rows: [] },
     one('task_sla'),
     one('sys_update_xml'),
     one('sys_script', 'sys_metadata'),
@@ -791,7 +872,7 @@ test('a database view that joins a parent table leaves out the rows of its close
   const view: Route[] = [
     { table: 'sys_db_object', exact: 'name=task_with_sla', rows: [] },
     { table: 'sys_db_view', query: 'name=task_with_sla', rows: [{ sys_id: 'd'.repeat(32), name: 'task_with_sla', label: 'Tasks with SLA' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'task', variable_prefix: 'tsk' }, { table: 'task_sla', variable_prefix: 'sla' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'b394313665af5351116b0824094e3913', table: 'task', variable_prefix: 'tsk' }, { sys_id: 'cd2093e68025226acf1f3f2217a10b1f', table: 'task_sla', variable_prefix: 'sla' }] },
     { table: 'task_with_sla', rows: [{ tsk_number: 'TASK1' }] },
   ]
   // The questions that have to match nothing: the class empty and filled at once, and one of two names at once.
@@ -819,7 +900,7 @@ test('a database view that joins a parent table leaves out the rows of its close
   const nested: Route[] = [
     { table: 'sys_db_object', exact: 'name=outer_view', rows: [] },
     { table: 'sys_db_view', query: 'name=outer_view', rows: [{ sys_id: 'e'.repeat(32), name: 'outer_view', label: 'Outer' }] },
-    { table: 'sys_db_view_table', query: `view=${'e'.repeat(32)}`, rows: [{ table: 'task_with_sla', variable_prefix: 'in' }] },
+    { table: 'sys_db_view_table', query: `view=${'e'.repeat(32)}`, rows: [{ sys_id: 'a912a8565dd49ca9df78529b71e12081', table: 'task_with_sla', variable_prefix: 'in' }] },
     { table: 'outer_view', rows: [{ in_tsk_number: 'INC1' }] },
   ]
   const outer = await connect(familyWorld([below, ...nested, ...view]), { tables: { allow: [], deny: ['incident'] } })
@@ -983,7 +1064,7 @@ test('the rules for closed tables hold for the request of any tool, not only for
     closedTables(tableRow('customer_contact', 'Contact', 'sys_user')),
     { table: 'sys_db_object', exact: 'name=customer_contact', rows: [tableRow('customer_contact', 'Contact', 'sys_user')] },
     { table: 'sys_db_view', query: 'name=user_view', rows: [{ sys_id: view, name: 'user_view', label: 'Users' }] },
-    { table: 'sys_db_view_table', query: `view=${view}`, rows: [{ table: 'sys_user', variable_prefix: 'usr' }] },
+    { table: 'sys_db_view_table', query: `view=${view}`, rows: [{ sys_id: 'bf55059b290ba44777f3ddd89b854c4e', table: 'sys_user', variable_prefix: 'usr' }] },
     ...dictionaryRoutes,
     { table: 'customer_contact', rows: [{ name: 'Beth Anglin' }] },
     { table: 'user_view', rows: [{ usr_name: 'Abel Tuter' }] },
@@ -1054,7 +1135,7 @@ test('a part of a rotated table, and the archive of a table, are closed with the
   const view: Route[] = [
     { table: 'sys_db_object', exact: 'name=v_tasks', rows: [] },
     { table: 'sys_db_view', query: 'name=v_tasks', rows: [{ sys_id: 'b'.repeat(32), name: 'v_tasks', label: 'Tasks and archive' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'task', variable_prefix: 'tsk' }, { table: 'ar_task', variable_prefix: 'old' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'b394313665af5351116b0824094e3913', table: 'task', variable_prefix: 'tsk' }, { sys_id: '0810a349de119f4267626b19b181c350', table: 'ar_task', variable_prefix: 'old' }] },
     { table: 'v_tasks', rows: [{ tsk_number: 'TASK1' }] },
   ]
   const joined = await connect([closedTables(tableRow('incident', 'Incident', 'task')), ...view, ...tables, ...dictionary, ...rows, ...dictionaryRoutes], { tables: { allow: [], deny: ['incident'] } })
@@ -1166,8 +1247,8 @@ test('a database view that joins another view is not described either while tabl
     { table: 'sys_db_object', exact: 'name=inner_view', rows: [] },
     { table: 'sys_db_view', query: 'name=outer_view', rows: [{ sys_id: 'e'.repeat(32), name: 'outer_view', label: 'Outer' }] },
     { table: 'sys_db_view', query: 'name=inner_view', rows: [{ sys_id: 'f'.repeat(32), name: 'inner_view', label: 'Inner' }] },
-    { table: 'sys_db_view_table', query: `view=${'e'.repeat(32)}`, rows: [{ table: 'inner_view', variable_prefix: 'in' }] },
-    { table: 'sys_db_view_table', query: `view=${'f'.repeat(32)}`, rows: [{ table: 'incident', variable_prefix: 'inc' }] },
+    { table: 'sys_db_view_table', query: `view=${'e'.repeat(32)}`, rows: [{ sys_id: 'f21118f53a8ab67a185c3ff4d056fdd2', table: 'inner_view', variable_prefix: 'in' }] },
+    { table: 'sys_db_view_table', query: `view=${'f'.repeat(32)}`, rows: [{ sys_id: 'f465a118eb100ae3d2798d4c5296a09c', table: 'incident', variable_prefix: 'inc' }] },
   ]
   const closed = await connect([...views, ...dictionaryRoutes], { tables: { allow: [], deny: ['sys_user'] } })
   for (const tool of ['sn_schema', 'sn_dependencies', 'sn_query']) {
@@ -1967,7 +2048,7 @@ test('an empty result on a database view is explained from the choices of the ta
   const { answer } = await connect([
     { table: 'sys_db_object', query: 'name=incident_caller', rows: [] },
     { table: 'sys_db_view', query: 'name=incident_caller', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_caller', label: 'Incident with caller' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }, { table: 'sys_user', variable_prefix: 'usr' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'f465a118eb100ae3d2798d4c5296a09c', table: 'incident', variable_prefix: 'inc' }, { sys_id: 'bf55059b290ba44777f3ddd89b854c4e', table: 'sys_user', variable_prefix: 'usr' }] },
     ...dictionaryRoutes,
     { table: 'incident_caller', rows: [] },
   ])
@@ -2481,7 +2562,7 @@ test('a field of a view is judged by the table it comes from, also where the dic
   const view: Route[] = [
     { table: 'sys_db_object', exact: 'name=v_updates', rows: [] },
     { table: 'sys_db_view', query: 'name=v_updates', rows: [{ sys_id: 'c'.repeat(32), name: 'v_updates', label: 'Updates' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'sys_update_xml', variable_prefix: 'ux' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: '65f8ba2fd50faffd96bce572def30c96', table: 'sys_update_xml', variable_prefix: 'ux' }] },
     { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Customer Update')] },
     // The fields of the joined table are hidden from this account.
     { table: 'sys_dictionary', query: 'nameINsys_update_xml', status: 403 },
@@ -2695,7 +2776,7 @@ test('through a database view the value of a system property can be neither comp
   const view: Route[] = [
     { table: 'sys_db_object', query: 'name=u_property_view', rows: [] },
     { table: 'sys_db_view', query: 'name=u_property_view', rows: [{ sys_id: 'b'.repeat(32), name: 'u_property_view', label: 'Properties' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'sys_properties', variable_prefix: 'prop' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: '30eb20c422d59701ba2384aa21494daa', table: 'sys_properties', variable_prefix: 'prop' }] },
     { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] },
   ]
   const rows = [{ prop_name: 'glide.smtp.pw', prop_value: 'ciphertext' }]
@@ -2718,7 +2799,7 @@ test('the value of a system property is withheld when it is read through a datab
   const { answer } = await connect([
     { table: 'sys_db_object', query: 'name=u_property_view', rows: [] },
     { table: 'sys_db_view', query: 'name=u_property_view', rows: [{ sys_id: 'b'.repeat(32), name: 'u_property_view', label: 'Properties' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'sys_properties', variable_prefix: 'prop' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: '30eb20c422d59701ba2384aa21494daa', table: 'sys_properties', variable_prefix: 'prop' }] },
     { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] },
     { table: 'sys_dictionary', query: 'nameINsys_properties', rows: [column('sys_properties', 'name'), column('sys_properties', 'value')] },
     ...dictionaryRoutes,
@@ -2734,7 +2815,7 @@ test('sn_schema reads a database view and the tables it joins anew, and each par
   const { answer, calls, sentTo } = await connect([
     { table: 'sys_db_object', query: 'name=incident_caller', rows: [] },
     { table: 'sys_db_view', query: 'name=incident_caller', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_caller', label: 'Incident with caller' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }, { table: 'sys_user', variable_prefix: 'usr' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'f465a118eb100ae3d2798d4c5296a09c', table: 'incident', variable_prefix: 'inc' }, { sys_id: 'bf55059b290ba44777f3ddd89b854c4e', table: 'sys_user', variable_prefix: 'usr' }] },
     ...dictionaryRoutes,
     { table: 'incident', rows: [{ number: 'INC1' }] },
   ])
@@ -2788,7 +2869,7 @@ test('sn_schema describes database views and remote tables, and says what it cou
   const { answer } = await connect([
     { table: 'sys_db_object', query: 'name=incident_sla', rows: [] },
     { table: 'sys_db_view', query: 'name=incident_sla', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_sla', label: 'Incident SLA' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }, { table: 'sys_user', variable_prefix: 'usr' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'f465a118eb100ae3d2798d4c5296a09c', table: 'incident', variable_prefix: 'inc' }, { sys_id: 'bf55059b290ba44777f3ddd89b854c4e', table: 'sys_user', variable_prefix: 'usr' }] },
     { table: 'sys_db_object', query: 'name=v_remote', rows: [{ ...tableRow('v_remote', 'Remote'), scriptable_table: 'true' }] },
     { table: 'sys_dictionary', query: 'nameINv_remote', rows: Array.from({ length: 500 }, (_, index) => column('v_remote', `f_${String(index).padStart(3, '0')}`, 'string', '', { column_label: 'x'.repeat(120) })) },
     { table: 'sys_dictionary_override', query: 'nameINv_remote', status: 403 },
@@ -4356,7 +4437,7 @@ test('sn_dependencies looks up customer updates in chunks, and never with a name
   const { answer, call, sentTo } = await connect([
     { table: 'sys_db_object', query: 'name=incident_sla', rows: [] },
     { table: 'sys_db_view', query: 'name=incident_sla', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_sla', label: 'Incident SLA' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'f465a118eb100ae3d2798d4c5296a09c', table: 'incident', variable_prefix: 'inc' }] },
     ...dictionaryRoutes,
     { table: 'sys_script', rows: Array.from({ length: 50 }, (_, index) => rule(`r${index}`, 'incident')) },
     {

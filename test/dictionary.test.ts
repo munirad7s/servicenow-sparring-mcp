@@ -201,7 +201,7 @@ test('a database view has the fields of the tables it joins, with their prefix',
   const { sn } = fakeInstance([
     { table: 'sys_db_object', query: 'name=incident_sla', rows: [] },
     { table: 'sys_db_view', query: 'name=incident_sla', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_sla', label: 'Incident SLA' }] },
-    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }, { table: 'sys_user', variable_prefix: 'usr' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'f465a118eb100ae3d2798d4c5296a09c', table: 'incident', variable_prefix: 'inc' }, { sys_id: 'bf55059b290ba44777f3ddd89b854c4e', table: 'sys_user', variable_prefix: 'usr' }] },
     ...dictionaryRoutes,
   ])
   const dict = new Dictionary(sn)
@@ -404,8 +404,8 @@ test('a login the instance rejects is passed on as that, and one unusable answer
 test('a view whose list of tables is partly hidden is not taken for a smaller view', async () => {
   // A table that is joined and not seen would be read without any of the checks that go by the tables of a view.
   const hidden: Array<[string, Partial<Route>]> = [
-    ['a hidden row', { rows: [{ table: 'incident', variable_prefix: 'inc' }, null] }],
-    ['no total', { rows: [{ table: 'incident', variable_prefix: 'inc' }], noTotal: true }],
+    ['a hidden row', { rows: [{ sys_id: 'f465a118eb100ae3d2798d4c5296a09c', table: 'incident', variable_prefix: 'inc' }, null] }],
+    ['no total', { rows: [{ sys_id: 'f465a118eb100ae3d2798d4c5296a09c', table: 'incident', variable_prefix: 'inc' }], noTotal: true }],
   ]
   for (const [name, members] of hidden) {
     const { sn } = fakeInstance([

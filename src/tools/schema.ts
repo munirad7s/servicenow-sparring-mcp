@@ -90,7 +90,13 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
           throw new ServiceNowError(`"${table}" is neither a table in sys_db_object nor a database view on this instance.`, 'not_found', table)
         }
         const effective = await ctx.dict.effectiveColumns(table)
-        const all = effective?.columns ?? []
+        // A view can list the fields it takes from a table it joins. A field outside such a list is no field of the
+        // view: measured, a condition on it is dropped and the answer is unfiltered.
+        // Where the list could not be read, the fields stay in the answer, with a warning: sn_query asks the
+        // instance for proof before it uses one of them.
+        const outside = (effective?.columns ?? []).filter((column) => column.outsideList && !column.listUnread)
+        const unread = (effective?.columns ?? []).some((column) => column.listUnread)
+        const all = (effective?.columns ?? []).filter((column) => !column.outsideList || column.listUnread)
         // A view defines no fields of its own: all of them come from the tables it joins.
         const own = info.kind === 'database_view' ? all : all.filter((column) => column.definedOn === table)
 
@@ -106,6 +112,21 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
         }
         if (info.kind === 'database_view') {
           warnings.push('This is a database view. Its fields are listed as the joined tables define them: dictionary overrides, and the labels a child table gives to a field it inherits, are not applied. Ask for the joined table to see those.')
+        }
+        if (outside.length) {
+          const listing = [...new Set((info.members ?? []).filter((member) => Array.isArray(member.fields)).map((member) => member.table))]
+          warnings.push(
+            `This view lists the fields it takes from ${listing.join(', ')}. ${outside.length} other field(s) of ${listing.length === 1 ? 'that table' : 'those tables'} are left out here: ` +
+              'ServiceNow drops a condition on such a field and answers unfiltered. A row of the view can still carry a few system fields beyond the list, such as the sys_id: ' +
+              'sn_query takes such a field where the instance proves that it applies a condition on it.',
+          )
+        }
+        if (unread) {
+          const tables = [...new Set((info.members ?? []).filter((member) => member.fields === null).map((member) => member.table))]
+          warnings.push(
+            `It could not be read whether this view lists the fields it takes from ${tables.join(', ')} (sys_db_view_table_field). Where a view does, only the fields on its list are fields of the view, ` +
+              'and ServiceNow drops a condition on any other. All fields of the joined table are listed here; sn_query asks the instance for proof before it uses one.',
+          )
         }
         if (info.kind === 'remote_table') {
           warnings.push('This is a remote table. Reading its records runs a script on the instance, which usually calls another system.')

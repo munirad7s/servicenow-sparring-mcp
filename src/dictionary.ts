@@ -31,6 +31,14 @@ export interface Column {
    * "definedOn" is the table the view joins, which is what decides what the field holds.
    */
   sourceDefinedOn?: string
+  /**
+   * For a field of a database view: true where the view lists the fields it takes from the joined table and this
+   * is not one of them, or where that list could not be read. Measured: the instance drops a condition on such a
+   * field and answers unfiltered, unless a row of the view carries the field all the same (a few system fields do).
+   */
+  outsideList?: boolean
+  /** With "outsideList": true where the list could not be read, so that it is not known whether the field is on it. */
+  listUnread?: boolean
 }
 
 export interface TableInfo {
@@ -40,8 +48,11 @@ export interface TableInfo {
   chain: string[]
   /** A remote table runs a script on the instance whenever it is read. */
   kind: 'table' | 'remote_table' | 'database_view'
-  /** For a database view: the tables it joins, and the prefix its fields carry. */
-  members?: Array<{ table: string; prefix: string }>
+  /**
+   * For a database view: the tables it joins, and the prefix its fields carry. "fields" where the view lists the
+   * fields it takes from that table; null where it could not be read whether it does.
+   */
+  members?: Array<{ table: string; prefix: string; fields?: string[] | null }>
 }
 
 export interface UnknownField {
@@ -351,6 +362,18 @@ export class Dictionary {
           }
 
           const column = set.columns.get(segment)
+          if (column?.outsideList && !(await this.viewCarries(current, segment))) {
+            check.unknown.push({
+              field: path,
+              table: current,
+              segment,
+              reason: column.listUnread
+                ? `"${segment}" is a field of "${column.definedOn}", which the view "${current}" joins, but it could not be read which fields the view takes from that table, and the instance did not prove that it applies a condition on this one`
+                : `"${segment}" is a field of "${column.definedOn}", which the view "${current}" joins, but the view lists the fields it takes from that table and this is not one of them`,
+              suggestions: [],
+            })
+            break
+          }
           if (!column) {
             if (set.partial) unavailable(`the dictionary of "${current}" is only partly readable for this account`)
             // Names that look like the unknown one are searched for the first few only: each search compares
@@ -751,7 +774,7 @@ export class Dictionary {
     const joined = await this.sn.query<Record<string, string>>({
       table: 'sys_db_view_table',
       query: `view=${view.sys_id}^active=true^ORDERBYorder`,
-      fields: ['table', 'variable_prefix'],
+      fields: ['sys_id', 'table', 'variable_prefix'],
       limit: 50,
     })
     // Without a total a short list proves nothing: access rules take rows off a page after it was cut.
@@ -759,9 +782,28 @@ export class Dictionary {
       throw new ServiceNowError(`The tables of the database view "${name}" are only partly readable, or it could not be told whether they are complete.`, 'acl', 'sys_db_view_table')
     }
 
+    // A view can list the fields it takes from a table it joins. Measured: 103 of 558 views of an instance do, and
+    // a condition on a field outside such a list is dropped. Where the lists cannot be read, no field is taken on trust.
+    const ids = joined.records.map((row) => String(row.sys_id ?? '')).filter((id) => /^[0-9A-Za-z_]{1,32}$/.test(id))
+    // Read like the request of any tool: the lists are no part of what the gate of closed tables is built from.
+    const lists = ids.length
+      ? await this.gated
+          .all<Record<string, string>>({ table: 'sys_db_view_table_field', query: `view_tableIN${ids.join(',')}`, fields: ['view_table', 'field'] })
+          .then((read) => (read.complete && read.total !== null && read.records.length === read.total ? read.records : null))
+          .catch(unlessNoConnection(null))
+      : []
+    const listOf = (id: string): string[] | null | undefined => {
+      // Not read, or a table of the view whose own id cannot be used: then it is not known whether it has a list.
+      if (!lists || !ids.includes(id)) return null
+      const own = lists.filter((row) => row.view_table === id).map((row) => String(row.field ?? ''))
+      return own.length ? own : undefined
+    }
     const members = joined.records
       .filter((row) => isTableName(row.table) && row.table !== name && /^[a-z0-9_]{1,40}$/.test(String(row.variable_prefix)))
-      .map((row) => ({ table: row.table, prefix: String(row.variable_prefix) }))
+      .map((row) => {
+        const fields = listOf(String(row.sys_id ?? ''))
+        return { table: row.table, prefix: String(row.variable_prefix), ...(fields === undefined ? {} : { fields }) }
+      })
     // A row that cannot be used means the list of joined tables is not complete.
     if (members.length < joined.records.length || (joined.total === null && joined.records.length === 50)) {
       throw unusableAnswer(`The tables of the database view "${name}" could not be read completely.`, 'sys_db_view_table')
@@ -771,6 +813,33 @@ export class Dictionary {
       throw unusableAnswer(`The database view "${name}" came back without a table it joins, so it could not be told whose rows it holds.`, 'sys_db_view_table')
     }
     return { name, label: String(view.label ?? ''), chain: [name], kind: 'database_view', members }
+  }
+
+  private readonly carried = new Map<string, Entry<boolean>>()
+
+  /**
+   * true if the instance applies a condition on this field of a view, for a field the view does not list.
+   *
+   * Measured on 40 views with a field list: a field on the list is applied; a field outside it is applied where a
+   * row of the view carries it all the same (sys_id, sys_class_name and the two domain fields, not always the same
+   * ones) and dropped where no row does, or refused with 403. A condition that is dropped matches every row, so the
+   * question "empty and filled at once" then matches every row too, where it should match none. Without a row in
+   * the view the question proves nothing, and the answer is not remembered.
+   */
+  private async viewCarries(view: string, field: string): Promise<boolean> {
+    const key = `${view}.${field}`
+    const known = this.carried.get(key)
+    if (known && Date.now() - known.at < this.ttlMs) return known.value
+    const ask = (query: string) => this.gated.query({ table: view, query, fields: ['sys_id'], limit: 1 }).catch(unlessNoConnection(null))
+    const both = await ask(`${field}ISEMPTY^${field}ISNOTEMPTY`)
+    if (!both || both.total !== 0 || both.records.length > 0) return false
+    const any = await ask('')
+    const lasting = Boolean(any && (any.records.length > 0 || (any.total ?? 0) > 0))
+    if (lasting) {
+      if (this.carried.size >= MAX_ENTRIES) this.carried.clear()
+      this.carried.set(key, { value: Promise.resolve(true), at: Date.now() })
+    }
+    return true
   }
 
   /** The fields of a table, and whether the list is complete. null if the table is unknown. */
@@ -791,7 +860,9 @@ export class Dictionary {
         const set = joined && joined.kind !== 'database_view' ? await this.columnSet(member.table, maxAgeMs) : null
         if (!set || set.partial) partial = true
         for (const column of set?.columns.values() ?? []) {
-          columns.set(`${member.prefix}_${column.name}`, { ...column, name: `${member.prefix}_${column.name}`, definedOn: member.table, sourceField: column.name, sourceDefinedOn: column.definedOn })
+          const outside = member.fields === null || (member.fields !== undefined && !member.fields.includes(column.name))
+          const mark = outside ? { outsideList: true, ...(member.fields === null ? { listUnread: true } : {}) } : {}
+          columns.set(`${member.prefix}_${column.name}`, { ...column, name: `${member.prefix}_${column.name}`, definedOn: member.table, sourceField: column.name, sourceDefinedOn: column.definedOn, ...mark })
         }
       }
       return { columns, partial }
