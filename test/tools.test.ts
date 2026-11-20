@@ -868,6 +868,8 @@ test('the name and the payload of a captured change are kept back where its reco
     { name: NAME, target_name: 'Example rule', type: 'Business Rule', payload: payload('<sys_script action="INSERT_OR_UPDATE"><name>Example rule</name><sys_created_by display_value="Dan Smith">dan</sys_created_by></sys_script>') },
     // Nothing in it names a table the instance knows.
     { name: 'u_odd_thing', target_name: 'Odd', type: 'Other', payload: '<something>else</something>' },
+    // Nothing in it names a table at all.
+    { name: 'u_plain_text', target_name: 'Plain', type: 'Other', payload: 'no record in here, only a line of text' },
   ]
   const { answer, call, sentTo } = await connect(familyWorld([users, { table: 'sys_update_xml', rows }]), noUsers)
   const WITHHELD = '[withheld: the record is in a table closed on this machine]'
@@ -875,15 +877,15 @@ test('the name and the payload of a captured change are kept back where its reco
   // The update name is read along, because it says which table the record is in. It is not added to the answer.
   const names = await answer('sn_query', { table: 'sys_update_xml', fields: ['target_name'] })
   assert.equal(sentTo('sys_update_xml')[0].params.get('sysparm_fields'), 'target_name,name')
-  assert.deepEqual(names.records, [{ target_name: WITHHELD }, { target_name: WITHHELD }, { target_name: 'Incident form' }, { target_name: 'Example rule' }, { target_name: 'Odd' }])
+  assert.deepEqual(names.records, [{ target_name: WITHHELD }, { target_name: WITHHELD }, { target_name: 'Incident form' }, { target_name: 'Example rule' }, { target_name: 'Odd' }, { target_name: 'Plain' }])
   assert.match(names.warnings.join(' '), /2 record name\(s\) were withheld/)
 
   const payloads = await answer('sn_query', { table: 'sys_update_xml', fields: ['name', 'payload'] })
-  assert.deepEqual(payloads.records.map((item: Data) => item.payload === WITHHELD), [true, true, true, false, true])
+  assert.deepEqual(payloads.records.map((item: Data) => item.payload === WITHHELD), [true, true, true, false, true, true])
   // What is passed on names nobody: a payload carries the name behind every reference of its record.
   assert.match(payloads.records[3].payload, /<sys_created_by display_value="\[withheld\]">dan<\/sys_created_by>/)
   assert.doesNotMatch(JSON.stringify(payloads), /Abel|Beth|Carol|Dan Smith/)
-  assert.match(payloads.warnings.join(' '), /4 payload\(s\) were withheld/)
+  assert.match(payloads.warnings.join(' '), /5 payload\(s\) were withheld/)
 
   // The names could be found out by trying, so they are not compared, sorted by or counted.
   for (const args of [{ query: 'target_nameSTARTSWITHAbel' }, { query: 'ORDERBYtarget_name' }, { groupBy: 'target_name' }]) {
@@ -895,7 +897,81 @@ test('the name and the payload of a captured change are kept back where its reco
   // Without closed tables nothing of this applies.
   const open = await connect(familyWorld([{ table: 'sys_update_xml', rows }]))
   assert.equal((await open.answer('sn_query', { table: 'sys_update_xml', fields: ['target_name'] })).records[0].target_name, 'Abel Tuter')
-  assert.equal((await open.answer('sn_query', { table: 'sys_update_xml', query: 'target_nameSTARTSWITHAbel', fields: ['name'] })).returned, 5)
+  assert.equal((await open.answer('sn_query', { table: 'sys_update_xml', query: 'target_nameSTARTSWITHAbel', fields: ['name'] })).returned, 6)
+})
+
+test('the rules for closed tables hold for the request of any tool, not only for a query the agent wrote', async () => {
+  // Asked through the client, as a tool does that builds a query of its own. Nothing here passes a check of sn_query.
+  const view = 'd'.repeat(32)
+  const routes: Route[] = [
+    closedTables(tableRow('customer_contact', 'Contact', 'sys_user')),
+    { table: 'sys_db_object', exact: 'name=customer_contact', rows: [tableRow('customer_contact', 'Contact', 'sys_user')] },
+    { table: 'sys_db_view', query: 'name=user_view', rows: [{ sys_id: view, name: 'user_view', label: 'Users' }] },
+    { table: 'sys_db_view_table', query: `view=${view}`, rows: [{ table: 'sys_user', variable_prefix: 'usr' }] },
+    ...dictionaryRoutes,
+    { table: 'customer_contact', rows: [{ name: 'Beth Anglin' }] },
+    { table: 'user_view', rows: [{ usr_name: 'Abel Tuter' }] },
+    { table: 'u_ghost', rows: [{ name: 'Carol Coughlin' }] },
+    { table: 'incident', rows: [{ number: 'INC1' }] },
+  ]
+  const { sn, calls } = fakeInstance(routes, { tables: { allow: [], deny: ['sys_user'] } })
+  createContext(sn)
+  const outcome = (run: () => Promise<unknown>) => run().then(() => 'sent', (error) => `${error.kind}: ${error.message}`)
+  // A child table of a closed table, as rows and as counts.
+  assert.match(await outcome(() => sn.query({ table: 'customer_contact' })), /^blocked: "customer_contact" is a child table of sys_user/)
+  assert.match(await outcome(() => sn.groupCount('customer_contact', 'name')), /^blocked: "customer_contact" is a child table of sys_user/)
+  // A database view that joins a closed table. Its fields carry no dot, so no path gives it away.
+  assert.match(await outcome(() => sn.query({ table: 'user_view', fields: ['usr_name'] })), /^blocked: "user_view" is a database view, and "sys_user" is closed on this machine/)
+  // What the instance lists neither as a table nor as a view: nothing says whose rows it holds.
+  assert.match(await outcome(() => sn.query({ table: 'u_ghost' })), /^blocked: It could not be established what "u_ghost" is/)
+  // A path the dictionary cannot follow: which tables the request reads from is not established.
+  assert.match(await outcome(() => sn.query({ table: 'incident', fields: ['u_nowhere.name'] })), /^blocked: .*could not be established which tables this request reads from/)
+  for (const table of ['customer_contact', 'user_view', 'u_ghost', 'incident']) assert.equal(calls.filter((call) => call.table === table).length, 0, table)
+})
+
+test('a table with more closed child tables than a query can name is not read', async () => {
+  // Each closed table below has to be named in the condition that leaves its rows out. A URL carries only so much.
+  const children = Array.from({ length: 300 }, (_, index) => tableRow(`u_closed_child_with_a_long_name_${String(index).padStart(4, '0')}`, 'Child', 'u_closed_parent', 'task'))
+  const routes: Route[] = [closedTables(tableRow('u_closed_parent', 'Parent', 'task'), ...children), ...dictionaryRoutes, { table: 'task', rows: [{ number: 'TASK1' }] }]
+  const { call, sentTo } = await connect(routes, { tables: { allow: [], deny: ['u_closed_parent'] } })
+  const { data } = await call('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(data.error, 'blocked')
+  assert.match(data.message, /"task" has more closed child tables below it than a query can leave out/)
+  assert.equal(sentTo('task').length, 0)
+})
+
+test('the text of comments and work notes is left out where the table of journal entries is closed', async () => {
+  const fields: Route = { table: 'sys_dictionary', query: 'nameINincident,task', rows: [column('task', 'number'), column('task', 'work_notes', 'journal_input'), column('task', 'short_description')] }
+  const row = { number: 'INC1', work_notes: labelled('', '2026-11-20 10:00:00 - Abel Tuter (Work notes)\nthe customer called again'), short_description: 'Printer' }
+  const { answer } = await connect([fields, ...dictionaryRoutes, { table: 'incident', rows: [row] }], { tables: { allow: [], deny: ['sys_journal_field'] } })
+  const data = await answer('sn_query', { table: 'incident', fields: ['number', 'work_notes', 'short_description'], displayValue: true })
+  // The display value of a journal field is the text of its entries, and those are rows of the closed table.
+  assert.deepEqual(data.records, [{ number: 'INC1', work_notes: '', short_description: 'Printer' }])
+  assert.match(data.warnings.join(' '), /left out: work_notes/)
+  // With the table open, the text comes.
+  const open = await connect([fields, ...dictionaryRoutes, { table: 'incident', rows: [row] }])
+  assert.match(JSON.stringify((await open.answer('sn_query', { table: 'incident', fields: ['work_notes'], displayValue: true })).records), /the customer called again/)
+})
+
+test('a closed table is not described either: not its fields, not what is attached to it, not the names a typo is close to', async () => {
+  const closed = { tables: { allow: [], deny: ['sys_user'] } }
+  const world = familyWorld([closedTables(tableRow('customer_contact', 'Contact', 'sys_user')), { table: 'customer_contact', rows: [{ name: 'Beth Anglin' }] }])
+  const { call, sentTo, calls } = await connect(world, closed)
+  // The table itself, and a child table of it, which no list names.
+  for (const table of ['sys_user', 'customer_contact']) {
+    for (const tool of ['sn_schema', 'sn_dependencies']) {
+      const { data } = await call(tool, { table })
+      assert.equal(data.error, 'blocked', `${tool} ${table}`)
+      assert.match(data.message, /closed on this machine/, `${tool} ${table}`)
+    }
+  }
+  // Nothing was asked about what is attached to it.
+  assert.equal(calls.filter((entry) => ['sys_script', 'sys_security_acl', 'sys_documentation', 'sys_dictionary_override'].includes(entry.table)).length, 0)
+  // A misspelled field of a child table is answered with the refusal, not with the names of fields that are close.
+  const typo = await call('sn_query', { table: 'customer_contact', fields: ['acount'] })
+  assert.equal(typo.data.error, 'blocked')
+  assert.doesNotMatch(typo.data.message, /account/)
+  assert.equal(sentTo('customer_contact').length, 0)
 })
 
 test('a tool that walks a reference of its own is held to the closed tables like a query', async () => {
@@ -947,6 +1023,9 @@ test('an update name is taken for a record of a closed table in every way it can
   assert.equal(await isClosedRecord(listed, `customer_contact_${ID}`), true)
   // The table of a record is the longest beginning of its name that is a table: a script include is no business rule.
   assert.equal(await isClosedRecord(listed, NAME), false)
+  // Where it cannot be looked up what a name begins with, the record counts as closed.
+  const unreadable = createContext(fakeInstance([{ table: 'sys_db_object', exact: 'name=incident', status: 403 }, ...dictionaryRoutes], { tables: { allow: ['incident', 'task', 'sys_*'], deny: [] } }).sn)
+  assert.equal(await isClosedRecord(unreadable, `incident_${ID}`), true)
   assert.equal(await isClosedRecord(listed, `sys_script_include_${ID}`), true)
   assert.equal(await isClosedRecord(listed, 'sys_script_include_my_util'), true)
   // No table of that name is known to the instance: what the record is cannot be told.

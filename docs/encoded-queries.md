@@ -149,6 +149,9 @@ Also measured:
   incidents, 10 were inactive with priority 1 and 4 had priority 2, all of them active:
   `active=false^priority=1^ORpriority=2` matched 10 in both, not 14, and so did the same conditions in another
   order. The conditions the server adds to a query rest on this.
+- A text search and a condition on the class work together, in both APIs and in either order. A search word found
+  109 tasks, 11 of them incidents: with `^sys_class_nameNOT INincident^ORsys_class_nameISEMPTY` behind it, or in
+  front of it, it found 98.
 - Tables go deep. Of the 10,806 tables of one instance, 5 have a parent eight levels up and none has one nine
   levels up. The server reads eight levels in one request and asks again for what is below a table it finds at
   the eighth.

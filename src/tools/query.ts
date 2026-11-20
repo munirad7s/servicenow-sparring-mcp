@@ -70,10 +70,9 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     const carriesClosed = async (payload: string) => {
       const tables = payloadTables(payload)
       if (!tables.length) return true
+      // A name the instance does not know as a table counts as closed too: what the payload carries cannot be told.
       for (const name of tables) {
         if (await ctx.closed.reason(name)) return true
-        // A name the instance does not know as a table: what the payload carries cannot be told.
-        if (!(await ctx.dict.table(name).catch(() => null))) return true
       }
       return false
     }
@@ -104,9 +103,10 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
             out[key] = restricted ? text.replace(/(\sdisplay_value\s*=\s*)(?:"[^"]*"|'[^']*')/g, '$1"[withheld]"') : text
           }
         } else if (nameOf && filled(value)) {
-          // The readable name of a record of another table. Without what says which record, there is no telling.
+          // The readable name of a record of another table. Without what says which record, there is no telling: an
+          // empty name is no table, and no update name stands for a closed record.
           const which = nameOf.path in row ? rawOf(row[nameOf.path]) : ''
-          const closed = !which || (nameOf.holds === 'table' ? !isTableName(which) || (await ctx.closed.reason(which)) !== null : await isClosedRecord(ctx, which))
+          const closed = nameOf.holds === 'table' ? !isTableName(which) || (await ctx.closed.reason(which)) !== null : await isClosedRecord(ctx, which)
           if (closed) counts.closedNames++
           out[key] = closed ? CLOSED_NAME : scrub(value)
         } else if (fromProperties || holdsSecret(column, key)) {

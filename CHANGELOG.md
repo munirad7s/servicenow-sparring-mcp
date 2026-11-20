@@ -13,18 +13,27 @@ answer; such changes are listed under "Changed".
   the same question first: rows whose class is empty and filled at once, which has to match nothing. Not seen on
   an instance: the test account is an administrator, and it passes.
 
+### Fixed
+
+- Fourteen rules for closed tables were held by no test: a change to any of them went unnoticed. Found by changing
+  66 single lines of those rules, one at a time, and running the tests. Each has a test now, among them: a child
+  table and a database view are refused for the request of any tool, not only for a query the agent wrote;
+  `sn_schema` and `sn_dependencies` refuse a closed table; a misspelled field of a closed child table is not
+  answered with the names that are close; a payload that names no table is withheld.
+
 ## 0.3.3 (2026-11-20)
 
 ### Security
 
 - **A text from the instance could keep the server busy for minutes.** Every text an answer carries is searched
   for secrets, and a payload for the tables of its records. Both were done with patterns that look for an end from
-  every beginning: a text of 40,000 property records that are never closed (1.2 MB) took 11 seconds, and the time
-  grows with the square of the length, up to the 10 MB an answer may have. Whoever can write a long text into a
-  record the agent reads could stall the server that way. Both are now read in one pass that never searches a
-  stretch twice: the same text takes 28 milliseconds. Checked against the old code on 721 texts of the test
-  instance (payloads, scripts, deleted records): the same result on every one. Since 0.3.1. Found without a
-  reviewer, by timing the new code on hostile input.
+  every beginning. A text of 40,000 elements that open a CDATA section and never end it (half a megabyte) took 3
+  seconds, one of 40,000 property records that are never closed (1.2 MB) took 11, and the time grows with the
+  square of the length, up to the 10 MB an answer may have. Whoever can write a long text into a record the agent
+  reads could stall the server that way. Both are now read in one pass that never searches a stretch twice: the
+  same texts take 11 and 28 milliseconds. Checked against the old code on 721 texts of the test instance
+  (payloads, scripts, deleted records): the same result on every one. The first case since 0.3.1, the second
+  since 0.3.2. Found without a reviewer, by timing the new code on hostile input.
 - A secret inside markup that sits in a CDATA section of another element was passed on: a record inside a text
   inside a record. It is read like the outer one.
 
