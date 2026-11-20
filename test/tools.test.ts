@@ -502,6 +502,9 @@ test('a value of the wrong kind is refused: the instance would not reject it', a
     ['u_start>12:00:00', /holds a time of day/],
     // A day that does not exist.
     ['sys_created_on>2026-02-31', /holds a date/],
+    // Nor a time of day that does not exist.
+    ['sys_created_on>2026-02-01 25:00:00', /holds a date/],
+    ['sys_created_on>2026-02-01 10:61:00', /holds a date/],
     ['sys_created_on>2026-04-31 10:00:00', /holds a date/],
     // "activeBETWEENfoo@bar" and "activeONa@b@c" returned the 29 inactive rows, "reassignment_countONfoo@bar@baz" none.
     ['activeBETWEENfoo@bar', /BETWEEN is for dates, and "active" is a true\/false field/],
@@ -1335,6 +1338,21 @@ test('groups of the same size keep their order from page to page, and a secret i
   assert.deepEqual([...first.groups, ...second.groups].map((group: Data) => group.value), ['mango', 'apple', 'zebra', '{"api_key":"[withheld]"}'])
   assert.match(second.warnings.join(' '), /1 value\(s\) inside a text were withheld/)
   assert.equal(first.nextOffset, 2)
+})
+
+test('while tables are closed, a table whose fields cannot be read is not queried', async () => {
+  // Without the dictionary nothing says which of its fields point into a closed table. With no table closed, the
+  // field names are checked against a row instead, and the query is sent.
+  const unreadable = dictionaryRoutes.map((route) => (route.table === 'sys_dictionary' && route.query === 'nameINincident,task' ? { table: 'sys_dictionary', query: route.query, status: 403 } : route))
+  const world = [...unreadable, { table: 'incident', rows: [{ number: 'INC1' }] }]
+  const closed = await connect(world, { tables: { allow: [], deny: ['sys_user'] } })
+  const { data } = await closed.call('sn_query', { table: 'incident', fields: ['number'] })
+  assert.equal(data.error, 'blocked')
+  assert.match(data.message, /could not be established which tables this query reads from/)
+  assert.equal(closed.sentTo('incident').length, 0)
+
+  const open = await connect(world)
+  assert.equal((await open.answer('sn_query', { table: 'incident', fields: ['number'] })).returned, 1)
 })
 
 test('a login the instance rejects is reported as that, also while tables are closed', async () => {

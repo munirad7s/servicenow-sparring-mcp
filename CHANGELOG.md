@@ -15,18 +15,23 @@ answer; such changes are listed under "Changed".
 
 ### Fixed
 
-- Fourteen rules for closed tables were held by no test: a change to any of them went unnoticed. Found by changing
-  66 single lines of those rules, one at a time, and running the tests. Each has a test now, among them: a child
-  table and a database view are refused for the request of any tool, not only for a query the agent wrote;
-  `sn_schema` and `sn_dependencies` refuse a closed table; a misspelled field of a closed child table is not
-  answered with the names that are close; a payload that names no table is withheld. A second run over 49 lines of
-  the rules for secrets, the parser and the client found eight more, among them: the value of a system property
-  behind a reference whose table cannot be read, a text search on a table whose fields are partly hidden, the
-  comparison of two payloads, and the time limit of a request. A third over 41 lines of `sn_origin` and the other
-  functions found seven: a change captured by a job and by a person counts as one by a person, a failed file is
-  no local change also where the instance lists its own codes, "not reverted" is not "reverted", an account is
-  the same in whatever case it is written, and `sn_upgrade_skips` keeps back the name of a record of a closed
-  table. One check in `sn_origin` could not be reached any more and is gone.
+- **Thirty-one rules were held by no test:** a change to any of them went unnoticed. Found by taking a rule out
+  or turning it round, one line at a time, and running the tests: 194 lines in four runs. Each of the 31 has a
+  test now.
+  - The rules for closed tables, 66 lines, 14 unnoticed. Among them: a child table and a database view are
+    refused for the request of any tool, not only for a query the agent wrote; `sn_schema` and `sn_dependencies`
+    refuse a closed table; a misspelled field of a closed child table is not answered with the names that are
+    close; a payload that names no table is withheld.
+  - Secrets, the parser and the client, 49 lines, 8 unnoticed. Among them: the value of a system property behind
+    a reference whose table cannot be read, a text search on a table whose fields are partly hidden, the
+    comparison of two payloads, and the time limit of a request.
+  - `sn_origin` and the other functions, 41 lines, 7 unnoticed: a change captured by a job and by a person counts
+    as one by a person, a failed file is no local change also where the instance lists its own codes, "not
+    reverted" is not "reverted", an account is the same in whatever case it is written, and `sn_upgrade_skips`
+    keeps back the name of a record of a closed table.
+  - The checks on values and field names, 38 lines, 2 unnoticed: a time of day that does not exist, and a table
+    whose fields cannot be read while tables are closed.
+- Three checks that could not be reached, or only repeated another, are gone.
 
 ## 0.3.3 (2026-11-20)
 
