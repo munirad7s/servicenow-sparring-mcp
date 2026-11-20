@@ -29,7 +29,7 @@ It also serves three MCP prompts, `verify_claim`, `review_upgrade` and `assess_c
 
 ## Evidence you can run again
 
-Every answer names where it came from, what it cost, and how complete it is:
+Every answer that is not an error names where it came from, what it cost, and how complete it is:
 
 ```json
 {
@@ -53,7 +53,8 @@ Every answer names where it came from, what it cost, and how complete it is:
 ```
 
 `requests` is 6 here because it is the first call on this table: five of them looked at the table itself. The
-next call on it costs one. More examples, also of refusals: [docs/examples.md](docs/examples.md).
+next call on it costs one. An error is shorter: its kind, a message, a hint, and the table it is about where
+there is one. More examples, also of refusals: [docs/examples.md](docs/examples.md).
 
 The Table API does not reject a condition it cannot use. It drops the condition and answers with every row, or it
 matches nothing. Both look like an answer. Five rules keep the evidence from lying:
@@ -73,15 +74,21 @@ matches nothing. Both look like an answer. Five rules keep the evidence from lyi
    condition with a missing part, an operator written the wrong way, a `LIKE` without a value. A date in a form it
    cannot read, where `>` then matches every row. `active=yes`, which returns the inactive rows.
    [docs/encoded-queries.md](docs/encoded-queries.md) lists the forms that one live instance dropped, misread or
-   answered with nothing, and the forms that are refused because they are documented to run script.
+   answered with nothing, and the forms that are refused because they are documented to run script. These checks
+   go by the type of a field. Where the dictionary cannot be read and the names are checked against a row
+   instead, the type is not known and the form of a value is not checked; `fieldCheck` says which way the names
+   were verified.
 3. **A value that cannot match is refused or explained.** `state=Resolved` matches nothing, because the field
    stores `6`. That query is refused, and the error names the stored value. `caller_id=Abel Tuter` matches nothing,
    because a reference is compared with a sys_id. That answer comes with the reason. `assignment_group!=Service
    Desk` leaves no row out at all, because no row holds the name: that query is refused once the server has looked
-   the value up and found no record with it as its sys_id. `assigned_to!=<sys_id>` leaves out every row without an
-   assignee, and the answer says that too. The check of choice values needs `sys_choice` to be readable. It covers
-   the fields of the table, inherited ones included, the fields of a database view, and fields reached through a
-   reference; where it could not be made, the answer says so.
+   the value up and found no record with it as its sys_id. Where the table behind the reference is closed on this
+   machine, cannot be read or gives no total, the value is not looked up: the query is sent, and the answer says
+   that it was not checked. `assigned_to!=<sys_id>` leaves out every row without an assignee, and the answer says
+   that too. The check of choice values needs `sys_choice` to be readable. It covers the fields of the table,
+   inherited ones included, the fields of a database view, and fields reached through a reference, and goes by
+   the active choices of the nearest table that has a list of its own: the label of a choice that was set
+   inactive is not known to it. Where the check could not be made, the answer says so.
 4. **Counts say what they count.** `total` is what matched on the server before row-level access rules; `returned`
    is what is in the answer. When rows were withheld, the answer says so. Three things can stand between a table
    and its answer without a trace in it: business rules that run on every read and add conditions depending on
@@ -95,7 +102,8 @@ matches nothing. Both look like an answer. Five rules keep the evidence from lyi
 The server sends only HTTP `GET` requests, and only to two endpoints of the one configured instance: the Table API
 (`/api/now/table/<table>`) and the Aggregate API (`/api/now/stats/<table>`). There is no function and no code path
 that creates, updates or deletes anything. Tests hold that: one scans the source for any other HTTP method and any
-other way to reach the network, one records every request the eight functions send. They run in CI on every push.
+other way to reach the network, one records every request the eight functions send. They run in CI on every push
+to `main` and on every pull request.
 They are a guard against a change that breaks the promise, not a sandbox.
 
 That is a statement about what the server sends. It is not a statement about what an instance does while it answers:
@@ -110,6 +118,8 @@ That is a statement about what the server sends. It is not a statement about wha
 So give the server an account of its own that cannot write: read roles, plus the role `snc_read_only`, whose users
 "are prevented from creating, updating, or deleting records". Then the instance enforces the promise a second time.
 `sn_instance` and `npm run doctor` report whether the account is an administrator and whether it has that role.
+With a token in place of a user name and a password they cannot: a token does not say whose it is, so the roles
+are reported as unknown.
 
 More guards: table names and field names are validated before they reach a URL; a value read from the instance is
 checked like any other before it goes into the next query; `https` is required (`http` only for `localhost`);
@@ -127,27 +137,38 @@ provider, the data leaves your network. Five things limit what can go that way:
   type, come back as `[withheld: this field holds a secret]`. The Table API would hand them out as stored. The
   server knows the type of a field from the dictionary. Where it cannot read the type, it withholds a field whose
   name suggests a secret (password, token, secret, api_key; a field called just "key" is not taken for one), and
-  the answer says that types were missing. The value of a system property that is reached through a reference or
-  a database view comes without its type, so it is withheld there whatever it holds: read it from
+  the answer says that types were missing. The value of a system property that is reached through a reference,
+  a database view, or a table that holds rows of `sys_properties` under another name (a table below it, its
+  archive, a part of it) comes without its type, so it is withheld there whatever it holds: read it from
   `sys_properties`. On a database view whose definition the account may not read, a field called `value`, or
   ending in `_value`, counts as such a value, and the answer says that this is why it was withheld.
-- **A secret cannot be found out by trying.** "Starts with a", "starts with b": the number of matches would give a
-  value away piece by piece, and so would the order of rows sorted by it. A field that holds a secret can be asked
-  whether it is filled, and nothing else. A query that compares or sorts by the value of system properties leaves
-  out the properties of a password type and those without a type, and says so; a count per property value is
-  refused. A text search reads fields it does not name: it is refused on a table that has a field with a secret
-  or a field that carries whole records, and on a table whose fields cannot be read completely.
+- **A field that holds a secret cannot be found out by trying.** "Starts with a", "starts with b": the number of
+  matches would give a value away piece by piece, and so would the order of rows sorted by it. A field that holds
+  a secret can be asked whether it is filled, and nothing else. A query that compares or sorts by the value of
+  system properties leaves out the properties of a password type and those without a type, and says so; a count
+  per property value is refused. A text search reads fields it does not name: it is refused on a table that has
+  a field with a secret or a field that carries whole records, and on a table whose fields cannot be read
+  completely. This holds for fields of a secret type, for the values of system properties and for fields that
+  carry whole records. It does not hold for a secret that somebody wrote into an ordinary text, a script for
+  one: the server takes it out of the text it returns, as the next point says, but a condition on that field
+  still tells whether the text contains a given piece. Secrets belong in fields made for them.
 - **A record inside a text is cleaned.** The payload of a captured change, of a version, of an upgrade entry or of
   a deleted record is the whole record as text. What looks like a secret in it is taken out, by the name of its
   element, and a system property in it is judged as one read from its table. Such a payload can be read, but not
-  searched. The same is done with every text an answer carries: a script that holds `"api_key": "…"` comes back
-  with that value taken out, and the answer says how many values were withheld.
+  searched. The comparison of two payloads that an instance stores beside them (`payload_diff`) is not passed on
+  at all: read the payload. The same is done with every text of every answer, whichever function gives it: a script that holds
+  `"api_key": "…"`, or a list or an object behind such a key (`"tokens": ["…"]`), comes back with that value
+  taken out, and the answer says so. It goes by the name of an XML element, or of a JSON key in quotes. A secret
+  under a name that suggests nothing is not recognised, nor one written another way: a key whose letters are
+  written as escapes, or markup whose brackets are written as numbered entities (measured: none of 6,631
+  captured changes on the test instance writes markup that way).
 - **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
   away from the server. `SERVICENOW_TABLE_ALLOW` names the only tables the server may ask for; that list has to
   include the tables the server reads for its own checks (`npm run doctor` lists them, `sys_*` covers most). The
   functions also walk references into `sys_package`, `sys_upgrade_history_log`, `sys_ui_section`, `sys_ui_list`,
   `sys_user`, `sys_user_role` and `domain`, which the doctor does not list on lines of their own. A name can end
-  in `*`. One set of rules decides for every request, whichever function sends it:
+  in `*`. A table that both lists name is closed, and an empty `SERVICENOW_TABLE_ALLOW` allows every table that
+  is not denied. One set of rules decides for every request, whichever function sends it:
 
   - A closed table is not asked for, and it is not reached through a dot-walk or a database view. `sn_schema`
     and `sn_dependencies` do not describe it either.
@@ -162,8 +183,10 @@ provider, the data leaves your network. Five things limit what can go that way:
     and of its child tables; an archive table, `ar_<table>`, extends nothing either. Which tables are parts of
     which, the instance lists in `sys_table_rotation_schedule`, and the server goes by that list: measured, 319
     of 327 parts are named after their table with four digits, and 8 with one. The list is remembered for ten
-    minutes, and a part that the instance creates in between is not on it: so a table whose name reads like a
-    part of a table that the list knows as rotated counts as a part of it, on the list or not. Where the list
+    minutes, and a part that the instance creates in between is not on it: so a table whose name is that of a
+    rotated table with digits behind it counts as a part of it, on the list or not. Which tables are rotated is
+    read from the list and from the rotations themselves (`sys_table_rotation`), because a rotation that has no
+    part yet is not on the list: 3 of 49 on the test instance. Where the list
     cannot be read, a table whose name ends in digits counts as a part of the table without them. Where the
     table is open and has a closed table below it, its parts and its archive are closed all the same: ask the
     table itself, which leaves those rows out. The archive of a table the deny list names is closed also where
@@ -221,13 +244,22 @@ provider, the data leaves your network. Five things limit what can go that way:
     `sys_dictionary_override` under the same rules as any table: a list that closes it, or does not name it,
     takes the name off every reference, so name it on `SERVICENOW_TABLE_ALLOW` (`sys_*` does).
   - The text of comments and work notes is rows of `sys_journal_field`: it is left out where that table is closed.
-  - The server's own look-ups follow the same rules. Five tables are read without them, because the rules are
+  - The server's own look-ups follow the same rules. Six tables are read without them, because the rules are
     decided from them: `sys_db_object`, `sys_db_view`, `sys_db_view_table`, `sys_dictionary` and, for the parts
-    of rotated tables, `sys_table_rotation_schedule`. Do not close the first four; a list that closes
-    `sys_db_object` or `sys_dictionary` through a parent table closes everything. For `SERVICENOW_TABLE_ALLOW`
-    that means it has to name `sys_metadata`, which the two extend: `sys_*` does. A list that closes the fifth
-    makes the server go by the names of tables instead.
-  - Where the server cannot establish which tables a request reads from, it does not send it.
+    of rotated tables, `sys_table_rotation_schedule` and `sys_table_rotation`. Do not close the first four; a
+    list that closes `sys_db_object` or `sys_dictionary` through a parent table closes everything. For
+    `SERVICENOW_TABLE_ALLOW` that means it has to name `sys_metadata`, which the two extend: `sys_*` does. A
+    list that names one of the last two as closed makes the server go by the names of tables instead. And to
+    prove that the instance leaves the rows of a closed table out of a table above it, the server asks that
+    table for a sys_id and for the class of one row: those answers are not passed on.
+  - Where the server cannot establish which tables a request reads from, it does not send it. That includes
+    what is too large to establish. The rows of closed tables are left out of a table above them by naming their
+    classes in the query, and a query has a length: with more closed tables below a table than fit into 6,000
+    characters, that table is refused, and one of its open child tables has to be asked. Measured: with a table
+    closed that has 1,348 tables below it, its parent was refused that way. The server follows a table to its
+    parents through 32 levels, reads up to 2,000 tables per question about what a deny list closes and 3,000
+    below a table with an allow list, and follows what a table shows as its name through six tables. Beyond
+    any of these it does not guess: the request is refused.
 
   A closed table is reported as "could not be checked", as an error of kind `blocked`.
 
@@ -271,14 +303,18 @@ many. The npm scripts do not write it.
 ## Requests, caching and pauses
 
 - A list that is longer than one answer is read by pages (`nextOffset`). A sorted query on a table is sent with
-  the sys_id as its last sort key, so that every row comes once: without it, rows that are equal in what the
+  the sys_id as a sort key, added at the end where the query does not sort by it already, so that every row
+  comes once: without it, rows that are equal in what the
   query sorts by change places between pages (measured: 989 different rows in a thousand captured changes read
   newest first). The `query` of an answer shows the key. A row of a database view has no sys_id of its own: its
   keys are the sys_ids of the tables the view joins, where the view carries them, and the answer says so where
   it does not, because the rows of such a view cannot all be told apart.
-- One `sn_query` is one request, plus five to seven the first time a table is used: to check its field names, and
-  to look for rules that filter, archive or rotate it. On a database view, one more to read which fields it takes,
-  and two for each field it is filtered, sorted or counted by for the first time in ten minutes. The other
+- One `sn_query` is one request, plus what the first use of a table takes: one to read what the table is, one
+  for every 500 fields of its dictionary, three to look for rules that filter, archive or rotate it, and more
+  where a value has to be looked up. Measured on the tables of one instance: five to seven. On a database view,
+  one more to read which fields it takes, and one to three for each field it is filtered, sorted or counted by
+  for the first time in ten minutes: two as a rule, one where the view is already known to have a row, and each
+  time anew while it has none. At most twenty fields of a view are proven in one call. The other
   functions cost more: `sn_origin` 2 to 6 as measured on seven kinds of records, and a few more where a record
   has to be looked up in several places, `sn_upgrade_skips` about 10, `sn_dependencies` 25 to 35 (about 18 for
   one field), `sn_instance` about 50. Every answer carries its count in `requests`. At most eight requests are
@@ -317,7 +353,11 @@ many. The npm scripts do not write it.
   joins.
 - A `429 Too Many Requests` is waited out once, for at most five seconds.
 - After a rejected login the server sends nothing for 60 seconds, unless the env file holds new credentials. While
-  no request has ever succeeded, an unreachable instance pauses it for 15 seconds.
+  the instance has never answered, a request that fails to get an answer of it pauses the server for 15 seconds:
+  a connection that fails, a request that runs out of time, a redirect, or an answer that is not the answer of
+  an instance.
+- One request of a function can be sent up to three times: once more with new credentials after a rejected
+  login, and once more after a `429`. The audit log shows that as `sent`.
 
 ## Setup
 
@@ -349,7 +389,7 @@ npx -y github:munirad7s/servicenow-sparring-mcp doctor
 | `SERVICENOW_ENV_FILE` | Path to a file with the variables above. `~` means your home folder |
 | `SERVICENOW_TABLE_ALLOW`, `SERVICENOW_TABLE_DENY` | Optional. Table names or prefixes ending in `*`, separated by commas |
 | `SERVICENOW_AUDIT_LOG` | Optional. A file that receives one line per request |
-| `SERVICENOW_TIMEOUT_MS` | Optional request timeout, default 30000 |
+| `SERVICENOW_TIMEOUT_MS` | Optional request timeout, default 30000, between 1000 and 120000 |
 
 Variables that are set win over the file; an empty variable counts as not set. Only `SERVICENOW_*` keys are taken
 from the file. See [`.env.example`](.env.example).
@@ -365,8 +405,11 @@ npm run doctor
 ```
 
 This checks the address and the login with one request, then lists the tables the functions read and whether the
-account can read each one, and finally the release, the Aggregate API and the roles of the account. Nothing has to
-be installed on the instance.
+account can read each one (44 of them; the tables behind the references named above are not on lines of their
+own), and finally the release, the Aggregate API and the roles of the account. Nothing has to be installed on the
+instance. It ends with 1 where no table can be read, or where the instance drops a condition the functions rely
+on. A table that cannot be read, an Aggregate API that cannot be used, or roles that cannot be told are said in
+its lines and do not change how it ends.
 
 It also asks the instance about each field the server filters by in queries it writes itself: those of
 `sn_delta`, `sn_origin`, `sn_upgrade_skips` and `sn_plugins`, and those it reads the dictionary with, 63 fields of
@@ -431,7 +474,9 @@ It asks the instance four questions and shows the rows behind each answer, with 
 | Who made the captured changes? | the authors of the update rows; where none is left, the author of a current version that came from an update set | `capturedBy`: people, system accounts, nobody, or unknown |
 
 "No vendor version exists" is said only where the versions of every source could be counted and each source is one
-the tool classifies. A version from an update set counts as a capture also where its update row is gone.
+the tool classifies. A version from an update set counts as a capture also where its update row is gone. "Older
+than its first captured change" means by more than five seconds: a record made here is captured as it is saved,
+and the two are written a moment apart.
 
 | Delivered by | Changed here | Created | Verdict |
 |---|---|---|---|
@@ -462,9 +507,11 @@ its first capture.
 Three kinds of record need a detour. A dictionary entry or a field label that was never captured stores no update
 name; asked for by the name it would get, it is found by the table and field that name describes. A record of
 another class that stores no name is looked up under the name its class gives its records: the first and the last
-five names of the class are read, and where all of them are built as `<table>_<sys_id>`, the record is judged
-under the name it would get. A warning says so. Where no record of the class carries a name, or the names follow
-another rule, the verdict is `unknown`. And the entry of
+five names of the class are read, and where all of them are one word that can be the name of a table, followed
+by the sys_id of their record, the record is judged under the name it would get. That word is the table as a
+rule, and the same word for all ten is what counts. A warning says so. Where no record of the class carries a
+name, where not all of them are in view, or where the names follow another rule, the verdict is `unknown`. And
+the entry of
 a system field belongs to no package, because the platform generates it together with the table: for it, the
 package of the table answers the first question, and the answer says so. The system fields are `sys_id`,
 `sys_created_on`, `sys_created_by`, `sys_updated_on`, `sys_updated_by`, `sys_mod_count`, `sys_class_name`,
@@ -479,8 +526,16 @@ it is not measured.
 
 "Changed here" is decided on stored codes, not on labels: an account that reads German gets "Übersprungen" where
 an English one gets "Skipped". Among the entries of upgrades, the newest one that says "not overwritten because it
-differs" counts, also when a later patch failed on the same file. A record that was deleted once and made again
-is not called deleted.
+differs" counts, also when a later patch failed on the same file, unless it was reviewed as reverted or a newer
+vendor version has become the current one since. The ten newest entries are read: where none of them says so
+and there are more, the answer is "unknown". Where the instance does not list which code means what, the codes
+of a new instance are used, and the answer says so. A record that was deleted once and made again is not called
+deleted.
+
+Asked by a sys_id alone, a record that no longer answers is looked for by the names that end in that sys_id:
+among the captured changes, then the versions, then the entries of upgrades. Only where none of them knows it
+is the verdict `not_found`. Entries of upgrades that the account cannot read are a missing witness: the verdict
+stands without them, and a warning says what was not looked for.
 
 An `unknown` always comes with its reason in `explanation`.
 
@@ -550,10 +605,23 @@ What follows from that:
   controls, reports or integrations. The answer lists what is not covered.
 - `sn_upgrade_skips` lists records an upgrade did not overwrite and that have a review entry. Each one needs a
   review. It is not a prediction that something breaks, and it describes only the instance that answered. For each
-  entry it says who made the captured changes to the record: people, system accounts only, or nobody.
+  entry it says who made the captured changes to the record: people, system accounts only, or nobody; where
+  that could not be counted, the entry comes without it and a warning says why. Where the history of upgrades
+  cannot be read, it lists the entries of every upgrade, and where no family upgrade is among the last thirty,
+  those of the latest one: the answer says which it took.
 - Encoded queries are parsed with a strict grammar. Related-list queries (`RLQUERY`), tag conditions, catalog
   variables and the shorthand operators `*`, `%`, `!*` are refused, because they cannot be checked.
-- One answer carries about 60,000 characters of rows. Longer values are cut and marked.
+- One answer carries about 60,000 characters of rows. Longer values are cut and marked, and the first row is
+  always shown: where it is larger than that by itself, its values are cut further. `sn_schema` cuts its list of
+  fields the same way; `sn_plugins` and `sn_dependencies` bound their answers by the number of entries.
+- The people and the system accounts behind captured changes are told apart by the user name: an empty author,
+  `system`, `guest` and a name with `@snc.` in it count as system accounts. An account of your own that a job or
+  an integration runs under counts as a person.
+- `sn_query` warns about business rules that run on every read of the table asked for and of its parents. Rules
+  on the table `global` run on every table: only `sn_instance` counts those.
+- A count per value asks the Aggregate API for every group and shows a page of them, so each page of a long list
+  of groups costs the whole count again. A list field is counted by its whole content: a row with "a,b" and a
+  row with "a" are two groups, and the answer says so. A journal field cannot be counted by.
 
 The resource `servicenow-sparring://limitations` carries the full list to the agent.
 
@@ -576,13 +644,16 @@ receive. In the Windows command prompt, write the JSON with escaped double quote
 
 `npm run compare` asks the instance a second time, past everything the server does to a request, and ends with 1
 if anything differs. It reads the dictionary one table of the parent chain after the other and compares each
-field with what `sn_schema` says: type, reference, mandatory, read-only, length, deactivated, choice list, the
-table that defines it, and its label. And it sends a few hundred encoded queries to the Table API as they are and
-through `sn_query`: one the server passes on has to bring the same total and the same first rows, and the ones it
-refuses on purpose are counted apart. It reads whole rows both ways and compares them cell by cell: a cell may
-differ only where the server marks it, as withheld or as cut. And it holds counts per value against the Aggregate
-API, read by pages. It prints counts, and for a difference the field or the query concerned, never a value. Run it
-with no table closed on the machine.
+field with what `sn_schema` says: type, reference, mandatory, read-only, length, deactivated, whether it takes
+its values from a choice list, the table that defines it, and its label. And it sends a few hundred encoded
+queries to the Table API as they are and through `sn_query`: one the server passes on has to bring the same total
+and the same first rows, and the ones it refuses on purpose are counted apart. It reads rows both ways, for a
+fixed selection of fields, and compares them cell by cell: a cell may differ where the server marks it, as
+withheld or as cut, and where it keeps a time as it is stored, in UTC. And it holds counts per value against the
+Aggregate API, read by pages, and tries up to twelve of the fields that each of up to twelve database views
+lists. It prints counts, and for a difference the field or the query concerned, never a value. A read that the
+server fails and the instance answers when asked directly is a difference; one that neither answers is counted
+as left out, so look at those counts as well as at how it ends. Run it with no table closed on the machine.
 
 With `--closed` it asks the other question, for each table named: with that table closed, does anything of it
 come through?
@@ -598,9 +669,11 @@ behind references, conditions, sorts and counts through a reference, text search
 captured changes. A row, a name or a count of the closed table that comes back is a finding, and it ends with 1.
 A check counts as passed only where the server refuses because of the closed table, or answers without anything
 of it: a refusal for another reason is listed apart, because it proves nothing about the closed table. The trial
-closes a table by a deny list, and per table it tries six tables below it, eight fields that point into it and
-six views. It does not try a dot-walk of more than one step, the parts of a rotated table, a view that joins a
-view, or records captured under a name that does not begin with their table.
+closes a table by a deny list, and per table it tries the table itself and five tables below it, eight fields
+that point into it (not those of tables whose names begin with `sys_`, `var__`, `ts_` or `v_`) and six views. It
+does not try a dot-walk of more than one step, the parts of a rotated table, a view that joins a view, or records
+captured under a name that does not begin with their table. A check that could not be run, because a read or a
+count it is built on failed, is listed and makes it end with 1 as well.
 
 To check the verdicts of `sn_origin` by hand, let it write a sheet:
 
@@ -608,9 +681,10 @@ To check the verdicts of `sn_origin` by hand, let it write a sheet:
 npm run --silent origin-check -- 25 --sheet > sheet.csv
 ```
 
-That is one line per judged record instead of counts: 25 files the last upgrade skipped, 25 random application
-files and 25 random captured changes, each with its verdict, a link that opens the record, and two empty columns
-for your own verdict. The sheet names records of your instance, so keep it to yourself.
+That is one line per judged record instead of counts: up to 25 files the last upgrade skipped, up to 25 random
+application files and up to 25 random captured changes, each with its verdict, a link that opens the record, and
+two empty columns for your own verdict. A sample is smaller where the instance has fewer such records, or where
+a record could not be judged. The sheet names records of your instance, so keep it to yourself.
 
 What was tested, and what was not:
 

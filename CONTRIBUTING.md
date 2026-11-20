@@ -40,10 +40,12 @@ depend on it: it leaves unknown fields out of a row, and it answers "Invalid tab
 
 A rule that keeps something back (a secret, a row of a closed table, a verdict that is not established) needs a
 test that fails without it. To see whether it has one, take the rule out or turn it round, one line at a time,
-and run the tests. Since 0.3.4 that was done for 470 lines, and 62 of the changes went unnoticed at first.
+and run the tests. Since 0.3.4 that was done for 567 lines, and 76 of the changes went unnoticed at first. Of 17
+changes that a reviewer of 0.4.1 expected no test to notice, 8 were not noticed.
 
 If you change how a tool reads the instance, run `npm run smoke` and `npm run compare` against a real instance and
 say in the pull request which release it was. `npm run compare` asks the instance a second time, past the server,
-and ends with 1 if a field or a query comes out differently: its first run found rows that change places between
-pages. If you change what a closed table keeps back, run `npm run compare -- --closed <tables>` as well. If you
+and ends with 1 if a field or a query comes out differently, or if the server fails a read that the instance
+answers: its first run found rows that change places between pages. A read that neither answers is counted as
+left out, so look at those counts too. If you change what a closed table keeps back, run `npm run compare -- --closed <tables>` as well. If you
 change `sn_origin`, run `npm run origin-check` before and after.

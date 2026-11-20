@@ -5,6 +5,15 @@ answer; such changes are listed under "Changed".
 
 ## Unreleased
 
+Five reviews of 0.4.1, each from one corner: whether its fixes hold, whether the rules for closed tables hold,
+which changes of one line no test would notice, whether the documents say what the code does, and what makes a
+call slow or keeps it from coming back. They named about ninety points. Each claim about how an instance
+behaves was measured before anything was changed, and the measuring decided several of them: the limit on the
+length of a request sits on its first line, not on its address; a group never comes with a label that was not
+asked for; a date written with single digits or a `T` is read like one written in full; and none of the eight
+tables with a rule for the names of records has a table below it. Of 17 changes that one review expected no test
+to notice, 8 were not noticed; each has its test now.
+
 ### Security
 
 - **A rule for a table did not hold for a table below it, or for a view over one.** What keeps back the name of a
@@ -47,6 +56,25 @@ answer; such changes are listed under "Changed".
   parent. It counts as unread now, as a row without the table name always did.
 - A view that joins a table whose place could not be read: its fields named like the value of a system property
   are withheld by name, as they already were for a view the instance does not list.
+
+### Looked at, and left as it is
+
+- **A condition on an ordinary text field still tells whether the text contains a given piece.** A review showed
+  that a secret written into a script can be read that way piece by piece, although the server takes it out of
+  the text it returns. Closing that would mean refusing every search in scripts, which is what the server is
+  used for, and a rule for the forms it recognises would stop the search that names the key and not the one
+  that names what stands behind the value. The README and SECURITY.md say so now: only fields of a secret type,
+  the values of system properties and fields that carry whole records are closed to comparisons.
+- **A secret under a disguised name is not recognised.** A JSON key whose letters are written as escapes, and
+  markup whose brackets are written as numbered entities, pass. Measured: none of 6,631 captured changes writes
+  markup that way. What the server takes out of a text is a net for the usual forms, and the documents say so.
+- **What a view joins and where a reference points is still kept for ten minutes.** The look at the table of
+  tables, once in thirty seconds, sees a table that was created, removed or moved, not a view or a field that
+  was changed.
+- **A field called `value` is read as it is by an account that cannot read the table of tables.** A review asked
+  to withhold it there, because a table below `sys_properties` would not be known as one. That would withhold
+  the text of every journal entry for such an account, and no instance measured has a table below
+  `sys_properties`.
 
 ### Changed
 

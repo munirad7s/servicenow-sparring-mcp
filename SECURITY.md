@@ -28,9 +28,11 @@ Especially welcome:
 Requests are built in `src/client.ts`, input is checked in `src/query.ts`, settings are read in `src/config.ts`.
 The rules for tables that are closed on the machine are in `src/closed.ts`; the client asks them for every request,
 whichever function sends it. What is taken out of an answer before it leaves the server is decided in
-`src/tools/shared.ts` and `src/tools/query.ts`.
+`src/tools/shared.ts` and `src/tools/query.ts`, and every answer of every function passes `ok()` in
+`src/result.ts`, which reads each of its texts once more for what looks like a secret.
 The tests that hold these promises are in `test/repo.test.ts`, `test/client.test.ts`, `test/config.test.ts` and
-`test/tools.test.ts`. They are a regression guard. They run in CI on every push; they are not a sandbox.
+`test/tools.test.ts`. They are a regression guard. They run in CI on every push to `main` and on every pull
+request; they are not a sandbox.
 
 ## What it does not control
 
@@ -52,5 +54,12 @@ are replaced by a note before an answer leaves the server. That needs the type o
 dictionary. Where the type cannot be read, a field is withheld if its name suggests a secret, and the answer says
 that types were missing. A secret in a field with a harmless name and an unreadable type would pass.
 
+A secret that somebody wrote into an ordinary text, a script or a description, is another matter. The server
+takes out of every text what looks like one by the name of an XML element or of a JSON key in quotes. That is a
+net for the usual forms, not a boundary: a secret under a name that suggests nothing passes, and a condition on
+such a field still tells whether the text contains a given piece. Only fields of a secret type, the values of
+system properties and fields that carry whole records are closed to comparisons.
+
 Give the server an account of its own, with read roles and the role `snc_read_only`. `sn_instance` and the doctor
-command report whether the account has that role.
+command report whether the account has that role. With a token in place of a user name they report the roles as
+unknown: a token does not say whose it is.

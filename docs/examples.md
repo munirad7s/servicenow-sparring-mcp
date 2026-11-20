@@ -2,8 +2,10 @@
 
 These answers come from the stand-in instance of the test suite, so the names and numbers are invented. The shape
 is what an agent receives; long parts are shortened with "…". `requests` is the count of a call on a table the
-server has looked at before: the first call on a table costs five to seven more, for its field names and for the
-rules that filter, archive or rotate it.
+server has looked at before: the first call on a table costs more, five to seven requests as measured, for its
+field names and for the rules that filter, archive or rotate it. A refusal says that the request was not sent.
+That is the read that was asked for: the look-ups that led to the refusal (what the table is, which fields it
+has, whether a value exists) were sent before it.
 
 ## A misspelled field
 
@@ -84,7 +86,7 @@ builds it from a variable that turned out empty.
   "fetchedAt": "2026-11-20T02:14:07.512Z",
   "requests": 1,
   "warnings": [
-    "\"!=\", \"NOT IN\" and \"NOT LIKE\" leave out rows where the field is empty (assigned_to). To count those rows too, add ^ORassigned_toISEMPTY behind the condition."
+    "\"!=\" leaves out rows where the field is empty (assigned_to). To count those rows too, add ^ORassigned_toISEMPTY behind the condition."
   ],
   "table": "incident",
   "query": "assigned_to!=0123456789abcdef0123456789abcdef",

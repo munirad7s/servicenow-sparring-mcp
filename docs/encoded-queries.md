@@ -25,7 +25,7 @@ return no rows instead of all rows, though not in every case. `sn_instance` repo
 | `ON` or `NOTON` without its three parts | `sys_created_onONToday` | refuses |
 | `BETWEEN` without its second value | `priorityBETWEEN2` | refuses |
 | `NOTLIKE` written without the space | `close_notesNOTLIKEx` | refuses |
-| A second condition written after `^^` | `active=false^^priority=1` | sends it as one condition, with a warning |
+| A second condition written after `^^` | `short_description=a^^priority=1` | sends it as one condition, with a warning: the value is `a^priority=1`. On a true/false or a number field such a value is refused for its form |
 | An unknown field in `ORDERBY` | `ORDERBYzzz` | refuses |
 | `LIKE`, `NOT LIKE`, `STARTSWITH`, `ENDSWITH` or `CONTAINS` without a value | `close_notesLIKE` | refuses |
 | `NOT IN` without a value | `close_notesNOT IN` | refuses |
@@ -211,8 +211,10 @@ Also measured:
   (`sys_replication_queue2`), and 30 name the table itself. `syslog0003` extends nothing, is read through the
   Table API like any table, and held 655,964 rows whose class is `syslog` or one of its child tables. The child
   tables have parts of their own, which extend the parts of the parent. An archive table, `ar_<table>`, extends
-  nothing either. The server closes all of them with the table whose rows they hold, and goes by the list, not by
-  the name, where it can read the list.
+  nothing either. The server closes all of them with the table whose rows they hold, and goes by the list where
+  it can read it. The list is kept for ten minutes, and a rotation that has no part yet is not on it at all (3
+  of 49; the rotations themselves are in `sys_table_rotation`). So a table that is not on the list counts as a
+  part all the same where its name is that of a rotated table with digits behind it.
 - An update name is compared without regard to case as well: `name=SYS_SCRIPT_<sys_id>` found the captured change
   of `sys_script_<sys_id>`, and the same in `sys_update_version` and `sys_metadata`.
 - What stands before the sys_id at the end of an update name is mostly the table of the record, but not always:
@@ -269,6 +271,21 @@ Also measured:
   request of 8,192 bytes. `^`, `,` and `=` are written with three characters there, so a query of 2,701 carets
   was the longest of its kind. The server does not send a path with parameters longer than 8,000. The 414 comes
   as a page of HTML, not in the JSON an instance refuses with.
+- An instance refuses in JSON: HTTP 400, 401, 403 and 404 all came with an `error` that carries a message and a
+  detail. HTTP 414 came as a page of HTML. So a refusal below 500 that is not such JSON is not the instance: the
+  server reports it as an answer of something in front of it, not as "may not read" or "no such table".
+- Counted per value, the Aggregate API sends the label of a group only where display values were asked for with
+  `all`: five fields, with the parameter left out, `false` and `true`, came without one.
+- A dictionary entry stores the name of a field 80 characters wide, a label 80, a type 40. Of 288,944 entries
+  with a field name, 9,639 have one that a call to this server cannot give: 9,007 with capitals, the others with
+  a blank, a dash or a dot. All of them are entries of the variables of flow actions and interface components
+  (`var__m_…`), none of a table that holds rows.
+- In the payloads of 6,631 captured changes, the name behind a reference is written with plain double quotes in
+  6,611 and with a quote written as an entity in none; markup inside markup is written with `&lt;` in 182 and
+  with a numbered entity in none.
+- The table of tables had 10,806 rows. Asked for the one changed last and for how many there are, it answered in
+  about 120 milliseconds with 97 bytes. Asked for a name that ends in a given sys_id, the versions (49,263
+  rows) answered in 0.2 seconds, and the entries of upgrades through their reference in 0.1.
 
 ## Not measured
 
@@ -278,7 +295,8 @@ names against the dictionary. Tags and variables are refused wherever a field ca
 dot-walk, in a sort, and as the second field of a comparison. `IN_HIERARCHY` with a sys_id is accepted on the
 strength of its documentation only.
 
-The refusal of a choice label looks at the labels, in every language the instance has, of fields of the queried
-table, of fields a database view takes from its tables, and of fields reached by a dot-walk. For a dot-walk the list
+The refusal of a choice label looks at the labels of the active choices, in every language the instance has, of
+fields of the queried table, of fields a database view takes from its tables, and of fields reached by a
+dot-walk. The label of a choice that was set inactive is not known to it. For a dot-walk the list
 is the one of the table the reference points to: a child table of it can carry a list of its own, which is not
 looked at. Where a list cannot be read, the answer says that the values were not checked.
