@@ -17,6 +17,49 @@ export const FALLBACK_SKIPPED: Record<string, string> = {
   '104': 'Skipped (second pass)',
 }
 
+/** Review state "Reverted", measured. Used only if the instance does not list its own codes. */
+const FALLBACK_REVERTED = ['5']
+
+export interface SkipCodes {
+  /** Dispositions that mean "not overwritten because it differs". A file the upgrade could not apply is not among them. */
+  skipped: Set<string>
+  /** Review states that mean the record was set back to the vendor's version. */
+  reverted: Set<string>
+}
+
+const codeCache = new WeakMap<ServiceNowClient, { at: number; codes: Promise<SkipCodes> }>()
+
+/**
+ * The stored codes behind "Skipped" and "Reverted". The labels an answer carries are in the language of the account,
+ * so a decision is made on the code, and the English labels of the choice lists say which codes are meant.
+ */
+export function skipCodes(sn: ServiceNowClient): Promise<SkipCodes> {
+  const hit = codeCache.get(sn)
+  if (hit && Date.now() - hit.at < 10 * 60_000) return hit.codes
+
+  const fallback = (): SkipCodes => ({
+    skipped: new Set(Object.entries(FALLBACK_SKIPPED).filter(([, label]) => !/error/i.test(label)).map(([code]) => code)),
+    reverted: new Set(FALLBACK_REVERTED),
+  })
+  const codes = sn
+    .query<Record<string, string>>({
+      table: 'sys_choice',
+      query: 'nameINsys_upgrade_history_log,upgrade_history_task^elementINdisposition,state^language=en^inactive=false',
+      fields: ['name', 'element', 'value', 'label'],
+      limit: 200,
+    })
+    .then(({ records }) => {
+      const of = (table: string, element: string, wanted: (label: string) => boolean) =>
+        new Set(records.filter((row) => row.name === table && row.element === element && wanted(String(row.label ?? ''))).map((row) => String(row.value)))
+      const skipped = of('sys_upgrade_history_log', 'disposition', (label) => label.startsWith('Skipped') && !/error/i.test(label))
+      const reverted = of('upgrade_history_task', 'state', (label) => /revert/i.test(label))
+      return { skipped: skipped.size ? skipped : fallback().skipped, reverted: reverted.size ? reverted : fallback().reverted }
+    })
+    .catch(fallback)
+  codeCache.set(sn, { at: Date.now(), codes })
+  return codes
+}
+
 export interface Upgrade {
   sysId: string
   from: string

@@ -8,6 +8,9 @@ export interface Context {
   dict: Dictionary
 }
 
+/** Failures that say the instance could not be used at all, as opposed to one table being closed. */
+export const NO_CONNECTION = new Set(['auth', 'network', 'timeout', 'redirect', 'invalid_response', 'rate_limited'])
+
 export const READ_ONLY = {
   readOnlyHint: true,
   destructiveHint: false,

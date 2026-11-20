@@ -7,8 +7,8 @@
  */
 import { ServiceNowClient } from './client.js'
 import { loadSettings } from './config.js'
-import { accountRoles, NO_CONNECTION, probe, SOURCES } from './tools/instance.js'
-import { errorKind, mapLimit } from './tools/shared.js'
+import { accountRoles, probe, SOURCES } from './tools/instance.js'
+import { errorKind, mapLimit, NO_CONNECTION } from './tools/shared.js'
 
 export async function runDoctor(): Promise<void> {
   // Run by a person in a folder they chose, so a .env there may be used.

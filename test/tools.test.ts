@@ -760,11 +760,14 @@ const change = (extra: Data = {}) => ({
 })
 const version = (state: string, source_table: string, sys_created_on: string, sys_created_by = 'system') => ({ state, source_table, source: '', sys_created_on, sys_created_by })
 
-const skip = (disposition: string, review = 'Not Reviewed') => ({
-  'upgrade_detail.disposition': labelled('10', disposition),
+// The stored codes behind the labels, as measured: the tools decide on the codes.
+const DISPOSITION_CODES: Record<string, string> = { Skipped: '4', 'Skipped Error': '9', 'Skipped Manual Merge': '10', 'Skipped Apply Once': '11' }
+const REVIEW_CODES: Record<string, string> = { 'Not Reviewed': '1', Reviewed: '2', 'Reviewed and Reverted': '5' }
+const skip = (disposition: string, review = 'Not Reviewed', label = disposition) => ({
+  'upgrade_detail.disposition': labelled(DISPOSITION_CODES[disposition] ?? '4', label),
   'upgrade_detail.target_name': 'Example rule',
   'upgrade_detail.upgrade_history.to_version': 'glide-australia-02-11-2026__patch1.zip',
-  state: labelled('1', review),
+  state: labelled(REVIEW_CODES[review] ?? '1', review),
   sys_created_on: '2026-09-25 17:00:00',
 })
 
@@ -791,7 +794,8 @@ test('sn_origin: a delivered record without a customer change is out-of-the-box 
   assert.equal(data.record.package, 'Example package')
   assert.equal(data.record.updateName, NAME)
   assert.ok(data.caveats.length > 0)
-  assert.equal(calls.length, 5)
+  // The record, its update rows, its versions, the entries of upgrades. The versions are counted from the page.
+  assert.equal(calls.length, 4)
 })
 
 test('sn_origin: a change nobody captured shows when an upgrade refused to overwrite the record', async () => {
@@ -1038,20 +1042,139 @@ test('sn_origin: the entry of a system field is judged by the table it belongs t
   const own = await connect(routes('sys_dictionary', 'sys_updated_by', 'sys_app'))
   assert.equal((await own.answer('sn_origin', { sysId: ID })).verdict, 'custom_application_file')
 
-  // Not a system field, or a table without a package: nothing says who delivered the entry.
-  const other = await connect(routes('sys_dictionary', 'word', 'sys_plugins'))
-  assert.equal((await other.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
-  assert.equal(other.sentTo('sys_db_object').length, 0)
+  // Not one of the fields the platform adds itself, also where the name begins like one: nothing says who delivered the entry.
+  for (const element of ['word', 'sys_legacy_id']) {
+    const other = await connect(routes('sys_dictionary', element, 'sys_plugins'))
+    assert.equal((await other.answer('sn_origin', { sysId: ID })).verdict, 'unknown', element)
+    assert.equal(other.sentTo('sys_db_object').length, 0, element)
+  }
   const bare = await connect(routes('sys_dictionary', 'sys_id', ''))
   const undecided = await bare.answer('sn_origin', { sysId: ID })
   assert.equal(undecided.verdict, 'unknown')
   assert.match(undecided.explanation, /belongs to no package/)
 })
 
+test('sn_origin decides on stored codes, so the language of the account does not matter', async () => {
+  // An account that reads German gets "Übersprungen" for the disposition and its own word for the review state.
+  const german = await connect(origin('sys_plugins', [], [], {}, [skip('Skipped', 'Not Reviewed', 'Übersprungen')]))
+  const data = await german.answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ divergence: data.divergence, verdict: data.verdict }, { divergence: 'changed_without_capture', verdict: 'customized' })
+
+  const reverted = { ...skip('Skipped', 'Reviewed and Reverted', 'Übersprungen'), state: labelled('5', 'Geprüft und zurückgesetzt') }
+  const back = await connect(origin('sys_plugins', [], [], {}, [reverted]))
+  assert.equal((await back.answer('sn_origin', { sysId: ID })).verdict, 'out_of_box_as_captured')
+
+  // The instance lists its own codes: they are taken from there, by the English labels of the choice lists.
+  const own = await connect([
+    { table: 'sys_choice', rows: [{ name: 'sys_upgrade_history_log', element: 'disposition', value: '77', label: 'Skipped by policy' }, { name: 'upgrade_history_task', element: 'state', value: '8', label: 'Reverted to base' }] },
+    ...origin('sys_plugins', [], [], {}, [{ ...skip('Skipped'), 'upgrade_detail.disposition': labelled('77', 'Nach Richtlinie übersprungen') }]),
+  ])
+  assert.equal((await own.answer('sn_origin', { sysId: ID })).verdict, 'customized')
+})
+
+test('sn_origin: the newest entry of an upgrade that says "differs" counts, not just the newest entry', async () => {
+  // A patch in October could not apply the file. The family upgrade in September had found it changed, and nobody reverted it.
+  const rows = [{ ...skip('Skipped Error'), sys_created_on: '2026-10-15 12:00:00' }, skip('Skipped Manual Merge')]
+  const { answer } = await connect(origin('sys_plugins', [], [], {}, rows))
+  const data = await answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ divergence: data.divergence, verdict: data.verdict }, { divergence: 'changed_without_capture', verdict: 'customized' })
+  assert.match(data.warnings.join(' '), /did not overwrite it \("Skipped Manual Merge"\)/)
+})
+
+test('sn_origin: a record that was deleted once and made again is not called deleted', async () => {
+  const name = `u_custom_${ID}`
+  const rows = [change({ name, sys_updated_on: '2026-03-02 10:00:00' }), change({ name, action: 'DELETE', sys_updated_on: '2026-03-01 10:00:00' })]
+  // The table of the record does not exist any more, so nothing but the update rows speaks. The newest of them decides.
+  const { answer } = await connect([{ table: 'sys_metadata', rows: [] }, { table: 'sys_update_xml', rows }, { table: 'sys_update_version', rows: [] }])
+  const data = await answer('sn_origin', { updateName: name })
+  assert.equal(data.verdict, 'unknown')
+  assert.match(data.warnings.join(' '), /Update rows or versions exist under this name, but the record itself is not readable/)
+
+  const gone = await connect([{ table: 'sys_metadata', rows: [] }, { table: 'sys_update_xml', rows: [...rows].reverse() }, { table: 'sys_update_version', rows: [] }])
+  assert.equal((await gone.answer('sn_origin', { updateName: name })).verdict, 'deleted_here')
+})
+
+test('sn_origin finds the current version among many, and does not vouch for a source it does not know', async () => {
+  // Eleven versions. Sorted by state, a state the instance added pushes the current one off the page.
+  const many = [...Array.from({ length: 10 }, () => version('archived', 'sys_upgrade_history', '2025-01-01 00:00:00')), version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')]
+  const { answer, sentTo } = await connect([
+    { table: 'sys_metadata', rows: [file('sys_plugins')] },
+    { table: 'sys_update_xml', rows: [] },
+    { table: 'sys_update_version', query: 'state=current', rows: [many[10]] },
+    { table: 'sys_update_version', rows: many },
+    stats('sys_update_version', { sys_upgrade_history: 10, sys_update_set: 1 }),
+  ])
+  const data = await answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ divergence: data.divergence, verdict: data.verdict }, { divergence: 'customer_changes_captured', verdict: 'customized' })
+  assert.equal(data.evidence.versions.current.source_table, 'sys_update_set')
+  assert.equal(sentTo('sys_update_version').at(-1)?.query, `name=${NAME}^state=current^ORDERBYDESCsys_created_on`)
+
+  // A current version that comes from a repository: whose content it is, this tool cannot say.
+  const repo = await connect(origin('sys_store_app', [], [version('current', 'sys_repo_config', '2026-03-01 10:00:00', 'abel')]))
+  const other = await repo.answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ divergence: other.divergence, verdict: other.verdict }, { divergence: 'unknown', verdict: 'unknown' })
+  assert.match(other.warnings.join(' '), /comes from "sys_repo_config", a source this tool does not classify/)
+})
+
+test('sn_origin: an application the company develops elsewhere is not called out-of-the-box', async () => {
+  // Installed from the company's repository it arrives like an application from the store. Its scope carries the company's prefix.
+  const code = { table: 'sys_properties', rows: [{ name: 'glide.appcreator.company.code', value: 'acme' }] }
+  const own = await connect([code, ...origin('sys_store_app', [], [version('current', 'sys_store_app', '2026-03-01 10:00:00')], { 'sys_scope.scope': 'x_acme_claims' })])
+  const data = await own.answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ verdict: data.verdict, provenance: data.provenance }, { verdict: 'custom_application_file', provenance: 'company_application' })
+  assert.match(data.explanation, /this company develops.*neither the vendor's nor a change/)
+
+  // Another vendor's prefix, the platform's own prefix, or no readable company code: an installed application like any other.
+  for (const [routes, scope] of [[[code], 'x_other_claims'], [[code], 'sn_hr_core'], [[], 'x_acme_claims']] as Array<[Route[], string]>) {
+    const other = await connect([...routes, ...origin('sys_store_app', [], [version('current', 'sys_store_app', '2026-03-01 10:00:00')], { 'sys_scope.scope': scope })])
+    const answer = await other.answer('sn_origin', { sysId: ID })
+    assert.deepEqual({ verdict: answer.verdict, provenance: answer.provenance }, { verdict: 'out_of_box_as_captured', provenance: 'installed_application' }, scope)
+  }
+})
+
+test('sn_origin: dates and versions decide more cases, and not more than they can', async () => {
+  // No package at all, changed here, no vendor version: nothing says the vendor delivered it, however old it is.
+  const bare = await connect(origin('', [change()], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')], { sys_package: '' }))
+  const old = await bare.answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ created: old.created, verdict: old.verdict }, { created: 'here', verdict: 'customer_created' })
+
+  // Inside an installed application, the update row is gone. The record is as old as its only version, which came from an update set.
+  const made = await connect(origin('sys_store_app', [], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')], { sys_created_on: '2026-03-01 10:00:00' }))
+  const here = await made.answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ created: here.created, verdict: here.verdict }, { created: 'here', verdict: 'customer_created' })
+
+  // A change marked to be replaced by the next upgrade.
+  const replaced = await connect(origin('sys_plugins', [change({ replace_on_upgrade: 'true' })], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel'), version('previous', 'sys_upgrade_history', '2026-03-01 09:59:59')]))
+  assert.match((await replaced.answer('sn_origin', { sysId: ID })).warnings.join(' '), /marked "replace on upgrade"/)
+
+  // The instance gives no total, and no record comes back: whether it exists is not established.
+  const silent = await connect([{ table: 'sys_metadata', rows: [], noTotal: true }, { table: 'sys_update_xml', rows: [] }, { table: 'sys_update_version', rows: [] }])
+  assert.equal((await silent.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
+})
+
+test('sn_origin still answers from the evidence when the table of application files cannot be read', async () => {
+  const name = `sys_choice_${ID}`
+  const { answer } = await connect([
+    { table: 'sys_metadata', status: 403 },
+    { table: 'sys_choice', rows: [{ sys_id: ID, sys_created_on: '2026-03-01 10:00:00', sys_created_by: 'abel', sys_updated_on: '2026-03-01 10:00:00', sys_updated_by: 'abel' }] },
+    { table: 'sys_update_xml', rows: [change({ name })] },
+    { table: 'sys_update_version', rows: [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')] },
+  ])
+  const data = await answer('sn_origin', { updateName: name })
+  assert.deepEqual({ verdict: data.verdict, table: data.record.table }, { verdict: 'customer_created', table: 'sys_choice' })
+  assert.match(data.warnings.join(' '), /sys_metadata could not be read \(acl\)/)
+
+  // A wrong login is not a missing piece of evidence: the call fails.
+  const rejected = await connect([{ table: 'sys_metadata', status: 401 }])
+  assert.equal((await rejected.call('sn_origin', { sysId: ID })).data.error, 'auth')
+})
+
 test('sn_origin says why, whenever it does not decide', async () => {
   const cases: Array<[string, Route[], RegExp]> = [
     // Measured: one application file in nine belongs to no package, and almost none of those was ever captured.
-    ['no package', origin('', [], []), /belongs to no package.*Nothing on the instance says who delivered it/],
+    ['no package', origin('', [], [], { sys_package: '' }), /belongs to no package.*Nothing on the instance says who delivered it/],
+    // Measured: 492 application files name a package whose own record does not come back.
+    ['a package that cannot be read', origin('', [], []), /package it names could not be read/],
     ['global scope, untouched', origin('sys_scope', [], []), /belongs to the global scope and not to a package/],
     ['changed inside an installed application', origin('sys_store_app', [], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')]), /delivered and then changed, or created here/],
     ['hidden from the account', [{ table: 'sys_metadata', rows: [null] }], /could not be established whether the record exists/],
@@ -1122,43 +1245,41 @@ test('sn_origin: a dictionary entry or label that was never captured has no stor
 
 test('sn_origin finds a never-captured field or label by the update name it would get', async () => {
   // Measured: two in three dictionary entries store no update name, so no record answers to the name itself.
-  const unnamed = (kind: string) => file('sys_plugins', { sys_update_name: '', sys_class_name: kind })
-  const lookup = (kind: string, rows: Data[]): Route[] => [
-    { table: 'sys_metadata', query: 'sys_update_name=', rows: [] },
-    { table: kind, rows },
-    { table: 'sys_metadata', query: `sys_id=${ID}`, rows: [unnamed(kind)] },
-    ...origin(null, [], []).slice(1),
-  ]
+  // A dictionary entry is an application file itself: its own table gives the package along with what it describes.
+  const entry = (kind: string, extra: Data) => ({ ...file('sys_plugins', { sys_update_name: '', sys_class_name: kind }), ...extra })
+  const lookup = (kind: string, rows: Data[]): Route[] => [{ table: 'sys_metadata', query: 'sys_update_name=', rows: [] }, { table: kind, rows }, ...origin(null, [], []).slice(1)]
 
-  const field = await connect(lookup('sys_dictionary', [{ sys_id: 'f'.repeat(32), name: 'cmdb_ci', element: 'name' }, { sys_id: ID, name: 'cmdb_ci_server', element: 'host_name' }]))
+  const field = await connect(
+    lookup('sys_dictionary', [entry('sys_dictionary', { sys_id: 'f'.repeat(32), name: 'cmdb_ci', element: 'name' }), entry('sys_dictionary', { name: 'cmdb_ci_server', element: 'host_name' })]),
+  )
   const data = await field.answer('sn_origin', { updateName: 'sys_dictionary_cmdb_ci_server_host_name' })
   assert.equal(data.verdict, 'out_of_box_as_captured')
-  assert.equal(data.record.updateName, 'sys_dictionary_cmdb_ci_server_host_name')
+  assert.deepEqual({ sysId: data.record.sysId, updateName: data.record.updateName, package: data.record.package }, { sysId: ID, updateName: 'sys_dictionary_cmdb_ci_server_host_name', package: 'Example package' })
   // The name does not say where the table ends and the field begins: every split is asked for, and the row that gives the same name is taken.
   assert.equal(field.sentTo('sys_dictionary')[0].query, 'nameINcmdb,cmdb_ci,cmdb_ci_server,cmdb_ci_server_host^elementINci_server_host_name,server_host_name,host_name,name')
-  assert.equal(field.sentTo('sys_metadata')[1].query, `sys_id=${ID}`)
+  assert.equal(field.sentTo('sys_metadata').length, 1, 'the entry is read once, from its own table')
   assert.equal(field.sentTo('sys_update_xml')[0].query, 'name=sys_dictionary_cmdb_ci_server_host_name^ORDERBYDESCsys_updated_on')
+  assert.equal(field.calls.length, 5)
 
-  const label = await connect(lookup('sys_documentation', [{ sys_id: ID, name: 'incident', element: 'category', language: 'en' }]))
+  const label = await connect(lookup('sys_documentation', [entry('sys_documentation', { name: 'incident', element: 'category', language: 'en' })]))
   assert.equal((await label.answer('sn_origin', { updateName: 'sys_documentation_incident_category_en' })).verdict, 'out_of_box_as_captured')
+
+  // Some delivered records carry a sys_id that is a word. The entry is found all the same.
+  const worded = await connect(lookup('sys_dictionary', [entry('sys_dictionary', { sys_id: 'dict_incident_category', name: 'incident', element: 'category' })]))
+  assert.equal((await worded.answer('sn_origin', { updateName: 'sys_dictionary_incident_category' })).verdict, 'out_of_box_as_captured')
 
   // No such field: that is established, because the dictionary was readable.
   const none = await connect(lookup('sys_dictionary', []))
   assert.equal((await none.answer('sn_origin', { updateName: 'sys_dictionary_incident_no_such_field' })).verdict, 'not_found')
 
-  // The dictionary is not readable, or hides rows: then nothing is established.
-  for (const route of [{ table: 'sys_dictionary', status: 403 }, { table: 'sys_dictionary', rows: [null] }]) {
+  // The dictionary is not readable, hides rows, or has more candidates than one page: then nothing is established.
+  const others = Array.from({ length: 60 }, (_, index) => entry('sys_dictionary', { sys_id: String(index).padStart(32, '0'), name: 'incident', element: `other_${index}` }))
+  for (const route of [{ table: 'sys_dictionary', status: 403 }, { table: 'sys_dictionary', rows: [null] }, { table: 'sys_dictionary', rows: others }]) {
     const blind = await connect([{ table: 'sys_metadata', rows: [] }, route, ...origin(null, [], []).slice(1)])
     const unknown = await blind.answer('sn_origin', { updateName: 'sys_dictionary_incident_category' })
     assert.equal(unknown.verdict, 'unknown')
     assert.match(unknown.warnings.join(' '), /sys_dictionary could not be read completely/)
   }
-
-  // The entry exists, but the file behind it may not be read.
-  const hiddenFile = await connect([{ table: 'sys_metadata', rows: [] }, { table: 'sys_dictionary', rows: [{ sys_id: ID, name: 'incident', element: 'category' }] }])
-  const hidden = await hiddenFile.answer('sn_origin', { updateName: 'sys_dictionary_incident_category' })
-  assert.equal(hidden.verdict, 'unknown')
-  assert.match(hidden.warnings.join(' '), /may not read it/)
 })
 
 test('the query that finds a record by the name built from its content', () => {

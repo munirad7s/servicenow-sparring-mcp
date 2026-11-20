@@ -150,7 +150,7 @@ it.
 ## Requests, caching and pauses
 
 - One `sn_query` is one request, plus a few the first time a table is used: to check its field names, and to
-  look for business rules that run on every read. The other functions cost more: `sn_origin` 5 to 8,
+  look for business rules that run on every read. The other functions cost more: `sn_origin` 4 to 9,
   `sn_dependencies` 25 to 30 (about 15 for one field), `sn_instance` about 50. Every answer carries its count in
   `requests`. At most six requests of one function are in flight at a time.
 - What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is
@@ -259,7 +259,7 @@ It asks the instance four questions and shows the rows behind each answer, with 
 
 | Question | Evidence | Answer |
 |---|---|---|
-| Who delivered the record? | the class of the package it belongs to (`sys_metadata.sys_package`) | `provenance`: vendor, installed application, custom application, global scope |
+| Who delivered the record? | the class of the package it belongs to (`sys_metadata.sys_package`), and for an installed application its scope | `provenance`: vendor, installed application, company application, custom application, global scope, or unknown |
 | Was it changed here? | customer update rows (`sys_update_xml`), the version marked current (`sys_update_version`), and the newest entry of an upgrade that refused to overwrite it (`upgrade_history_task`) | `divergence` |
 | Was it created here, or delivered? | a vendor version of the record exists; inside a delivered package also: the record is older than its first captured change | `created` |
 | Who made the captured changes? | the authors of the update rows | `capturedBy`: people, or system accounts only |
@@ -267,6 +267,7 @@ It asks the instance four questions and shows the rows behind each answer, with 
 | Delivered by | Changed here | Created | Verdict |
 |---|---|---|---|
 | custom application | any | | `custom_application_file` |
+| company application: installed, with the company's own prefix in its scope | any | | `custom_application_file` |
 | platform or installed application | no | | `out_of_box_as_captured` |
 | platform or installed application | yes | delivered | `customized` |
 | platform or installed application | yes | here | `customer_created` |
@@ -276,6 +277,7 @@ It asks the instance four questions and shows the rows behind each answer, with 
 | no package (global scope) | yes | here: no vendor version | `customer_created` |
 | no package (global scope) | no | delivered: a vendor version exists | `out_of_box_as_captured` |
 | no package (global scope) | no | otherwise | `unknown` |
+| a package that cannot be read, or an application customization | any | | `unknown` |
 | any but a custom application | the evidence it needs is not readable, or rows of it are hidden | | `unknown` |
 
 Inside an installed application both happen often, a file made here and a delivered file changed here, so an
@@ -286,6 +288,17 @@ Two kinds of record need a detour. A dictionary entry or a field label that was 
 name; asked for by the name it would get, it is found by the table and field that name describes. And the entry of
 a system field such as `sys_id` belongs to no package, because the platform generates it together with the table:
 for it, the package of the table answers the first question, and the answer says so.
+
+An application a company develops on one instance and installs on another from its own repository arrives there
+like an application from the store. Its scope tells them apart: it begins with `x_`, followed by the company code
+of the instance (`glide.appcreator.company.code`). Such a file is reported as `custom_application_file`, not as
+out-of-the-box. This rule follows the naming of scoped applications; the test instance has no such application, so
+it is not measured.
+
+"Changed here" is decided on stored codes, not on labels: an account that reads German gets "Übersprungen" where
+an English one gets "Skipped". Among the entries of upgrades, the newest one that says "not overwritten because it
+differs" counts, also when a later patch failed on the same file. A record that was deleted once and made again
+is not called deleted.
 
 An `unknown` always comes with its reason in `explanation`.
 
@@ -299,11 +312,11 @@ On one instance of the Australia release, with `npm run origin-check`:
   name and the verdict is `unknown`. This is not an independent confirmation for all 77: 36 of them have no
   customer update at all, and `sn_origin` knows about them only because it reads what the upgrade found. Before it
   did, it called those 36 out-of-the-box.
-- **198 random application files:** 184 `out_of_box_as_captured`, 14 `unknown`. It abstains on one file in
-  fourteen. Those belong to no package: parts of flows and actions, which are captured with their parent and carry
-  no name of their own, and the tables of the text index.
-- **197 random captured changes:** 100 `customer_created`, 69 `customized`, 26 `custom_application_file`, 2
-  `deleted_here`. Of the 69 customized records, 60 were captured under system accounts and 9 by people.
+- **200 random application files:** 193 `out_of_box_as_captured`, 7 `unknown` (14 of 198 in the sample before).
+  Those belong to no package: parts of flows and actions, which are captured with their parent and carry no name
+  of their own, and the tables of the text index.
+- **199 random captured changes:** 103 `customer_created`, 77 `customized`, 18 `custom_application_file`, 1
+  `unknown`. Of the 77 customized records, 62 were captured under system accounts and 15 by people.
 - **Fields nobody touched.** Two in three dictionary entries of the instance (207,943 of 299,720) store no update
   name, because they were never captured. Asked for by the name they would get, such as
   `sys_dictionary_incident_category`, they are found by the table and field the name describes.
@@ -319,7 +332,7 @@ What follows from that:
   notices, by comparing content, and this server cannot compare content. Where no upgrade has looked at a record
   yet, such a change is invisible here.
 - **"Customized" is the platform's word, not a statement about people.** On this instance most of the customized
-  records were changed by installations, upgrades and jobs (60 of 69 in the sample), and 2,783 of all 6,631
+  records were changed by installations, upgrades and jobs (62 of 77 in the sample), and 2,783 of all 6,631
   captured changes have no person on them at all. `capturedBy` tells them apart, `sn_delta` counts them, and its `peopleOnly`
   leaves them out.
 - **The rule is measured on one instance.** The verdicts were compared with the upgrade engine and with the stored

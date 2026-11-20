@@ -5,7 +5,7 @@ import { ServiceNowError } from '../errors.js'
 import { assertPlainValue, isPlainValue } from '../query.js'
 import { fail, ok, rowSchema, source, sourceShape, withheldWarning } from '../result.js'
 import { traced } from '../trace.js'
-import { errorKind, mapLimit, READ_ONLY, type Context } from './shared.js'
+import { errorKind, mapLimit, NO_CONNECTION, READ_ONLY, type Context } from './shared.js'
 import { recentUpgrades } from './upgrade.js'
 
 /** The tables the tools read. sn_instance and the doctor command report which of them this account can reach. */
@@ -52,8 +52,6 @@ export const SOURCES: Array<{ table: string; usedBy: string }> = [
   { table: 'sys_ui_list_element', usedBy: 'sn_dependencies for one field (lists)' },
 ]
 
-/** Failures that say the instance could not be used at all, as opposed to one table being closed. */
-export const NO_CONNECTION = new Set(['auth', 'network', 'timeout', 'redirect', 'invalid_response', 'rate_limited'])
 
 export interface Probe {
   /** "readable", "row_restricted" (rows exist, none is visible to this account), or the kind of failure. */

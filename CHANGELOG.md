@@ -25,6 +25,19 @@ answer; such changes are listed under "Changed".
   a word on a number field matches nothing, also with `!=`; `LIKE` on a number field matches nothing where `=`
   finds rows; a duration compared with a number of seconds matches every filled row. All of these are refused,
   and the error says how to write the value.
+- **`sn_origin` decided "changed here" on English labels.** An account that reads another language gets
+  "Übersprungen" for "Skipped", and a skipped file was then reported as out-of-the-box. The decision is now made
+  on the stored codes.
+- **`sn_origin` looked only at the newest entry of an upgrade.** A patch that failed on a file hid the family
+  upgrade before it that had found the file changed. It called a record deleted when any old update row was a
+  delete, also where a newer one had made it again. It missed the current version among more than ten, and called
+  a record unchanged whose current version comes from a source it does not know.
+- **`sn_origin` reported an application the company develops itself as out-of-the-box** when it was installed from
+  the company's repository. It is recognised by the company's prefix in its scope.
+- `sn_origin` answered "not found" for a dictionary entry whose sys_id is a word, failed completely when
+  `sys_metadata` could not be read, treated a record whose package cannot be read as one without a package, and
+  judged a field whose name merely begins with `sys_` by its table. It now needs four requests where it needed
+  five.
 - **A condition on a journal field was sent, and a journal field read without display values came back empty
   without a word.** Measured: `work_notesISEMPTY` and `work_notesISNOTEMPTY` return the same rows, and
   `work_notesLIKEa` finds more incidents than there are work notes. Such a condition is refused, with the query on
