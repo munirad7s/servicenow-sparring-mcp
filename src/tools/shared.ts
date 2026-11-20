@@ -52,7 +52,13 @@ const PAYLOAD_FIELDS = new Map<string, string[]>([
  * A table, and the tables it holds rows of by its name: the archive of a table and the parts of a rotated one
  * carry the same fields with the same content, under a name of their own.
  */
-const withBases = (table: string): string[] => [table, ...holdsRowsOf(table).flatMap(withBases)]
+const withBases = (table: string): string[] => {
+  // Every name once. A name can be read as an archive and as a part in several ways, each of which can be read
+  // again: followed without a memory of the names seen, eighty characters cost ten seconds.
+  const names = new Set([table])
+  for (const name of names) for (const base of holdsRowsOf(name)) names.add(base)
+  return [...names]
+}
 /** What a list by table says about a table, or about the table whose rows it holds. */
 const forTable = <T>(list: Map<string, T>, table: string): T | undefined => withBases(table).map((name) => list.get(name)).find((entry) => entry !== undefined)
 
@@ -86,16 +92,53 @@ const ATTRIBUTES = String.raw`(?:\s+[\w:.-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*`
 /** The name of an element, with the prefix it may carry: "wsse:Password". */
 const ELEMENT = String.raw`[A-Za-z_][\w.:-]*`
 
+/** How markup is written in a text: as it is, or with entities, as where one payload carries another. */
+interface Markup {
+  lt: string
+  gt: string
+  sectionStart: string
+  sectionEnd: string
+  /** An opening tag, with the name of the element as its first group. */
+  open: string
+  /** The beginning of a CDATA section, with blanks in front. */
+  section: string
+  /** The end of a closing tag, behind the name. */
+  closed: string
+}
+const PLAIN_MARKUP: Markup = { lt: '<', gt: '>', sectionStart: '<![CDATA[', sectionEnd: ']]>', open: String.raw`<(${ELEMENT})${ATTRIBUTES}\s*>`, section: String.raw`\s*<!\[CDATA\[`, closed: String.raw`\s*>` }
+/** Measured on real payloads: where a payload carries another, its markup is written with entities, CDATA sections included. */
+const ESCAPED_MARKUP: Markup = {
+  lt: '&lt;',
+  gt: '&gt;',
+  sectionStart: '&lt;![CDATA[',
+  sectionEnd: ']]&gt;',
+  open: String.raw`&lt;(${ELEMENT})(?:\s(?:(?!&gt;|&lt;)[^<>])*)?&gt;`,
+  section: String.raw`\s*&lt;!\[CDATA\[`,
+  closed: String.raw`\s*&gt;`,
+}
+
 /**
  * The elements of a text that hold nothing but text, <tag …>text</tag>, with the text plain or in CDATA sections.
  * Read in one pass. Only the elements whose name is wanted are looked into.
  */
-function* simpleElements(text: string, wanted: (tag: string) => boolean): Generator<{ start: number; end: number; tag: string; plain: string }> {
-  const firstEnd = finder(text, ']]>')
-  const OPEN = new RegExp(String.raw`<(${ELEMENT})${ATTRIBUTES}\s*>`, 'g')
-  const CDATA = /\s*<!\[CDATA\[/y
+function* simpleElements(text: string, wanted: (tag: string) => boolean, markup: Markup = PLAIN_MARKUP): Generator<{ start: number; end: number; tag: string; plain: string }> {
+  const { lt, sectionStart, sectionEnd } = markup
+  const firstEnd = finder(text, sectionEnd)
+  const OPEN = new RegExp(markup.open, 'g')
+  const CDATA = new RegExp(markup.section, 'y')
   const BLANKS = /\s*/y
-  const CLOSED = /\s*>/y
+  const CLOSED = new RegExp(markup.closed, 'y')
+  // The end of a closing tag is looked for once per place, however many elements end there: the blanks inside it
+  // would otherwise be read anew from every beginning that shares the end.
+  const closing = { from: -1, to: -1 }
+  const endOfClosing = (from: number) => {
+    if (closing.from !== from) {
+      CLOSED.lastIndex = from
+      closing.from = from
+      closing.to = CLOSED.test(text) ? CLOSED.lastIndex : -1
+    }
+    return closing.to
+  }
   // The blanks behind one place are skipped once, however many elements end there.
   const skipped = { from: -1, to: -1 }
   const behindBlanks = (from: number) => {
@@ -120,7 +163,7 @@ function* simpleElements(text: string, wanted: (tag: string) => boolean): Genera
         break
       }
       walked.push(last)
-      const next = text.startsWith('<![CDATA[', last + 3) ? text.indexOf(']]>', last + 12) : -1
+      const next = text.startsWith(sectionStart, last + sectionEnd.length) ? text.indexOf(sectionEnd, last + sectionEnd.length + sectionStart.length) : -1
       if (next < 0) break
       last = next
     }
@@ -141,29 +184,27 @@ function* simpleElements(text: string, wanted: (tag: string) => boolean): Genera
       const first = firstEnd(inner)
       if (first < 0) continue
       last = endOfRun(first)
-      after = behindBlanks(last + 3)
+      after = behindBlanks(last + sectionEnd.length)
     } else {
-      after = text.indexOf('<', from)
+      after = text.indexOf(lt, from)
       // No "<" is left, or the element is empty.
       if (after <= from) continue
     }
     // The text is cut out only where the element ends as it should: ten thousand beginnings share one end.
-    if (!text.startsWith(`</${tag}`, after)) continue
-    CLOSED.lastIndex = after + tag.length + 2
-    if (!CLOSED.test(text)) continue
-    done = CLOSED.lastIndex
+    if (!text.startsWith(`${lt}/${tag}`, after)) continue
+    const end = endOfClosing(after + tag.length + lt.length + 1)
+    if (end < 0) continue
+    done = end
     let plain = inner < 0 ? text.slice(from, after) : ''
     for (let at = inner; at >= 0 && at <= last; ) {
-      const end = text.indexOf(']]>', at)
+      const end = text.indexOf(sectionEnd, at)
       plain += text.slice(at, end)
-      at = end < last ? end + 12 : last + 1
+      at = end < last ? end + sectionEnd.length + sectionStart.length : last + 1
     }
     yield { start: match.index, end: done, tag, plain: plain.trim() }
   }
 }
 
-/** Markup written with entities, as where a payload carries another payload: "&lt;password&gt;x&lt;/password&gt;". */
-const ESCAPED_ELEMENT = new RegExp(String.raw`&lt;(${ELEMENT})((?:\s(?:(?!&gt;|&lt;)[^<>])*)?)&gt;((?:(?!&lt;)[^<>])*)&lt;\/\1\s*&gt;`, 'g')
 const unescaped = (text: string) => text.replace(/&(?:lt|gt|quot|apos|amp);/g, (entity) => ENTITIES[entity])
 const ENTITIES: Record<string, string> = { '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&amp;': '&' }
 
@@ -182,32 +223,44 @@ const ENTITIES: Record<string, string> = { '&lt;': '<', '&gt;': '>', '&quot;': '
  * cost its length: see finder().
  */
 export function scrubSecrets(text: string): { text: string; withheld: number } {
+  const first = scrubOnce(text)
+  // A document that stands in a CDATA section writes the end of a section of its own as "]]]]><![CDATA[>": the
+  // outer section ends inside it and begins anew. Read as the sections of the outer document, an element of the
+  // inner one never ends. So the text is read a second time, with that mark taken as the end it stands for, and
+  // what either reading finds is taken out.
+  if (!first.text.includes(NESTED_END)) return first
+  const mark = ['\uE000', '\uE001', '\uF8FF'].find((sign) => !first.text.includes(sign))
+  if (!mark) return first
+  const second = scrubOnce(first.text.replaceAll(NESTED_END, `${mark}]]>`))
+  return { text: second.text.replaceAll(`${mark}]]>`, NESTED_END), withheld: first.withheld + second.withheld }
+}
+
+/** The end of a CDATA section, written inside a CDATA section. */
+const NESTED_END = ']]]]><![CDATA[>'
+
+/** The name of an element without a prefix, in small letters: "x:Value" is "value". */
+const localName = (tag: string) => tag.slice(tag.lastIndexOf(':') + 1).toLowerCase()
+
+function scrubOnce(text: string): { text: string; withheld: number } {
   if (!/[<"]|&lt;/.test(text)) return { text, withheld: 0 }
   let withheld = 0
   const isSwitch = (plain: string) => !plain || /^(true|false)$/.test(plain)
   /** The text with the content of the wanted elements taken out. "always" also where the content is a switch. */
-  const without = (source: string, wanted: (tag: string) => boolean, always: boolean): string => {
+  const without = (source: string, wanted: (tag: string) => boolean, always: boolean, markup: Markup = PLAIN_MARKUP): string => {
     let out = ''
     let last = 0
-    for (const element of simpleElements(source, wanted)) {
+    for (const element of simpleElements(source, wanted, markup)) {
       // "true" and "false" are switches such as "display_password", not secrets.
-      if (!always && isSwitch(element.plain)) continue
+      if (!always && isSwitch(markup === PLAIN_MARKUP ? element.plain : unescaped(element.plain).trim())) continue
       withheld++
       // Without its attributes: a display value there would repeat the content.
-      out += `${source.slice(last, element.start)}<${element.tag}>${WITHHELD}</${element.tag}>`
+      out += `${source.slice(last, element.start)}${markup.lt}${element.tag}${markup.gt}${WITHHELD}${markup.lt}/${element.tag}${markup.gt}`
       last = element.end
     }
     return last ? out + source.slice(last) : source
   }
-  /** The same for elements written with entities. */
-  const withoutEscaped = (source: string, wanted: (tag: string) => boolean, always: boolean): string =>
-    source.includes('&lt;')
-      ? source.replace(ESCAPED_ELEMENT, (whole, tag: string, _attributes: string, plain: string) => {
-          if (!wanted(tag) || (!always && isSwitch(unescaped(plain).trim()))) return whole
-          withheld++
-          return `&lt;${tag}&gt;${WITHHELD}&lt;/${tag}&gt;`
-        })
-      : source
+  /** The same for elements written with entities: "&lt;password&gt;x&lt;/password&gt;", also with a CDATA section written that way. */
+  const withoutEscaped = (source: string, wanted: (tag: string) => boolean, always: boolean): string => (source.includes('&lt;') ? without(source, wanted, always, ESCAPED_MARKUP) : source)
   const looksSecret = (tag: string) => LOOKS_SECRET.test(tag)
   let out = withoutEscaped(without(text, looksSecret, false), looksSecret, false)
   // An element that ends in itself holds no text, but an attribute of it can repeat one: a display value.
@@ -219,17 +272,32 @@ export function scrubSecrets(text: string): { text: string; withheld: number } {
 
   // A system property: its type says whether the value is a secret. An element that ends in itself holds none.
   const judge = (record: string): boolean => {
-    const fields = [...simpleElements(record, (tag) => tag === 'type' || tag === 'name')]
-    const types = fields.filter((field) => field.tag === 'type' && field.plain).map((field) => field.plain)
-    const names = fields.filter((field) => field.tag === 'name' && field.plain).map((field) => field.plain)
+    const fields = [...simpleElements(record, (tag) => localName(tag) === 'type' || localName(tag) === 'name')]
+    const types = fields.filter((field) => localName(field.tag) === 'type' && field.plain).map((field) => field.plain)
+    const names = fields.filter((field) => localName(field.tag) === 'name' && field.plain).map((field) => field.plain)
     return types.length ? types.some((type) => /^password2?$/i.test(type)) : names.length ? names.some((name) => LOOKS_SECRET.test(name)) : true
   }
   /**
    * Every record of a system property in the text, from its opening tag to the end that belongs to it: an end
    * that stands inside a CDATA section is the text of a field, and not the end of the record.
    */
-  const records = (source: string, opening: RegExp, closing: string, sectionStart: string, sectionEnd: string, clean: (record: string) => string): string => {
-    const ends = finder(source, closing)
+  const records = (source: string, opening: RegExp, closing: RegExp, sectionStart: string, sectionEnd: string, clean: (record: string) => string): string => {
+    // The end of a record, as a closing tag can be written: with blanks before its end. Looked for forward only.
+    const found = { at: -1, end: -1, none: false }
+    const ends = (from: number): number => {
+      if (found.none) return -1
+      if (found.at < from) {
+        closing.lastIndex = Math.max(from, found.end, 0)
+        const match = closing.exec(source)
+        if (!match) {
+          found.none = true
+          return -1
+        }
+        found.at = match.index
+        found.end = match.index + match[0].length
+      }
+      return found.at
+    }
     const sections = finder(source, sectionStart)
     const sectionEnds = finder(source, sectionEnd)
     let result = ''
@@ -250,17 +318,19 @@ export function scrubSecrets(text: string): { text: string; withheld: number } {
         from = end + sectionEnd.length
       }
       if (close < 0) break
-      const end = close + closing.length
+      const end = found.end
       result += source.slice(last, match.index) + clean(source.slice(match.index, end))
       last = end
       opening.lastIndex = end
     }
     return last ? result + source.slice(last) : source
   }
-  out = records(out, new RegExp(String.raw`<sys_properties${ATTRIBUTES}\s*>`, 'g'), '</sys_properties>', '<![CDATA[', ']]>', (record) => (judge(record) ? without(record, (tag) => tag === 'value', true) : record))
-  if (out.includes('&lt;sys_properties')) {
-    out = records(out, /&lt;sys_properties(?:\s(?:(?!&gt;)[^<>])*)?&gt;/g, '&lt;/sys_properties&gt;', '&lt;![CDATA[', ']]&gt;', (record) =>
-      judge(unescaped(record)) ? withoutEscaped(record, (tag) => tag === 'value', true) : record,
+  // With a prefix or in capitals it is the same table, and its end can carry blanks.
+  const isValue = (tag: string) => localName(tag) === 'value'
+  out = records(out, new RegExp(String.raw`<(?:[\w.-]+:)?sys_properties${ATTRIBUTES}\s*>`, 'gi'), /<\/(?:[\w.-]+:)?sys_properties\s*>/gi, '<![CDATA[', ']]>', (record) => (judge(record) ? without(record, isValue, true) : record))
+  if (/&lt;(?:[\w.-]+:)?sys_properties/i.test(out)) {
+    out = records(out, /&lt;(?:[\w.-]+:)?sys_properties(?:\s(?:(?!&gt;)[^<>])*)?&gt;/gi, /&lt;\/(?:[\w.-]+:)?sys_properties\s*&gt;/gi, '&lt;![CDATA[', ']]&gt;', (record) =>
+      judge(unescaped(record)) ? withoutEscaped(record, isValue, true) : record,
     )
   }
 
@@ -467,7 +537,8 @@ const asTable = (name: string): string | null => {
 
 /** Entities turned back into the characters they stand for, by name and by number. */
 const decoded = (text: string): string =>
-  text.replace(/&(?:(lt|gt|quot|apos|amp)|#(\d{1,7})|#x([0-9a-fA-F]{1,6}));/g, (entity, name: string | undefined, decimal: string | undefined, hex: string | undefined) => {
+  // A number can be written with zeros in front and the x of a hexadecimal one as a capital: both are valid XML.
+  text.replace(/&(?:(lt|gt|quot|apos|amp)|#0{0,64}(\d{1,7})|#[xX]0{0,64}([0-9a-fA-F]{1,6}));/g, (entity, name: string | undefined, decimal: string | undefined, hex: string | undefined) => {
     if (name) return ENTITIES[entity]
     const code = decimal ? Number(decimal) : parseInt(hex ?? '', 16)
     return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : entity

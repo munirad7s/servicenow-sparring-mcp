@@ -7,7 +7,7 @@ import type { InstanceConfig } from '../src/config.js'
 import { buildServer, createContext } from '../src/server.js'
 import { accountRoles } from '../src/tools/instance.js'
 import { queryByContent } from '../src/tools/origin.js'
-import { capturedByName, isClosedRecord, LOOKS_SECRET, payloadTables, scrubSecrets } from '../src/tools/shared.js'
+import { capturedByName, isClosedRecord, LOOKS_SECRET, payloadTables, recordPayload, scrubSecrets } from '../src/tools/shared.js'
 import { closedTables, column, dictionaryRoutes, fakeInstance, isProof, knownTables, labelled, tableRow, type Route } from './fake.js'
 
 type Data = Record<string, any>
@@ -2374,6 +2374,16 @@ test('text that begins ten thousand things and ends none costs its length, not i
     '&lt;password&gt;'.repeat(60_000),
     '&lt;sys_properties&gt;&lt;name&gt;x&lt;/name&gt;'.repeat(40_000),
     '<sys_properties><d><![CDATA[</sys_properties>'.repeat(40_000),
+    // Many beginnings that share one end, with blanks inside the closing tag: they were read anew from each
+    // beginning, 1.1 seconds for a fifth of this text and sixteen times that for this one.
+    `${'<pwd><![CDATA['.repeat(40_000)}]]></pwd${' '.repeat(400_000)}`,
+    // CDATA sections written with entities, which the pass for such markup reads now: beginnings without an end,
+    // a run of sections, and the end of a section written inside a section.
+    '&lt;password&gt;&lt;![CDATA['.repeat(40_000),
+    `${'&lt;password&gt;&lt;![CDATA['.repeat(20_000)}${']]&gt;&lt;![CDATA['.repeat(20_000)}]]&gt;`,
+    `${'<password><![CDATA['.repeat(20_000)}${']]]]><![CDATA[>'.repeat(20_000)}`,
+    `${'<sys_properties>'.repeat(20_000)}</sys_properties${' '.repeat(400_000)}`,
+    `${'</sys_properties '.repeat(60_000)}`,
   ]
   const started = performance.now()
   for (const text of hostile) {
@@ -2381,8 +2391,60 @@ test('text that begins ten thousand things and ends none costs its length, not i
     payloadTables(text)
   }
   const took = performance.now() - started
-  // About 15 MB in all. Measured: about three seconds. One input that costs its length squared takes that alone.
+  // About 20 MB in all. Measured: about three seconds. One input that costs its length squared takes that alone.
   assert.ok(took < 12_000, `${Math.round(took)} ms`)
+
+  // A name that can be read as an archive and as a part of a rotated table in many ways. Each reading was followed
+  // without a memory of the names seen: this one name of eighty characters took ten seconds, and it is looked at
+  // for every row.
+  const manyReadings = 'ar_'.repeat(13) + 'x' + '1'.repeat(40)
+  const before = performance.now()
+  for (let run = 0; run < 200; run++) recordPayload(manyReadings, 'payload')
+  assert.ok(performance.now() - before < 2_000, `${Math.round(performance.now() - before)} ms for a name read two hundred times`)
+})
+
+test('a secret is taken out where a section stands inside a section, and where the markup is written another way', () => {
+  // A document that stands in a CDATA section writes the end of a section of its own as "]]]]><![CDATA[>". Read as
+  // sections of the outer document alone, the element never ended and its content was passed on.
+  const nested = scrubSecrets('<a><![CDATA[<b><password><![CDATA[hunter2]]]]><![CDATA[></password></b>]]></a>')
+  assert.deepEqual(nested, { text: '<a><![CDATA[<b><password>[withheld]</password></b>]]></a>', withheld: 1 })
+  const property = scrubSecrets('<p><![CDATA[<sys_properties><description><![CDATA[a<b]]]]><![CDATA[></description><type>password2</type><value>TOPSECRET</value></sys_properties>]]></p>')
+  assert.equal(property.withheld, 1)
+  assert.doesNotMatch(property.text, /TOPSECRET/)
+  // What holds no secret comes back as it was, the mark included.
+  const harmless = '<a><![CDATA[<b><note><![CDATA[plain]]]]><![CDATA[></note></b>]]></a>'
+  assert.deepEqual(scrubSecrets(harmless), { text: harmless, withheld: 0 })
+  // A value that holds "]]>" is still read as one run of sections.
+  assert.deepEqual(scrubSecrets('<password><![CDATA[a]]]]><![CDATA[>b]]></password>'), { text: '<password>[withheld]</password>', withheld: 1 })
+
+  // Markup written with entities carries CDATA sections written that way. Measured on real payloads: fifteen do,
+  // around script, template, client_script and link.
+  assert.deepEqual(scrubSecrets('&lt;password&gt;&lt;![CDATA[hunter2]]&gt;&lt;/password&gt;'), { text: '&lt;password&gt;[withheld]&lt;/password&gt;', withheld: 1 })
+  assert.deepEqual(scrubSecrets('&lt;password&gt; &lt;![CDATA[a]]&gt;&lt;![CDATA[b]]&gt; &lt;/password &gt;'), { text: '&lt;password&gt;[withheld]&lt;/password&gt;', withheld: 1 })
+  const script = '&lt;script&gt;&lt;![CDATA[var password = 1]]&gt;&lt;/script&gt;'
+  assert.deepEqual(scrubSecrets(script), { text: script, withheld: 0 })
+  assert.equal(scrubSecrets('&lt;display_password&gt;&lt;![CDATA[true]]&gt;&lt;/display_password&gt;').withheld, 0)
+
+  // The record of a property whose tags are written with a blank, a prefix or in capitals is that record too.
+  for (const record of [
+    '<sys_properties><name>x</name><type>password2</type><value>TOPSECRET</value></sys_properties >',
+    '<x:sys_properties><x:name>x</x:name><x:type>password2</x:type><x:value>TOPSECRET</x:value></x:sys_properties>',
+    '<SYS_PROPERTIES><name>x</name><type>password2</type><value>TOPSECRET</value></SYS_PROPERTIES>',
+    '&lt;sys_properties&gt;&lt;type&gt;password2&lt;/type&gt;&lt;value&gt;TOPSECRET&lt;/value&gt;&lt;/sys_properties &gt;',
+  ]) {
+    const cleaned = scrubSecrets(record)
+    assert.equal(cleaned.withheld, 1, record)
+    assert.doesNotMatch(cleaned.text, /TOPSECRET/, record)
+  }
+  // And one that holds no secret keeps its value, however its tags are written.
+  assert.equal(scrubSecrets('<x:sys_properties><x:name>glide.ui.width</x:name><x:type>integer</x:type><x:value>120</x:value></x:sys_properties >').withheld, 0)
+
+  // The table of a record inside a payload is found where "<" is written as a number with zeros in front, or with
+  // a capital X: both are valid XML.
+  const carried = (inner: string) => payloadTables(`<record_update table="sys_metadata_link"><sys_metadata_link action="INSERT_OR_UPDATE"><payload>${inner}</payload></sys_metadata_link></record_update>`)
+  for (const inner of ['&#00000060;sys_user action="DELETE"&#62;', '&#x000003c;sys_user action="DELETE"&#x3e;', '&#X3C;sys_user action="DELETE"&#X3E;', '&#60;sys_user action="DELETE"&#62;']) {
+    assert.deepEqual(carried(inner), ['sys_metadata_link', 'sys_user'], inner)
+  }
 })
 
 test('a secret is taken out of markup that sits inside a CDATA section too', () => {
