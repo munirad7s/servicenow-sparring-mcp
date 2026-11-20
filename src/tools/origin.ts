@@ -158,8 +158,9 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         'current version, and whether an upgrade refused to overwrite it), whether it was created here or delivered ' +
         '(baseline version and creation time), and whether people or only system accounts made the captured changes. Returns a verdict with the evidence rows ' +
         'and the queries behind them. The verdict is "unknown" when the evidence does not decide it, and the ' +
-        'explanation then says why. Identify the record by sysId, or by updateName such as "sys_script_<sys_id>" or ' +
-        '"sys_dictionary_incident_u_field". Find sys_ids with sn_query or sn_dependencies.',
+        'explanation then says why. Identify the record by sysId, or by updateName such as "sys_script_<sys_id>", ' +
+        '"sys_dictionary_incident_u_field" for a field, or "sys_documentation_incident_u_field_en" for its label. ' +
+        'Find sys_ids with sn_query or sn_dependencies, and the names of a field with sn_schema.',
       inputSchema: {
         sysId: z.string().max(32).optional().describe('sys_id of the record. Give this or updateName, not both.'),
         updateName: z.string().max(250).optional().describe('Update name of the record, e.g. "sys_script_<sys_id>" or "sys_dictionary_incident_u_field".'),
@@ -185,16 +186,27 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           ),
         capturedBy: z
           .enum(['people', 'system_accounts', 'nobody', 'unknown'])
-          .describe('Who made the captured changes. "system_accounts" means installations, upgrades or jobs, not an edit by a person.'),
-        record: rowSchema.nullable(),
+          .describe(
+            'Who made the captured changes. "system_accounts" means installations, upgrades or jobs, not an edit by a person. "nobody": no captured change exists. ' +
+              'Where no update row is left and the current version came from an update set, it is the author of that version.',
+          ),
+        record: rowSchema
+          .nullable()
+          .describe(
+            'The record as found: sysId, table, name, updateName, package and packageClass (the class of the package says who delivered it: sys_plugins and sys_package are the vendor, ' +
+              'sys_store_app an installed application, sys_app one developed here), scope, protection, createdOn, createdBy, updatedOn, updatedBy. Empty parts are left out. null if no record answers.',
+          ),
         evidence: z.object({
           customerUpdates: z.object({
             table: z.literal('sys_update_xml'),
             query: z.string(),
             readable: z.boolean(),
             total: z.number().nullable(),
-            firstCapturedOn: z.string().nullable(),
-            rows: z.array(rowSchema),
+            firstCapturedOn: z
+              .string()
+              .nullable()
+              .describe('The earliest capture that is known: the oldest update row, or an older version that came from an update set where its update row is gone.'),
+            rows: z.array(rowSchema).describe('The newest five update rows. "total" says how many there are.'),
           }),
           versions: z.object({
             table: z.literal('sys_update_version'),
@@ -203,7 +215,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             total: z.number().nullable(),
             bySource: z.record(z.string(), z.number()).nullable().describe('Exact number of versions per source table. null if it could not be read.'),
             current: rowSchema.nullable().describe('The version marked current. A source of sys_upgrade_history or sys_store_app is the vendor\'s own version.'),
-            rows: z.array(rowSchema),
+            rows: z.array(rowSchema).describe('The first five versions, the current one first.'),
           }),
           upgradeSkips: z
             .object({
@@ -211,7 +223,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
               query: z.string(),
               readable: z.boolean(),
               total: z.number().nullable(),
-              rows: z.array(rowSchema),
+              rows: z.array(rowSchema).describe('The newest five entries: disposition, review, target, upgrade, createdOn.'),
             })
             .describe('Upgrades that did not overwrite this record. The upgrade engine compares content, so it also finds changes nobody captured. "target" is the name the upgrade gives the record.'),
         }),

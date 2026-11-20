@@ -80,7 +80,9 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
           .number()
           .nullable()
           .describe('Rows under the same conditions that no person is on: first captured and last changed by a system account. With peopleOnly these are the rows that were left out of the list. null if unknown.'),
-        updates: z.array(rowSchema),
+        updates: z
+          .array(rowSchema)
+          .describe('One row per captured change, newest first: name (the update name, which sn_origin takes), type, action, target_name (the readable name of the record), update_set, application, sys_created_by and sys_created_on (first capture), sys_updated_by and sys_updated_on (last change).'),
         notCaptured: z.array(z.string()).describe('What sys_update_xml does not record. Say "captured customizations", never "all".'),
       },
       annotations: READ_ONLY,
