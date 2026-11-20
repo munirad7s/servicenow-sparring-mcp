@@ -392,11 +392,13 @@ const STORED_TIME = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?$/
  * true where the server answers a read with an error and the instance, asked directly, answers it. A refusal on
  * purpose is none of that: the server says "validation" or "blocked" where it will not send what was asked.
  */
-async function failsAlone(error: Data, directly: () => Promise<{ status: number; rows: unknown[] | null }>): Promise<boolean> {
+async function failsAlone(error: Data, directly: () => Promise<{ status: number; rows: unknown[] | null }>): Promise<false | string> {
   if (error.error === 'validation' || error.error === 'blocked') return false
-  // Answered means a list came back: HTTP 200 with a page in place of data is no answer either.
   const answer = await directly()
-  return answer.status === 200 && Array.isArray(answer.rows)
+  if (answer.status !== 200) return false
+  // Answered means a list came back. HTTP 200 without one is no answer to the server and none to this script:
+  // nothing was compared, and that is said as a difference, so that the run does not end as if all were well.
+  return Array.isArray(answer.rows) ? `the server answers "${error.error}" where the instance answers when asked directly` : 'the instance answers without a list, to the server and when asked directly: nothing could be compared'
 }
 const cells = new Map<string, number>()
 const altered: string[] = []
@@ -406,7 +408,8 @@ for (const [table, query, names, display] of READS) {
   if (mine.isError) {
     // A table or a field this instance lacks, or one this account may not read, is no finding about the server.
     // A read the server fails where the instance answers is one.
-    if (await failsAlone(mine.data, () => get(table, { sysparm_query: query, sysparm_fields: names.join(','), sysparm_limit: 1 }))) altered.push(`${table}: the server answers "${mine.data.error}" where the instance answers when asked directly`)
+    const alone = await failsAlone(mine.data, () => get(table, { sysparm_query: query, sysparm_fields: names.join(','), sysparm_limit: 1 }))
+    if (alone) altered.push(`${table}: ${alone}`)
     else cells.set('reads left out: the table or a field is not there, or not readable', (cells.get('reads left out: the table or a field is not there, or not readable') ?? 0) + 1)
     continue
   }
@@ -459,7 +462,8 @@ const miscounted: string[] = []
 for (const [table, groupBy, query] of COUNTS) {
   const first = await call('sn_query', { table, groupBy, query, limit: 100 })
   if (first.isError) {
-    if (await failsAlone(first.data, () => get(table, { sysparm_count: 'true', sysparm_group_by: groupBy, ...(query ? { sysparm_query: query } : {}) }, 'stats'))) miscounted.push(`${table} per ${groupBy}: the server answers "${first.data.error}" where the instance counts when asked directly`)
+    const alone = await failsAlone(first.data, () => get(table, { sysparm_count: 'true', sysparm_group_by: groupBy, ...(query ? { sysparm_query: query } : {}) }, 'stats'))
+    if (alone) miscounted.push(`${table} per ${groupBy}: ${alone}`)
     else skipped++
     continue
   }
@@ -601,7 +605,8 @@ for (const view of withList) {
   for (const column of (described.data.columns as Data[]).filter((item) => !item.inactive).slice(0, 12)) {
     const asked = await get(view, { sysparm_query: `${column.name}ISEMPTY^${column.name}ISNOTEMPTY`, sysparm_fields: 'sys_id', sysparm_limit: 1 })
     const through = await call('sn_query', { table: view, query: `${column.name}ISNOTEMPTY`, fields: [column.name], limit: 1 })
-    if (asked.status !== 200 || asked.total === null) refusedByInstance++
+    if (asked.status === 200 && !asked.rows) droppedFields.push(`${view}.${column.name}: the instance answers the question without a list, so nothing could be told`)
+    else if (asked.status !== 200 || asked.total === null) refusedByInstance++
     else if (Number(asked.total) === 0 && noRowsForUnusable && Number((await get(view, { sysparm_query: `${column.name}ISEMPTY^OR${column.name}ISNOTEMPTY`, sysparm_fields: 'sys_id', sysparm_limit: 1 })).total ?? 0) === 0) {
       // This instance answers a query it cannot use with no rows, so "none" proves nothing by itself: every row is
       // empty or filled, and this field brought none for that either. The server has to refuse it.

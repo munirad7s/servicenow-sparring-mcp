@@ -223,6 +223,25 @@ const ENTITIES: Record<string, string> = { '&lt;': '<', '&gt;': '>', '&quot;': '
  * cost its length: see finder().
  */
 export function scrubSecrets(text: string): { text: string; withheld: number } {
+  // Read until a reading finds nothing more. Taking one thing out can make the next one recognisable: an
+  // element that held another element holds text once that one is gone. Whoever cuts a text after this, or
+  // quotes a part of it, must not be the one who cuts away the end that the next reading needed.
+  let current = text
+  let withheld = 0
+  for (let reading = 0; reading < MAX_READINGS; reading++) {
+    const next = scrubReading(current)
+    withheld += next.withheld
+    if (next.text === current) return { text: current, withheld }
+    current = next.text
+  }
+  // A text that gives something new with every reading is built to do so. None of it is passed on.
+  return { text: WITHHELD, withheld: withheld + 1 }
+}
+
+/** As many readings as a text gets before it is withheld whole. Two is what a record inside a record takes. */
+const MAX_READINGS = 6
+
+function scrubReading(text: string): { text: string; withheld: number } {
   const first = scrubOnce(text)
   // A document that stands in a CDATA section writes the end of a section of its own as "]]]]><![CDATA[>": the
   // outer section ends inside it and begins anew. Read as the sections of the outer document, an element of the
@@ -264,7 +283,39 @@ function scrubOnce(text: string): { text: string; withheld: number } {
   /** The same for elements written with entities: "&lt;password&gt;x&lt;/password&gt;", also with a CDATA section written that way. */
   const withoutEscaped = (source: string, wanted: (tag: string) => boolean, always: boolean): string => (source.includes('&lt;') ? without(source, wanted, always, ESCAPED_MARKUP) : source)
   const looksSecret = (tag: string) => LOOKS_SECRET.test(tag)
-  let out = withoutEscaped(without(text, looksSecret, false), looksSecret, false)
+  // What looks like a secret, as places in the text as it came: the elements, plain and written with entities,
+  // and the lists and objects behind a key. All of them are found before anything is taken out. Taken out one
+  // kind after the other, each order loses something: an element can end inside a list and take its key along,
+  // and a list that never closes can take the end of the element around it. Where two places overlap, both are
+  // taken out as one.
+  const places: Array<{ start: number; end: number; put: string }> = [...secretContainers(text)]
+  for (const markup of text.includes('&lt;') ? [PLAIN_MARKUP, ESCAPED_MARKUP] : [PLAIN_MARKUP]) {
+    for (const element of simpleElements(text, looksSecret, markup)) {
+      // "true" and "false" are switches such as "display_password", not secrets. And a note is no secret.
+      if (isSwitch(markup === PLAIN_MARKUP ? element.plain : unescaped(element.plain).trim()) || element.plain === WITHHELD) continue
+      // Without its attributes: a display value there would repeat the content.
+      places.push({ start: element.start, end: element.end, put: `${markup.lt}${element.tag}${markup.gt}${WITHHELD}${markup.lt}/${element.tag}${markup.gt}` })
+    }
+  }
+  let out = text
+  if (places.length) {
+    places.sort((a, b) => a.start - b.start || b.end - a.end)
+    const merged: typeof places = []
+    for (const place of places) {
+      const before = merged.at(-1)
+      if (!before || place.start >= before.end) merged.push({ ...place })
+      // Inside the one before, it is gone with it. Reaching beyond it, the two are one place, in neither's form.
+      else if (place.end > before.end) Object.assign(before, { end: place.end, put: WITHHELD })
+    }
+    out = ''
+    let last = 0
+    for (const place of merged) {
+      out += `${text.slice(last, place.start)}${place.put}`
+      last = place.end
+      withheld++
+    }
+    out += text.slice(last)
+  }
   // An element that ends in itself holds no text, but an attribute of it can repeat one: a display value.
   out = out.replace(new RegExp(String.raw`<(${ELEMENT})(${ATTRIBUTES})\s*\/>`, 'g'), (whole, tag: string, attributes: string) => {
     if (!attributes.trim() || !looksSecret(tag)) return whole
@@ -354,37 +405,29 @@ function scrubOnce(text: string): { text: string; withheld: number } {
       return without
     })
   }
-  // A key whose value is a list or an object: all of it is the secret. "tokens": ["a", "b"] is the usual form.
-  // After the elements, not before them: a list that never closes is cut where it opens, and cut first it would
-  // take the end of an element around it along, and with that the mark the element is recognised by. The other
-  // way round an element can take a bracket of a list away, and then more is cut than had to be: that errs on
-  // the side of keeping back.
-  out = withoutContainers(out, () => withheld++)
   return { text: out, withheld }
 }
 
 /**
- * Takes out the list or the object behind a JSON key whose name suggests a secret, up to the bracket that closes
- * it. Where none does, the text is cut there: the rest of it is inside. Read once, from front to back.
+ * The lists and objects behind a JSON key whose name suggests a secret: "tokens": ["a", "b"] is the usual form,
+ * and all of it is the secret. Each from its bracket to the one that closes it; where none does, to the end of
+ * the text, because the rest of it is inside. Read once, from front to back.
  */
-function withoutContainers(text: string, found: () => void): string {
-  if (!/[\[{]/.test(text)) return text
+function* secretContainers(text: string): Generator<{ start: number; end: number; put: string }> {
+  if (!/[\[{]/.test(text)) return
   const opening = /(\\?")([A-Za-z_][\w.-]*)\1(?:\s|\\[nrt])*:(?:\s|\\[nrt])*[\[{]/g
-  let out = ''
-  let last = 0
   for (let match = opening.exec(text); match; match = opening.exec(text)) {
     if (!LOOKS_SECRET.test(match[2])) continue
     const bracket = match.index + match[0].length - 1
+    // The note that stands for something taken out begins with a bracket, and is no list.
+    if (text.startsWith(WITHHELD, bracket)) continue
     const escaped = match[1] !== '"'
     const end = endOfContainer(text, bracket, escaped)
     const mark = escaped ? String.raw`\"` : '"'
-    out += `${text.slice(last, bracket)}${mark}${WITHHELD}${mark}`
-    found()
-    if (end < 0) return out
-    last = end + 1
-    opening.lastIndex = last
+    yield { start: bracket, end: end < 0 ? text.length : end + 1, put: `${mark}${WITHHELD}${mark}` }
+    if (end < 0) return
+    opening.lastIndex = end + 1
   }
-  return last ? out + text.slice(last) : text
 }
 
 /**

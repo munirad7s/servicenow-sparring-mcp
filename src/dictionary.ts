@@ -304,15 +304,19 @@ export class Dictionary {
       else if (hit.table) tables.add(name)
     }
     for (const group of inGroups(unknown)) {
+      const asked = this.dropped
       // With what each table extends: what is asked about a table that was found here costs no request of its own.
       const { records, total, complete } = await this.sn.all<Record<string, string>>({ table: 'sys_db_object', query: `nameIN${group.join(',')}`, fields: ['name', 'label', 'scriptable_table', ...PARENT_FIELDS] }, 1_000)
       if (!complete || (total !== null && records.length < total)) {
         throw new ServiceNowError('It could not be read completely which of these names are tables: rows of sys_db_object are hidden from this account.', 'acl', 'sys_db_object')
       }
       const found = new Set(records.map((row) => row.name))
-      for (const row of records) this.remember(row, now)
+      // The answer of this call is what was read. It is remembered only if nothing was dropped in between.
+      const keep = asked === this.dropped
+      for (const row of records) if (keep) this.remember(row, now)
       for (const name of group) {
         if (found.has(name)) tables.add(name)
+        if (!keep) continue
         this.knownNames.delete(name)
         this.knownNames.set(name, { table: found.has(name), at: now })
       }
@@ -344,7 +348,7 @@ export class Dictionary {
    * For a database view, call it for the tables it joins as well.
    */
   /** What the table of tables looked like when it was last looked at, and when that was. */
-  private tablesSeen: { at: number; stamp: string } | null = null
+  private tablesSeen: { at: number; stamp: string | null } | null = null
   private looking: Promise<void> | null = null
 
   /**
@@ -360,12 +364,13 @@ export class Dictionary {
       try {
         const stamp = await this.sn
           .query<Record<string, string>>({ table: 'sys_db_object', query: 'ORDERBYDESCsys_updated_on', fields: ['sys_id', 'sys_updated_on'], limit: 1 })
-          .then((page) => `${page.total}|${page.records[0]?.sys_id}|${page.records[0]?.sys_updated_on}`)
-          // Not readable is a state like any other: the lists cannot be read either then, and are not asked for
-          // with every request. Readable again, it differs and they are read anew.
-          .catch(unlessNoConnection('not read'))
-        // Also the first time: what was remembered before the first look was read at an unknown time.
-        if (this.tablesSeen?.stamp !== stamp) this.forgetTables()
+          // A look that came without the number of tables, or without the row changed last and its time, saw
+          // nothing: two such looks are no "nothing changed".
+          .then((page) => (page.total !== null && page.records[0]?.sys_id && page.records[0]?.sys_updated_on ? `${page.total}|${page.records[0].sys_id}|${page.records[0].sys_updated_on}` : null))
+          .catch(unlessNoConnection(null))
+        // Also the first time: what was remembered before the first look was read at an unknown time. And every
+        // time the look saw nothing: then nothing remembered is relied on for longer than until the next look.
+        if (stamp === null || this.tablesSeen?.stamp !== stamp) this.forgetTables()
         this.tablesSeen = { at: Date.now(), stamp }
       } finally {
         this.looking = null
@@ -374,7 +379,14 @@ export class Dictionary {
     return this.looking
   }
 
+  /**
+   * Counts how often everything about tables was dropped. What was read from the instance before a drop is not
+   * written into what is remembered after it: a look-up that was under way would bring the old state back.
+   */
+  private dropped = 0
+
   private forgetTables(): void {
+    this.dropped++
     for (const cache of [this.tables, this.columnSets, this.choiceLists, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.closedSets, this.knownNames, this.partLists, this.shownSets, this.childSets]) cache.clear()
   }
 
@@ -796,6 +808,7 @@ export class Dictionary {
       return isTableName(name) && !(hit && now - hit.at < this.ttlMs)
     })
     if (wanted.length < 2) return
+    const asked = this.dropped
     const infos = (await Promise.all(wanted.map((name) => this.table(name).catch(unlessNoConnection(null))))).filter((info): info is TableInfo => Boolean(info) && info!.kind !== 'database_view')
     const marked = new Map<string, Array<{ field: string; reference: string | null }>>()
     const moved = new Set<string>()
@@ -819,6 +832,8 @@ export class Dictionary {
         if (POINTS_ELSEWHERE.has(row.internal_type)) marked.set(row.name, [...(marked.get(row.name) ?? []), shownThrough(row)])
       }
     }
+    // Everything about tables was dropped while this was read: what it found belongs to the state before.
+    if (asked !== this.dropped) return
     for (const info of infos) {
       const known = this.shownSets.get(info.name)
       if (known && now - known.at < this.ttlMs) continue
@@ -907,8 +922,13 @@ export class Dictionary {
     return this.cached(this.settings, 'emptyOnInvalidQuery', async () => {
       const name = 'glide.invalid_query.returns_no_rows'
       const page = await this.gated.query<Record<string, string>>({ table: 'sys_properties', query: `name=${name}`, fields: PROPERTY_FIELDS, limit: 1 }).catch(unlessNoConnection(null))
-      if (!page || (page.records.length === 0 && (page.total ?? 0) > 0)) return null
-      return plainValue(page.records.find((row) => row.name === name)) === 'true'
+      if (!page) return null
+      const row = page.records.find((entry) => entry.name === name)
+      // Not set is "off", and only where the instance says that no such property exists. One that did not come
+      // back, or came back without a value that can be read, says nothing.
+      if (!row) return page.total === 0 ? false : null
+      const value = plainValue(row)
+      return value === undefined ? null : value === 'true'
     })
   }
 

@@ -267,15 +267,16 @@ export function ok(payload: Record<string, unknown>): ToolResult {
     if (Array.isArray(value)) return value.map((item) => read(item))
     // A key can be a text of the instance as well: the source of a version, the value a count is made by.
     if (value && typeof value === 'object') {
-      const out: Record<string, unknown> = {}
+      // Collected in a map: a key can be called like something every object has.
+      const out = new Map<string, unknown>()
       for (const [name, item] of Object.entries(value)) {
         const key = read(name) as string
         const cleaned = read(item, name)
         // Two keys that differ only in what was taken out of them are one key now: counts are added, not lost.
-        const before = Object.hasOwn(out, key) ? out[key] : undefined
-        out[key] = typeof before === 'number' && typeof cleaned === 'number' ? before + cleaned : cleaned
+        const before = out.get(key)
+        out.set(key, typeof before === 'number' && typeof cleaned === 'number' ? before + cleaned : cleaned)
       }
-      return out
+      return Object.fromEntries(out)
     }
     return value
   }

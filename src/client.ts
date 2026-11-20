@@ -199,8 +199,15 @@ export class ServiceNowClient {
       if (result.some((row) => nestedTooDeep(row, MAX_CELL_DEPTH))) {
         throw unusableAnswer(`${this.host} answered with rows that are nested deeper than a row of a table is.`, table)
       }
-      const pair = (value: object) => !Array.isArray(value) && Object.keys(value).every((key) => key === 'value' || key === 'display_value' || key === 'link') && Object.values(value).every((part) => part === null || typeof part !== 'object')
-      const cell = (value: unknown) => (value !== null && typeof value === 'object' && !pair(value) ? JSON.stringify(value) : value)
+      // A pair is known by its display value. It is passed on as value and display value and nothing else, so
+      // that whatever checks a display value behind this finds it where it looks.
+      const plain = (part: unknown) => part === null || part === undefined || typeof part !== 'object'
+      const cell = (value: unknown) => {
+        if (value === null || typeof value !== 'object') return value
+        const pair = value as { value?: unknown; display_value?: unknown }
+        if (!Array.isArray(value) && 'display_value' in value && plain(pair.value) && plain(pair.display_value)) return { value: pair.value, display_value: pair.display_value }
+        return JSON.stringify(value)
+      }
       const rows = result
         .filter((row): row is T => row !== null && typeof row === 'object')
         .map((row) => Object.fromEntries(Object.entries(row as object).flatMap(([key, value]) => (!asked || asked.has(key) ? [[key, cell(value)]] : []))) as T)

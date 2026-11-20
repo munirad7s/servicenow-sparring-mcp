@@ -699,3 +699,107 @@ test('with tables closed, every answer about the tables of the instance stands b
   await new Dictionary(open.sn).knownTables(['u_open'])
   assert.equal(open.calls.filter(isLookAtTables).length, 0)
 })
+
+test('what was read before everything about tables was dropped is not remembered after it', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp = (total: number): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], total })
+  const shows = (table: string, field: string, type: string, target = '') => column(table, field, type, target, { display: 'true' })
+  const routes: Route[] = [
+    stamp(100),
+    { table: 'sys_db_object', exact: 'name=u_named', rows: [tableRow('u_named', 'Named')] },
+    { table: 'sys_db_object', exact: 'name=u_other', rows: [tableRow('u_other', 'Other')] },
+    { table: 'sys_dictionary', query: 'nameINu_named', rows: [shows('u_named', 'u_title', 'string')] },
+    { table: 'sys_dictionary', query: 'nameINu_other', rows: [shows('u_other', 'u_title', 'string')] },
+    { table: 'sys_dictionary_override', rows: [] },
+  ]
+  const { sn } = fakeInstance(routes, { tables: { allow: [], deny: ['sys_user'] } })
+  const dictionary = new Dictionary(sn)
+  // The answer about what the two tables show is read, and is slow to arrive.
+  let arrive = () => {}
+  const held = new Promise<void>((resolve) => (arrive = resolve))
+  const all = sn.all.bind(sn)
+  let holding = true
+  sn.all = (async (opts: Parameters<typeof all>[0], ...rest: unknown[]) => {
+    const read = await all(opts, ...(rest as []))
+    if (holding && opts.table === 'sys_dictionary') await held
+    return read
+  }) as typeof sn.all
+  const together = dictionary.knowDisplayReferences(['u_named', 'u_other'])
+  await new Promise((done) => setImmediate(done))
+  // Meanwhile the table comes to show a user as its name, and the next look sees that tables have changed.
+  routes.unshift(stamp(101), { table: 'sys_dictionary', query: 'nameINu_named', rows: [shows('u_named', 'u_owner', 'reference', 'sys_user')] })
+  t.mock.timers.tick(31_000)
+  await dictionary.table('u_other')
+  holding = false
+  arrive()
+  await together
+  // What arrived late is of the state before: it is not what is remembered now.
+  assert.deepEqual(await dictionary.displayReferences('u_named'), [{ field: 'u_owner', reference: 'sys_user' }])
+})
+
+test('a look that came without what it looks for is no "nothing changed"', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  // The row changed last comes without its time: two such looks cannot be told apart, whatever happened between.
+  const routes: Route[] = [
+    { table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x' }], total: 100 },
+    { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] },
+  ]
+  const { sn } = fakeInstance(routes, { tables: { allow: [], deny: ['u_private'] } })
+  const dictionary = new Dictionary(sn)
+  assert.deepEqual((await dictionary.table('u_open'))?.chain, ['u_open'])
+  routes.unshift({ table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open', 'u_private')] })
+  t.mock.timers.tick(31_000)
+  assert.deepEqual((await dictionary.table('u_open'))?.chain, ['u_open', 'u_private'])
+  // The same without a number of tables.
+  const untold = fakeInstance([{ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], noTotal: true }, ...routes.slice(1)], { tables: { allow: [], deny: ['u_private'] } })
+  const second = new Dictionary(untold.sn)
+  await second.table('u_open')
+  const before = untold.calls.filter((call) => call.query === 'name=u_open').length
+  t.mock.timers.tick(31_000)
+  await second.table('u_open')
+  assert.equal(untold.calls.filter((call) => call.query === 'name=u_open').length, before + 1)
+})
+
+test('a setting that cannot be read is neither on nor off', async () => {
+  const name = 'glide.invalid_query.returns_no_rows'
+  const asked = async (route: Route) => new Dictionary(fakeInstance([route]).sn).emptyOnInvalidQuery()
+  assert.equal(await asked({ table: 'sys_properties', rows: [{ name, value: 'true', type: 'boolean' }] }), true)
+  assert.equal(await asked({ table: 'sys_properties', rows: [{ name, value: 'false', type: 'boolean' }] }), false)
+  // No such property, and the instance says so: that is the default, off.
+  assert.equal(await asked({ table: 'sys_properties', rows: [] }), false)
+  // It did not come back, came back without a value, or the instance does not say how many match: not known.
+  assert.equal(await asked({ table: 'sys_properties', rows: [null] }), null)
+  assert.equal(await asked({ table: 'sys_properties', rows: [{ name }] }), null)
+  assert.equal(await asked({ table: 'sys_properties', rows: [], noTotal: true }), null)
+  assert.equal(await asked({ table: 'sys_properties', rows: [{ name, value: 'true', type: 'password2' }] }), null)
+  assert.equal(await asked({ table: 'sys_properties', status: 403 }), null)
+})
+
+test('which names are tables is not remembered from an answer that arrived after everything was dropped', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp = (total: number): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], total })
+  const names = (...found: string[]): Route => ({ table: 'sys_db_object', match: /^nameIN[^^]*\^ORDERBYsys_id$/, rows: found.map((name) => ({ name })) })
+  const routes: Route[] = [stamp(100), names('u_open'), { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] }]
+  const { sn } = fakeInstance(routes, { tables: { allow: [], deny: ['u_private'] } })
+  const dictionary = new Dictionary(sn)
+  let arrive = () => {}
+  const held = new Promise<void>((resolve) => (arrive = resolve))
+  const all = sn.all.bind(sn)
+  let holding = true
+  sn.all = (async (opts: Parameters<typeof all>[0], ...rest: unknown[]) => {
+    const read = await all(opts, ...(rest as []))
+    if (holding && opts.table === 'sys_db_object' && String(opts.query).startsWith('nameIN')) await held
+    return read
+  }) as typeof sn.all
+  // "u_new" is no table when the question is asked. The answer is slow.
+  const early = dictionary.knownTables(['u_open', 'u_new'])
+  await new Promise((done) => setImmediate(done))
+  routes.unshift(stamp(101), names('u_open', 'u_new'))
+  t.mock.timers.tick(31_000)
+  await dictionary.table('u_open')
+  holding = false
+  arrive()
+  // The one who asked gets what was read. It is not what the next one is told.
+  assert.deepEqual([...(await early)], ['u_open'])
+  assert.deepEqual([...(await dictionary.knownTables(['u_open', 'u_new']))].sort(), ['u_new', 'u_open'])
+})

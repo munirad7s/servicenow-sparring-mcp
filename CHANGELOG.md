@@ -5,9 +5,10 @@ answer; such changes are listed under "Changed".
 
 ## Unreleased
 
-A review of the fixes of 0.4.3, and this time before the release that carries the answers to it. It rated 10 of
-13 as holding for the case they were written for and not for another, with the same pattern as before: a rule
-that stood where the fault was found and not where every path runs through.
+Two reviews, and this time before the release that carries the answers to them: one of the fixes of 0.4.3, and
+one of the answers to that. The first rated 10 of 13 as holding for the case they were written for and not for
+another, the second 5 of 8, with the same pattern as before: a rule that stood where the fault was found and not
+where every path runs through.
 
 ### Security
 
@@ -19,28 +20,44 @@ that stood where the fault was found and not where every path runs through.
   record. Every answer about the tables of an instance stands behind the look now, in the one place where such
   answers are given: what a table is and extends, which names are tables, which tables are closed, which are
   below a table, and which are parts of a rotated one.
-- **A secret in an element stayed where a list inside it never closed.** 0.4.3 took lists and objects behind a
-  key that looks like a secret out before it read the elements. A list that never closes is cut where it opens,
-  and cut first, it took the end of the element around it along: `<password>… "tokens":[</password>` kept what
-  stands in front of the list. Elements are read first again, as in 0.4.2. The other way round more is kept
-  back than had to be, never less.
+- **An element and a list that reach into each other kept a secret, whichever was taken out first.** 0.4.2 read
+  the elements whose name suggests a secret before the lists and objects behind such a key, 0.4.3 after. Each
+  order has a text that keeps something: an element that ends inside a list takes the key of the list along, so
+  that the rest of the list stays, and a list that never closes takes the end of the element around it, so that
+  what stands before the list stays. All of them are found in the text as it came now, before anything is taken
+  out, and what overlaps is taken out as one.
+- **Taking one thing out can make the next one recognisable.** An element that holds another element is none
+  that holds text, until the inner one is gone. A text is read until a reading finds nothing more, and only
+  then is it quoted or cut: cut after one reading, the end that the next reading needed was gone.
 - **Text of the instance was shortened before it was read, in more places than the error of a request.** A
   warning that quotes a value of the instance keeps sixty or eighty characters of it, and a long value of a row
   is cut to fit an answer. Both are read for secrets first now, in the one function that quotes and the one
   that cuts, whichever tool calls them.
 - A cell that came as an object or a list, where an instance sends a text or a value with what it shows for it,
   is passed on as the text it is written as: read piece by piece, a key and its value were never seen together,
-  and `{"otp": 482913}` stayed.
+  and `{"otp": 482913}` stayed. A value with its display value is passed on as those two and nothing else.
+- **What was read before everything about tables was dropped is not remembered after it.** A look-up that was
+  under way when the look at the table of tables found a change wrote what it had read into what is remembered,
+  and brought the old state back for ten minutes.
+- **A look that came without what it looks for is no "nothing changed".** Where the number of tables or the time
+  of the last change did not come back, two looks were alike whatever happened between them. Such a look
+  drops what is remembered, every time.
+- **A setting that cannot be read is neither on nor off.** Whether the instance answers a query it cannot use
+  with no rows decides what counts as proof that a database view applies a condition. Where the property came
+  back without a value, or did not come back and the instance did not say that there is none, it counted as
+  off. It counts as not known now, and the stricter proof is asked for.
 
 ### Fixed
 
-- Counts under keys that become one key, because the same part was taken out of both, are added and not lost.
+- Counts under keys that become one key, because the same part was taken out of both, are added and not lost,
+  and a key called like something every object has (`__proto__`) is kept.
 - A sys_id written in capitals is traced by `sn_origin` like the one in small letters.
 - A company code that comes back without a value that can be read is a failed read: it was kept for ten minutes
   as "not set".
 - A note that stands for something taken out is not cut in two where a long text is shortened.
 - `npm run compare`: a direct read that brings no list is no answer to hold anything against, also where the
-  status says 200, and a setting that cannot be read is not taken for "off".
+  status says 200; where neither the server nor the direct read got a list, that is a difference and the run
+  ends with 1; and a setting that cannot be read is not taken for "off".
 
 ### Looked at, and left as it is
 

@@ -772,4 +772,8 @@ test('a cell is a text or a value with what is shown for it, and anything else i
   // key and its value are read together by whatever looks for secrets behind this.
   const sn = new ServiceNowClient(config, async () => json({ result: [{ number: 'INC1', caller_id: { value: 'abc', display_value: 'Abel Tuter' }, u_data: { otp: 482913 }, u_list: ['a', { b: 1 }] }] }))
   assert.deepEqual((await sn.query({ table: 'incident' })).records, [{ number: 'INC1', caller_id: { value: 'abc', display_value: 'Abel Tuter' }, u_data: '{"otp":482913}', u_list: '["a",{"b":1}]' }])
+  // A value with its display value stays what it is, whatever else comes with it: the checks on display values
+  // behind this look for exactly that shape, and a name they do not find is a name they do not take off.
+  const wide = new ServiceNowClient(config, async () => json({ result: [{ caller_id: { value: 'abc', display_value: 'Abel Tuter', link: 'https://x', extra: 'y' } }] }))
+  assert.deepEqual((await wide.query({ table: 'incident' })).records, [{ caller_id: { value: 'abc', display_value: 'Abel Tuter' } }])
 })

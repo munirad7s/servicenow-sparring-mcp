@@ -5794,13 +5794,18 @@ test('a list or an object behind a key that looks like a secret is taken out who
   assert.equal(clean(String.raw`{"body":"{\"secrets\":[\"TOP\\\"]SECRET\",\"x\"],\"name\":\"x\"}"}`).text, String.raw`{"body":"{\"secrets\":\"[withheld]\",\"name\":\"x\"}"}`)
   // What never closes holds the rest of the text.
   assert.equal(clean('{"name":"x","tokens":["TOPSECRET","OTHER"').text, '{"name":"x","tokens":"[withheld]"')
-  // The elements are read first. A list that never closes is cut where it opens: cut before the elements were
-  // read, it would take the end of the element around it along, and what stands in that element would stay.
-  assert.equal(clean('<password>TOPSECRET "tokens":[</password>').text, '<password>[withheld]</password>')
-  assert.doesNotMatch(clean('<note>x</note><password>TOPSECRET {"tokens":["a"</password><name>n</name>').text, /TOPSECRET/)
-  // The other way round more is kept back than had to be: an element that seems to open inside a list and close
-  // behind it takes the bracket along, and the list is cut to the end of the text.
-  assert.equal(clean('{"tokens":["<password>"],"label":"</password>","keep":"VISIBLE"}').text, '{"tokens":"[withheld]"')
+  // An element and a list can reach into each other. Whichever is taken out first loses the other its mark: an
+  // element that ends inside a list takes the key of the list along, and a list that never closes takes the end
+  // of the element around it. So all of them are found in the text as it came, and what overlaps goes as one.
+  assert.deepEqual(clean('<password>TOPSECRET "tokens":[</password>'), { text: '<password>[withheld]</password>', withheld: 1 })
+  assert.deepEqual(clean('{"note":"<password>","tokens":["</password>","TOPSECRET"]}'), { text: '{"note":"[withheld]}', withheld: 1 })
+  assert.deepEqual(clean('{"tokens":["<password>"],"label":"</password>","keep":"VISIBLE"}'), { text: '{"tokens":[withheld]","keep":"VISIBLE"}', withheld: 1 })
+  assert.deepEqual(clean('<password>TOPSECRET "tokens":["</password>","MORE"]'), { text: '[withheld]', withheld: 1 })
+  assert.deepEqual(clean('{"a":"<password>","tokens":["</password>","TOPSECRET"'), { text: '{"a":"[withheld]', withheld: 1 })
+  assert.deepEqual(clean('{"credentials":{"password":"x","pin":"<secret>y</secret>"}}'), { text: '{"credentials":"[withheld]"}', withheld: 1 })
+  // Taking one thing out can make the next recognisable: the text is read until a reading finds nothing more.
+  // An element that holds another element is none that holds text, until the inner one is gone.
+  assert.deepEqual(clean('<password>S3CRET {"token":"<x>z</x>"}</password>'), { text: '<password>[withheld]</password>', withheld: 2 })
   // Each bracket is closed by its own kind: "}" inside a list of texts closes nothing, and neither does one outside a text.
   assert.equal(clean('{"tokens":["a}b"],"n":1}').text, '{"tokens":"[withheld]","n":1}')
   assert.equal(clean('{"tokens":[1,2},3],"n":1}').text, '{"tokens":"[withheld]","n":1}')
@@ -6527,6 +6532,10 @@ test('"no table of that name" is not older than the last look either, with a lis
 test('counts under keys that become one key are added, and a sys_id in capitals is the same record', async () => {
   const two = await connect(origin('sys_plugins', [change()], [version('current', '{"token":"A"}', '2026-03-01 10:00:00', 'abel'), version('previous', '{"token":"B"}', '2026-03-01 09:59:59')]))
   assert.deepEqual((await two.answer('sn_origin', { sysId: ID })).evidence.versions.bySource, { '{"token":"[withheld]"}': 2 })
+
+  // A source called like something every object has is counted like any other.
+  const odd = await connect(origin('sys_plugins', [change()], [version('current', '__proto__', '2026-03-01 10:00:00', 'abel')]))
+  assert.deepEqual(Object.entries((await odd.answer('sn_origin', { sysId: ID })).evidence.versions.bySource), [['__proto__', 1]])
 
   // Written in capitals, a generated sys_id is traced like the one in small letters.
   const deleted = await connect(origin(null, [change({ action: 'DELETE' })], []))
