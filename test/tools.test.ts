@@ -423,6 +423,11 @@ test('a view that lists the fields it takes from a table has no other field of t
   for (let run = 0; run < 2; run++) await carried.answer('sn_query', { table: 'incident_caller', query: 'inc_sys_id=x', fields: ['inc_number'] })
   assert.deepEqual(carried.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_sys_id'), '', 'inc_sys_id=x', 'inc_sys_id=x'])
 
+  // sn_schema reads the definition anew, and what the view was seen to carry is asked for again after it.
+  await carried.answer('sn_schema', { table: 'incident_caller' })
+  await carried.answer('sn_query', { table: 'incident_caller', query: 'inc_sys_id=x', fields: ['inc_number'] })
+  assert.equal(carried.calls.filter((entry) => entry.table === 'incident_caller' && entry.query === proof('inc_sys_id')).length, 2)
+
   // A view without a row proves nothing: the query goes out, and the question is asked again the next time.
   const empty = await connect(world(listed, { table: 'incident_caller', rows: [] }))
   for (let run = 0; run < 2; run++) await empty.answer('sn_query', { table: 'incident_caller', query: 'inc_sys_id=x', fields: ['inc_number'] })

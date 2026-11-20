@@ -234,6 +234,8 @@ export class Dictionary {
   forget(name: string): void {
     for (const cache of [this.tables, this.columnSets, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.childSets]) cache.delete(name)
     for (const key of [...this.choiceLists.keys()]) if (key.startsWith(`${name}.`)) this.choiceLists.delete(key)
+    // What a view was seen to carry belongs to its definition: a field taken off its list is asked about again.
+    for (const key of [...this.carried.keys()]) if (key.startsWith(`${name}.`)) this.carried.delete(key)
     this.knownNames.delete(name)
   }
 
