@@ -73,9 +73,10 @@ matches nothing. Both look like an answer. Five rules keep the evidence from lyi
    out every row without an assignee, and the answer says that too. The check of choice values needs `sys_choice`
    to be readable and covers the fields of the table itself; where it could not be made, the answer says so.
 4. **Counts say what they count.** `total` is what matched on the server before row-level access rules; `returned`
-   is what is in the answer. When rows were withheld, the answer says so. A table can also have business rules
-   that run on every read and add conditions depending on who asks; where it has, the answer says so and names
-   the query that lists them.
+   is what is in the answer. When rows were withheld, the answer says so. Three things can stand between a table
+   and its answer without a trace in it: business rules that run on every read and add conditions depending on
+   who asks, archive rules that move records into another table, and a rotation that drops old rows. Where a
+   table has one of them, the answer says so and names the query that shows it.
 5. **"Could not be checked" is never "nothing found".** A table this account cannot read is an error of kind `acl`.
    A tool that depends on it marks that part `not_checked` or `unknown`.
 
@@ -157,8 +158,8 @@ it.
 
 ## Requests, caching and pauses
 
-- One `sn_query` is one request, plus a few the first time a table is used: to check its field names, and to
-  look for business rules that run on every read. The other functions cost more: `sn_origin` 4 to 9,
+- One `sn_query` is one request, plus about seven the first time a table is used: to check its field names, and
+  to look for rules that filter, archive or rotate it. The other functions cost more: `sn_origin` 4 to 9,
   `sn_dependencies` 25 to 30 (about 15 for one field), `sn_instance` about 50. Every answer carries its count in
   `requests`. At most six requests of one function are in flight at a time.
 - What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is

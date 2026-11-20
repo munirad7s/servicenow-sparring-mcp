@@ -127,14 +127,36 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     return cleaned
   }
 
-  /** Says so when business rules run on every read of the table: what comes back is then what they let this account see. */
+  /**
+   * Says what stands between the table and its answer, where the instance tells: business rules that run on every
+   * read, archive rules that move records away, and a rotation that drops old rows. Each of them makes "nothing
+   * found" or a count mean less than it seems to.
+   */
   async function warnAboutQueryRules(table: string, warnings: string[]): Promise<void> {
-    const rules = await ctx.dict.queryRules(table).catch(() => null)
-    if (!rules?.count) return
-    warnings.push(
-      `${rules.count} business rule${rules.count === 1 ? ' runs' : 's run'} on every read of this table ("before query") and can hide rows depending on who asks: ` +
-        `rows and total are what ${rules.count === 1 ? 'it lets' : 'they let'} this account see. To read ${rules.count === 1 ? 'it' : 'them'}: sys_script, ${rules.query}.`,
-    )
+    const [rules, archive, rotation] = await Promise.all([
+      ctx.dict.queryRules(table).catch(() => null),
+      ctx.dict.archiveRules(table).catch(() => null),
+      ctx.dict.rotation(table).catch(() => null),
+    ])
+    if (rules?.count) {
+      warnings.push(
+        `${rules.count} business rule${rules.count === 1 ? ' runs' : 's run'} on every read of this table ("before query") and can hide rows depending on who asks: ` +
+          `rows and total are what ${rules.count === 1 ? 'it lets' : 'they let'} this account see. To read ${rules.count === 1 ? 'it' : 'them'}: sys_script, ${rules.query}.`,
+      )
+    }
+    if (archive?.count) {
+      warnings.push(
+        `${archive.count} archive rule${archive.count === 1 ? ' moves' : 's move'} records of this table into an archive table (ar_${table}): rows and total are what is not archived yet. ` +
+          `To read ${archive.count === 1 ? 'it' : 'them'}: sys_archive, ${archive.query}.`,
+      )
+    }
+    if (rotation) {
+      const kept = Math.round(rotation.rotations * rotation.days * 10) / 10
+      warnings.push(
+        `This table is rotated: it keeps about ${kept} days (${rotation.rotations} parts of ${rotation.days} day${rotation.days === 1 ? '' : 's'}), and older rows are gone. ` +
+          'An empty answer for an earlier time says nothing about what happened then.',
+      )
+    }
   }
 
   /** Rows per value of one field, through the Aggregate API. An unknown field would be ignored there too, and counted as one group. */

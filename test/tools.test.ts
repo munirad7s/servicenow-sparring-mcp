@@ -87,8 +87,33 @@ test('sn_query answers with the query, the total, the cost and where to continue
   assert.equal(data.truncated, true)
   assert.equal(data.nextOffset, 2)
   assert.equal(data.fieldCheck, 'all field names verified against sys_dictionary')
-  // Four to check the names, one to ask for rules that run on every read, one for the rows.
-  assert.equal(data.requests, 6)
+  // Four to check the names, three to ask what stands between the table and its answer (rules that run on every
+  // read, archive rules, a rotation), one for the rows.
+  assert.equal(data.requests, 8)
+})
+
+test('sn_query says when a table archives its records or drops old rows', async () => {
+  // Measured: 40 active archive rules and 49 rotated tables on one instance. syslog keeps 8 parts of 7 days.
+  const { answer, sentTo } = await connect([
+    { table: 'sys_db_object', query: 'name=syslog', rows: [tableRow('syslog', 'Log')] },
+    { table: 'sys_dictionary', query: 'nameINsyslog', rows: [column('syslog', 'source'), column('syslog', 'sys_created_on', 'glide_date_time')] },
+    { table: 'sys_archive', query: 'tableINincident,task', rows: [{ sys_id: 'a1', table: 'incident', active: 'true' }] },
+    { table: 'sys_archive', rows: [] },
+    { table: 'sys_table_rotation', query: 'name=syslog', rows: [{ name: 'syslog', type: 'rotate', duration: '1970-01-08 00:00:00', rotations: '8' }] },
+    { table: 'sys_table_rotation', rows: [] },
+    ...dictionaryRoutes,
+    { table: 'incident', rows: [{ number: 'INC1' }] },
+    { table: 'syslog', rows: [] },
+  ])
+  const incident = await answer('sn_query', { table: 'incident', query: 'active=false', fields: ['number'] })
+  assert.match(incident.warnings.join(' '), /1 archive rule moves records of this table into an archive table \(ar_incident\).*sys_archive, tableINincident,task\^active=true/)
+
+  const log = await answer('sn_query', { table: 'syslog', query: 'source=my_integration^sys_created_on<2026-01-01', fields: ['source'] })
+  assert.match(log.warnings.join(' '), /This table is rotated: it keeps about 56 days \(8 parts of 7 days\), and older rows are gone/)
+  assert.doesNotMatch(log.warnings.join(' '), /archive rule/)
+  // Asked once per table, not with every query.
+  await answer('sn_query', { table: 'syslog', fields: ['source'] })
+  assert.equal(sentTo('sys_table_rotation').length, 2)
 })
 
 test('sn_query says when business rules run on every read of the table', async () => {
@@ -98,7 +123,7 @@ test('sn_query says when business rules run on every read of the table', async (
 
   const { answer, sentTo } = await connect([rules([{ sys_id: 'r1', action_query: 'true' }], 2), ...dictionaryRoutes, incident, stats('incident', { '1': 1 })])
   const data = await answer('sn_query', { table: 'incident', fields: ['number'] })
-  assert.match(data.warnings.join(' '), /2 business rules run on every read of this table.*what they let this account see.*sys_script, collectionINincident,task,global\^action_query=true\^active=true/)
+  assert.match(data.warnings.join(' '), /2 business rules run on every read of this table.*what they let this account see.*sys_script, collectionINincident,task\^action_query=true\^active=true/)
   // Counting is a read too. The rules of a table are asked for once, not with every query.
   assert.match((await answer('sn_query', { table: 'incident', groupBy: 'state' })).warnings.join(' '), /2 business rules run on every read/)
   assert.equal(sentTo('sys_script').length, 1)
@@ -1966,6 +1991,16 @@ test('sn_instance names the release, the account and what cannot be read', async
   assert.doesNotMatch(warnings, /domains|returns_no_rows/)
 })
 
+test('sn_instance counts the business rules that run on every read of every table', async () => {
+  const { answer } = await connect([
+    { table: 'sys_script', query: 'collection=global^action_query=true', rows: [{ sys_id: 'r1', action_query: 'true' }] },
+    ...sourceTables.map((table) => ({ table, rows: [{ sys_id: '1' }] })),
+  ])
+  const data = await answer('sn_instance')
+  assert.equal(data.queryRulesOnEveryTable, 1)
+  assert.match(data.warnings.join(' '), /1 business rule runs on every read of every table.*sys_script, collection=global\^action_query=true\^active=true/)
+})
+
 test('sn_instance names two settings that change what every answer means', async () => {
   const { answer } = await connect([
     { table: 'sys_properties', rows: [{ name: 'glide.war', value: 'glide-zurich-07-01-2025__patch1.zip' }, { name: 'glide.invalid_query.returns_no_rows', value: 'true' }] },
@@ -1975,6 +2010,8 @@ test('sn_instance names two settings that change what every answer means', async
   ])
   const data = await answer('sn_instance')
   assert.deepEqual({ domains: data.domains, invalid: data.invalidQueryReturnsNoRows }, { domains: 7, invalid: 'true' })
+  // This instance has no readable sys_script: how many rules run on every table is then not known, which is not "none".
+  assert.equal(data.queryRulesOnEveryTable, null)
   const warnings = data.warnings.join(' ')
   assert.match(warnings, /separates its data into domains \(7 in the table "domain"\).*not a count over the whole instance/)
   assert.match(warnings, /answers a condition it cannot use with no rows, not with all rows/)

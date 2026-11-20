@@ -34,6 +34,10 @@ answer; such changes are listed under "Changed".
 - `sn_query` says when business rules run on every read of the queried table. Such a "before query" rule can hide
   rows depending on who asks, and the total counts only what it lets through. Measured: 183 active rules of that
   kind on one instance, among them two that apply to incident and ten that apply to customer service cases.
+- `sn_query` says when the queried table archives its records (an active archive rule moves them into another
+  table) and when it is rotated (a table such as `syslog` keeps a few weeks and drops the rest). Measured: 40 active
+  archive rules and 49 rotated tables on one instance. An empty answer for last year means little on such a table.
+- `sn_instance` counts the business rules that run on every read of every table (`queryRulesOnEveryTable`).
 - `sn_instance` names two settings that change what every answer means: whether the instance separates its data
   into domains (`domains`, read from the table of that name), which limits every row and count to the domains of
   the account, and `glide.invalid_query.returns_no_rows`, which turns a query the instance cannot use into an

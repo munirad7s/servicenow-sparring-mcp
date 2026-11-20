@@ -91,6 +91,8 @@ export class Dictionary {
   private readonly choiceLists = new Map<string, Entry<Choice[]>>()
   private readonly labelSets = new Map<string, Entry<Map<string, string>>>()
   private readonly ruleCounts = new Map<string, Entry<{ count: number; query: string } | null>>()
+  private readonly archiveCounts = new Map<string, Entry<{ count: number; query: string } | null>>()
+  private readonly rotations = new Map<string, Entry<{ rotations: number; days: number } | null>>()
 
   constructor(
     private readonly sn: ServiceNowClient,
@@ -282,17 +284,50 @@ export class Dictionary {
   /**
    * The active business rules that run on every read of a table ("before query"). Such a rule can add conditions
    * that depend on who asks, so the rows and the total an account gets are what the rule lets through. Rules on a
-   * parent table and on the table "global" run for the table too. null for a database view or an unknown table.
+   * parent table run for the table too. Rules on the table "global" run for every table: they are counted once,
+   * by sn_instance, and not named with every answer. null for a database view or an unknown table.
    */
   async queryRules(table: string): Promise<{ count: number; query: string } | null> {
     const info = await this.table(table)
     if (!info || info.kind === 'database_view') return null
     return this.cached(this.ruleCounts, table, async () => {
-      const query = `collectionIN${[...info.chain, 'global'].join(',')}^action_query=true^active=true`
+      const query = `collectionIN${info.chain.join(',')}^action_query=true^active=true`
       const page = await this.sn.query<Record<string, string>>({ table: 'sys_script', query, fields: ['sys_id', 'action_query'], limit: 1 })
       // The answer checks its own query: a row without the field means the instance does not know it and ignored the condition.
       if (page.total === null || (page.records[0] && !('action_query' in page.records[0]))) return null
       return { count: page.total, query }
+    })
+  }
+
+  /**
+   * The active archive rules of a table and its parents. Such a rule moves records out of the table into an archive
+   * table ("ar_<table>"), so the table answers only with what is not archived yet. null for a view or an unknown table.
+   */
+  async archiveRules(table: string): Promise<{ count: number; query: string } | null> {
+    const info = await this.table(table)
+    if (!info || info.kind === 'database_view') return null
+    return this.cached(this.archiveCounts, table, async () => {
+      const query = `tableIN${info.chain.join(',')}^active=true`
+      const page = await this.sn.query<Record<string, string>>({ table: 'sys_archive', query, fields: ['sys_id', 'table', 'active'], limit: 1 })
+      // The answer checks its own query, as everywhere: a row without the fields means the conditions were ignored.
+      if (page.total === null || (page.records[0] && !('table' in page.records[0] && 'active' in page.records[0]))) return null
+      return { count: page.total, query }
+    })
+  }
+
+  /**
+   * How long a rotated table keeps its rows. A table such as syslog is spread over a few tables by time, and the
+   * oldest is emptied in turn: what is older than all of them is gone. null if the table is not rotated.
+   */
+  async rotation(table: string): Promise<{ rotations: number; days: number } | null> {
+    assertTableName(table)
+    return this.cached(this.rotations, table, async () => {
+      const page = await this.sn.query<Record<string, string>>({ table: 'sys_table_rotation', query: `name=${table}^type=rotate`, fields: ['name', 'type', 'duration', 'rotations'], limit: 1 })
+      const row = page.records.find((item) => item.name === table && item.type === 'rotate')
+      // Measured: the duration is stored as a point in time counted from 1970-01-01, seven days as "1970-01-08 00:00:00".
+      const length = row ? Date.parse(`${String(row.duration).replace(' ', 'T')}Z`) / 86_400_000 : NaN
+      const rotations = Number(row?.rotations)
+      return Number.isFinite(length) && length > 0 && Number.isInteger(rotations) && rotations > 0 ? { rotations, days: Math.round(length * 10) / 10 } : null
     })
   }
 

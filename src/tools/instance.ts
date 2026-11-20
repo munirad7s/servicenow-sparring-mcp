@@ -137,6 +137,10 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
           .string()
           .nullable()
           .describe('Value of glide.invalid_query.returns_no_rows. "true" makes the instance answer a query it cannot use with no rows instead of all rows. null if not returned, which means the default: all rows.'),
+        queryRulesOnEveryTable: z
+          .number()
+          .nullable()
+          .describe('Active business rules on the table "global" that run on every read of every table. Such a rule can hide rows from this account anywhere. null if it could not be read.'),
         domains: z
           .number()
           .nullable()
@@ -173,7 +177,8 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         const sources: Record<string, string> = Object.fromEntries(probes.map(([table, result]) => [table, result.status]))
         const totalOf = (table: string) => probes.find(([name]) => name === table)?.[1].total ?? null
 
-        const [properties, upgrades, storeApps, scopeApps, plugins, account, domains] = await Promise.all([
+        const GLOBAL_QUERY_RULES = 'collection=global^action_query=true^active=true'
+        const [properties, upgrades, storeApps, scopeApps, plugins, account, domains, globalRules] = await Promise.all([
           sn
             .query<{ name: string; value: string }>({
               table: 'sys_properties',
@@ -190,6 +195,11 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
           accountRoles(sn),
           // The table exists only where domain separation is installed.
           probe(sn, 'domain'),
+          // Asked for with the field that marks such a rule: a row without it would mean the condition was ignored.
+          sn
+            .query<Record<string, string>>({ table: 'sys_script', query: GLOBAL_QUERY_RULES, fields: ['sys_id', 'action_query'], limit: 1 })
+            .then((page) => (page.records[0] && !('action_query' in page.records[0]) ? null : page.total))
+            .catch(() => null),
         ])
 
         const build = properties?.get('glide.war') ?? null
@@ -201,6 +211,12 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
           warnings.push(
             `This instance separates its data into domains (${domains.total} in the table "domain"). Rows and totals are those of the domains this account can see: ` +
               'a count is not a count over the whole instance.',
+          )
+        }
+        if (globalRules) {
+          warnings.push(
+            `${globalRules} business rule${globalRules === 1 ? ' runs' : 's run'} on every read of every table (a "before query" rule on the table "global"). ` +
+              `Whether ${globalRules === 1 ? 'it hides' : 'they hide'} rows from this account cannot be seen from here. To read ${globalRules === 1 ? 'it' : 'them'}: sys_script, ${GLOBAL_QUERY_RULES}.`,
           )
         }
         if (properties?.get('glide.invalid_query.returns_no_rows') === 'true') {
@@ -225,6 +241,7 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
           release: { build, family: build ? (/^glide-([a-z0-9]+)-/.exec(build)?.[1] ?? null) : null },
           scriptSandbox: properties?.get('glide.script.use.sandbox') ?? null,
           invalidQueryReturnsNoRows: properties?.get('glide.invalid_query.returns_no_rows') ?? null,
+          queryRulesOnEveryTable: globalRules,
           domains: domains.status === 'readable' || domains.status === 'row_restricted' ? domains.total : null,
           lastUpgrade: pick(upgrades?.[0]),
           lastFamilyUpgrade: pick(upgrades?.find((upgrade) => upgrade.kind === 'family')),

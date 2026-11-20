@@ -124,6 +124,8 @@ error of kind \`blocked\`.
 - A count is what matched on the server before row-level access rules. This account may see fewer rows.
 - A business rule that runs on every read ("before query") can add conditions that depend on who asks. Rows and
   counts are then what the rule lets this account see. sn_query says so where the table has such rules.
+- An archive rule moves records into another table, and a rotated table drops old rows. sn_query says so where
+  the queried table has either. An empty answer for an earlier time is then no evidence of absence.
 - A table this account cannot read is reported as an error of kind \`acl\`. That is "could not be checked".
 - Field names are verified against the dictionary before a query is sent, or against a row of the table when the
   dictionary cannot be used. If neither is possible and the table is not empty, a filtered query is not sent.
