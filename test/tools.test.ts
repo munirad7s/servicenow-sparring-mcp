@@ -625,10 +625,20 @@ test('a closed table is reached neither through its child tables nor through its
   const some = await onlyTasks.answer('sn_query', { table: 'task', fields: ['number'] })
   assert.equal(onlyTasks.sentTo('task')[0].query, 'sys_class_nameINtask^ORsys_class_nameSTARTSWITHsys_^ORsys_class_nameISEMPTY')
   assert.equal(some.query, onlyTasks.sentTo('task')[0].query, 'the answer names the query that was sent')
-  // Where the tables below cannot be listed, the condition is added all the same.
+  // Where the tables below cannot be listed, it cannot be told which rows belong to a closed one: a class that is
+  // on the list can still be closed by a parent between it and this table. Nothing is sent.
   const unlisted = await connect([{ table: 'sys_db_object', exact: 'name=task', rows: [tableRow('task', 'Task')] }, ...family.filter((route) => route.query !== 'name=task')], { tables: { allow: ['task', 'sys_*'], deny: [] } })
-  await unlisted.answer('sn_query', { table: 'task', fields: ['number'] })
-  assert.equal(unlisted.sentTo('task')[0].query, 'sys_class_nameINtask^ORsys_class_nameSTARTSWITHsys_^ORsys_class_nameISEMPTY')
+  const unsure = await unlisted.call('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(unsure.data.error, 'blocked')
+  assert.match(unsure.data.message, /the tables below "task" could not be listed/)
+  assert.equal(unlisted.sentTo('task').length, 0)
+
+  // A class that is on the list, below a table that is not: its rows are rows of that table, and they are left out
+  // by name, because the list alone would let them through.
+  const between: Route = { table: 'sys_db_object', query: '^ORname=task', rows: [tableRow('task', 'Task'), tableRow('incident', 'Incident', 'task'), tableRow('u_major_incident', 'Major incident', 'incident', 'task')] }
+  const skipping = await connect([between, ...family], { tables: { allow: ['task', 'u_*', 'sys_*'], deny: [] } })
+  await skipping.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(skipping.sentTo('task')[0].query, 'sys_class_nameNOT INu_major_incident^ORsys_class_nameISEMPTY^sys_class_nameINtask^ORsys_class_nameSTARTSWITHu_^ORsys_class_nameSTARTSWITHsys_^ORsys_class_nameISEMPTY')
   // And where every table below is on the list, nothing is left out and nothing is said.
   const everything = await connect([children, ...family], { tables: { allow: ['task', 'incident', 'sys_*'], deny: [] } })
   const all = await everything.answer('sn_query', { table: 'task', fields: ['number'] })
@@ -871,14 +881,24 @@ test('an update name is taken for a record of a closed table in every way it can
     assert.equal(await isClosedRecord(noUsers, name), closed, name)
   }
   // A name built from what the record describes begins with its table as well.
+  const noLabels = deny(['sys_documentation'], closedTables(tableRow('sys_documentation', 'Field Label', 'sys_metadata')))
+  assert.equal(await isClosedRecord(noLabels, 'sys_documentation_incident_category_en'), true)
+  assert.equal(await isClosedRecord(noLabels, NAME), false)
+  // A list that closes the dictionary itself leaves nothing the server could check with: every record counts as closed.
   const noDictionary = deny(['sys_dictionary'], closedTables(tableRow('sys_dictionary', 'Dictionary Entry', 'sys_metadata')))
-  assert.equal(await isClosedRecord(noDictionary, 'sys_dictionary_incident_category'), true)
-  assert.equal(await isClosedRecord(noDictionary, NAME), false)
+  assert.equal(await isClosedRecord(noDictionary, NAME), true)
+  // No name at all: which record it is cannot be told.
+  assert.equal(await isClosedRecord(noUsers, ''), true)
 
   // With a list of the only tables that may be read, the table has to be found and be open.
-  const listed = createContext(fakeInstance(dictionaryRoutes, { tables: { allow: ['incident', 'task', 'sys_*'], deny: [] } }).sn)
+  const scripts: Route[] = ['sys_script', 'sys_script_include'].map((name) => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name, 'sys_metadata')] }))
+  const listed = createContext(fakeInstance([...scripts, ...dictionaryRoutes], { tables: { allow: ['incident', 'task', 'sys_script', 'sys_metadata', 'sys_d*', 'sys_c*'], deny: [] } }).sn)
   assert.equal(await isClosedRecord(listed, `incident_${ID}`), false)
   assert.equal(await isClosedRecord(listed, `customer_contact_${ID}`), true)
+  // The table of a record is the longest beginning of its name that is a table: a script include is no business rule.
+  assert.equal(await isClosedRecord(listed, NAME), false)
+  assert.equal(await isClosedRecord(listed, `sys_script_include_${ID}`), true)
+  assert.equal(await isClosedRecord(listed, 'sys_script_include_my_util'), true)
   // No table of that name is known to the instance: what the record is cannot be told.
   assert.equal(await isClosedRecord(listed, 'sys_no_such_table_x'), true)
   // Where the list of closed tables cannot be established, every record counts as closed.
@@ -2963,8 +2983,10 @@ test('sn_instance names the release, the account and what cannot be read', async
 })
 
 test('applications are not read through their parent table where their own table is closed on this machine', async () => {
+  const known = ['v_plugin', 'sys_scope', 'sys_app'].map((name): Route => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] }))
   const world: Route[] = [
     closedTables(tableRow('sys_store_app', 'Store application', 'sys_scope', 'sys_package')),
+    ...known,
     ...dictionaryRoutes,
     { table: 'v_plugin', rows: [{ id: 'com.snc.incident', name: 'Incident', active: 'active', version: '1.0' }] },
     { table: 'sys_scope', rows: [{ name: 'Example application', scope: 'sn_example', version: '1.0', active: 'true' }] },

@@ -297,10 +297,11 @@ test('the tables below a table are listed only where the answer can be trusted',
   const major = tableRow('u_major_incident', 'Major incident', 'incident', 'task')
 
   const fine = below([task, incident, major])
-  assert.deepEqual(await new Dictionary(fine.sn).childTables('task'), ['incident', 'u_major_incident'])
+  // Each with its parents up to the table, so that a closed table in between can be seen.
+  assert.deepEqual([...((await new Dictionary(fine.sn).childTables('task')) ?? [])], [['incident', ['incident', 'task']], ['u_major_incident', ['u_major_incident', 'incident', 'task']]])
   // Every level of parents is asked for, and the table itself as proof that the query was applied.
   assert.match(fine.calls[0].query, /^super_class\.name=task\^ORsuper_class\.super_class\.name=task\^OR.*\^ORname=task$/)
-  assert.deepEqual(await new Dictionary(below([task]).sn).childTables('task'), [])
+  assert.equal((await new Dictionary(below([task]).sn).childTables('task'))?.size, 0)
 
   // Not trusted: the table itself is missing from the answer, a row matches none of the conditions, rows are
   // hidden, or the table of tables cannot be read. null means "assume that a closed table is among them".

@@ -38,6 +38,24 @@ platform was measured on an instance before anything was changed; the numbers ar
     of the payloads that are passed on.
   - A text search finds a record by the name behind one of its references (measured). It is refused on a table
     that points into a closed one.
+  - With a list of the only tables that may be read, a table on the list came back as rows of its parent where a
+    table between the two is not on the list: `task,u_*` let a `u_` table below a closed table through. Such a
+    table is closed, and where the tables below a table cannot be listed, nothing is sent.
+  - What the instance lists neither as a table nor as a database view was read as if nothing were closed. It
+    counts as closed now, and so does a database view that joins another view.
+  - The text of comments and work notes is rows of `sys_journal_field`. It is left out where that table is closed.
+  - `sn_schema` and `sn_dependencies` described a closed table: its fields, its rules, its child tables. Both
+    refuse it now, and a field name that does not exist on a closed table is no longer answered with the names
+    that do.
+  - The server's own look-ups went past the rules: for business rules that hide rows, archive rules, rotation,
+    choices, labels and dictionary overrides. Only the four tables the rules themselves are decided from are read
+    without them now (`sys_db_object`, `sys_db_view`, `sys_db_view_table`, `sys_dictionary`). A list that closes
+    `sys_db_object` or `sys_dictionary` through a parent table closes everything, and the answer says so.
+  - The names of deleted, archived and linked records (`sys_audit_delete.display_value`,
+    `sys_archive_log.display_value`, `sys_metadata_link.sys_name`) were passed on where the record is in a closed
+    table.
+  - An update name was matched against the first table name that fits. `task_sla_<sys_id>` fits `task` as well:
+    the longest table that exists decides now, and a record without an update name counts as closed.
 - **Secrets inside a payload:** the value of a system property was passed on where its type carried an attribute
   or was empty, a text shorter than 20 characters was not looked at, and a value of another record in the same
   payload was taken out by mistake. JSON keys such as `x-api-key` and `accessKey`, numbers, and JSON inside a JSON

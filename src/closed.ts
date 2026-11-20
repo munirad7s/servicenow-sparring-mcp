@@ -24,6 +24,9 @@ export interface ClosedTables extends Gate {
   mayHoldClosed(table: string): Promise<boolean>
 }
 
+/** Comments, work notes and the like: their entries are rows of another table. */
+const JOURNALS = new Set(['journal', 'journal_input', 'journal_list'])
+
 /** A query this long does not fit into a URL any more. */
 const MAX_SENT_QUERY = 7_000
 
@@ -46,9 +49,12 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     } catch {
       return `it could not be established whether "${table}" is a child table of a closed one`
     }
-    const parent = info?.chain.slice(1).find((name) => !sn.allows(name))
+    // Neither a table nor a database view the instance lists: then nothing says what it is a child of or what it
+    // joins. That can also mean that the entry is hidden from this account.
+    if (!info) return `it could not be established what "${table}" is: the instance lists it neither as a table nor as a database view`
+    const parent = info.chain.slice(1).find((name) => !sn.allows(name))
     if (parent) return childOf(table, parent)
-    for (const member of info?.members ?? []) {
+    for (const member of info.members ?? []) {
       const why = await reason(member.table, seen)
       if (why) return `"${table}" is a database view, and ${why}`
     }
@@ -64,18 +70,25 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
   }
 
   /**
-   * With a list of the only tables that may be read: whether a table below this one is not on it. Where the tables
-   * below cannot be listed, the answer is yes.
+   * With a list of the only tables that may be read: the tables below this one that are closed. A table is closed
+   * if it is not on the list, and also if it is on it and a table between it and this one is not: its rows are
+   * rows of that table. "unlisted" says whether any is not on the list, which a condition on the class can leave
+   * out by itself; "byParent" names those that are on the list and closed all the same. null where the tables
+   * below cannot be listed.
    */
-  async function unlistedBelow(table: string): Promise<boolean> {
-    if (!sn.openClasses()) return false
+  async function allowedBelow(table: string): Promise<{ unlisted: boolean; byParent: string[] } | null> {
+    if (!sn.openClasses()) return { unlisted: false, byParent: [] }
     const children = await dict.childTables(table)
-    return children === null || children.some((name) => !sn.allows(name))
+    if (!children) return null
+    const byParent = [...children].filter(([name, chain]) => sn.allows(name) && chain.slice(1, -1).some((parent) => !sn.allows(parent))).map(([name]) => name)
+    return { unlisted: [...children.keys()].some((name) => !sn.allows(name)), byParent: byParent.sort() }
   }
 
   async function mayHoldClosed(table: string): Promise<boolean> {
     if (!sn.restricted) return false
-    return (await reason(table)) !== null || (await deniedBelow(table)).length > 0 || (await unlistedBelow(table))
+    if ((await reason(table)) !== null || (await deniedBelow(table)).length > 0) return true
+    const below = await allowedBelow(table)
+    return below === null || below.unlisted || below.byParent.length > 0
   }
 
   /**
@@ -85,9 +98,13 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
    */
   async function classCondition(table: string, field: string): Promise<string | null> {
     const parts: string[] = []
-    const below = await deniedBelow(table)
-    if (below.length) parts.push(`${field}NOT IN${below.join(',')}^OR${field}ISEMPTY`)
-    if (await unlistedBelow(table)) parts.push(sn.openClasses(field)!)
+    const listed = await allowedBelow(table)
+    // Where the tables below cannot be listed, only the classes on the list are let through: that is all that can
+    // be said, and a class on the list with a closed parent in between cannot be told. So nothing is sent.
+    if (!listed) throw blocked(`Tables are closed on this machine, and the tables below "${table}" could not be listed, so it cannot be told which of its rows belong to a closed one.`, table)
+    const closed = [...new Set([...(await deniedBelow(table)), ...listed.byParent])].sort()
+    if (closed.length) parts.push(`${field}NOT IN${closed.join(',')}^OR${field}ISEMPTY`)
+    if (listed.unlisted) parts.push(sn.openClasses(field)!)
     return parts.length ? parts.join('^') : null
   }
 
@@ -152,8 +169,9 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
       const column = check?.resolved.get(path)
       // Which table the name comes from is not known: the type could not be read, or the field can point anywhere.
       if (!column?.type || column.type === 'document_id') return 'untold'
-      const target = column.type === 'domain_id' ? 'domain' : column.reference
-      if (column.type !== 'reference' && column.type !== 'glide_list' && column.type !== 'domain_id' && !target) return null
+      // The display value of a journal field is the text of its entries, which are rows of sys_journal_field.
+      const target = column.type === 'domain_id' ? 'domain' : JOURNALS.has(column.type) ? 'sys_journal_field' : column.reference
+      if (column.type !== 'reference' && column.type !== 'glide_list' && !target) return null
       if (!target) return 'untold'
       return (await mayHoldClosed(target)) ? 'closed' : null
     },

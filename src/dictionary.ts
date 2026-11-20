@@ -110,19 +110,25 @@ export class Dictionary {
   private readonly settings = new Map<string, Entry<boolean | null>>()
   private readonly closedSets = new Map<string, Entry<Map<string, string[]>>>()
 
-  /** The client, for the dictionary's own lookups. The gate of closed tables is built from them, so they do not pass through it. */
+  /**
+   * The client, for the lookups the gate of closed tables is built from: what a table is, what it extends, which
+   * fields it has, and which tables are closed. Those cannot pass through the gate they make. Every other lookup
+   * of this class goes through "gated", like the request of any tool.
+   */
   private readonly sn: {
     query<T = Row>(opts: QueryOptions): Promise<Page<T>>
     all<T = Row>(opts: Omit<QueryOptions, 'limit' | 'offset'>, maxRows?: number, pageSize?: number): Promise<{ records: T[]; total: number | null; complete: boolean }>
     readonly denied: { names: string[]; prefixes: string[] }
   }
-  private readonly childSets = new Map<string, Entry<string[] | null>>()
+  private readonly childSets = new Map<string, Entry<Map<string, string[]> | null>>()
+  private readonly gated: ServiceNowClient
 
   constructor(
     client: ServiceNowClient,
     private readonly ttlMs = 10 * 60_000,
     private readonly recheckMs = 30_000,
   ) {
+    this.gated = client
     this.sn = {
       query: <T = Row>(opts: QueryOptions) => client.query<T>({ ...opts, trusted: true }),
       all: <T = Row>(opts: Omit<QueryOptions, 'limit' | 'offset'>, maxRows?: number, pageSize?: number) => client.all<T>({ ...opts, trusted: true }, maxRows, pageSize),
@@ -171,7 +177,7 @@ export class Dictionary {
 
     let overridesRead = true
     try {
-      const { records, total, complete } = await this.sn.all<Record<string, string>>({
+      const { records, total, complete } = await this.gated.all<Record<string, string>>({
         table: 'sys_dictionary_override',
         query: `nameIN${info.chain.join(',')}`,
         fields: ['sys_id', 'name', 'element', ...OVERRIDABLE.map((key) => `${key}_override`), 'mandatory', 'read_only'],
@@ -201,7 +207,7 @@ export class Dictionary {
 
   /** The English label of each field, from the nearest table in the chain that has one. */
   private async loadLabels(chain: string[]): Promise<Map<string, { label: string; table: string }>> {
-    const { records, total, complete } = await this.sn.all<Record<string, string>>({
+    const { records, total, complete } = await this.gated.all<Record<string, string>>({
       table: 'sys_documentation',
       query: `nameIN${chain.join(',')}^language=en^elementISNOTEMPTY`,
       fields: ['name', 'element', 'label'],
@@ -311,7 +317,7 @@ export class Dictionary {
     if (!info) return []
 
     return this.cached(this.choiceLists, `${table}.${field}`, async () => {
-      const { records, total, complete } = await this.sn.all<Record<string, string>>(
+      const { records, total, complete } = await this.gated.all<Record<string, string>>(
         {
           table: 'sys_choice',
           query: `nameIN${info.chain.join(',')}^element=${field}^inactive=false^ORDERBYsequence`,
@@ -377,16 +383,21 @@ export class Dictionary {
           else if (row.name !== SENTINEL) throw untrusted('the instance ignored the conditions of the query')
         }
       }
+      // What a table is and which fields it has is read from these two. Where a list closes them as children of
+      // another table, nothing can be established without reading a closed table.
+      const needed = [SENTINEL, 'sys_dictionary'].find((name) => closed.has(name))
+      if (needed) throw untrusted(`"${needed}", which this server reads for every check, is a child table of ${closed.get(needed)!.find(isClosed)}, which is closed`)
       return closed
     })
   }
 
   /**
-   * The names of every table below a table, eight levels down. Used where a list names the only tables that may be
-   * read: a table below an open one can be closed. null if the list cannot be trusted, for the reasons given at
-   * closedTables: the caller then has to assume that a closed table is among them.
+   * Every table below a table, eight levels down, each with its parents up to the table. Used where a list names
+   * the only tables that may be read: a table below an open one can be closed, by itself or by a parent in
+   * between. null if the list cannot be trusted, for the reasons given at closedTables: the caller then has to
+   * assume that a closed table is among them.
    */
-  childTables(table: string): Promise<string[] | null> {
+  childTables(table: string): Promise<Map<string, string[]> | null> {
     assertTableName(table)
     return this.cached(this.childSets, table, async () => {
       const query = `${PARENT_FIELDS.map((path) => `${path}=${table}`).join('^OR')}^ORname=${table}`
@@ -394,9 +405,15 @@ export class Dictionary {
       if (!read || !read.complete || (read.total !== null && read.records.length < read.total)) return null
       // The table itself is asked for as proof that the query was applied as written.
       if (!read.records.some((row) => row.name === table)) return null
-      const below = read.records.filter((row) => row.name !== table)
-      if (below.some((row) => !PARENT_FIELDS.some((path) => row[path] === table))) return null
-      return below.map((row) => row.name).filter((name): name is string => typeof name === 'string' && name !== '')
+      const below = new Map<string, string[]>()
+      for (const row of read.records) {
+        if (row.name === table) continue
+        const parents = PARENT_FIELDS.map((path) => row[path]).filter((name): name is string => typeof name === 'string' && name !== '')
+        // A row that does not have the table among its parents matches none of the conditions.
+        if (typeof row.name !== 'string' || !row.name || !parents.includes(table)) return null
+        below.set(row.name, [row.name, ...parents.slice(0, parents.indexOf(table) + 1)])
+      }
+      return below
     })
   }
 
@@ -411,7 +428,7 @@ export class Dictionary {
     if (!info || info.kind === 'database_view') return null
     return this.cached(this.ruleCounts, table, async () => {
       const query = `collectionIN${info.chain.join(',')}^action_query=true^active=true`
-      const page = await this.sn.query<Record<string, string>>({ table: 'sys_script', query, fields: ['sys_id', 'action_query'], limit: 1 })
+      const page = await this.gated.query<Record<string, string>>({ table: 'sys_script', query, fields: ['sys_id', 'action_query'], limit: 1 })
       // The answer checks its own query: a row without the field means the instance does not know it and ignored the condition.
       if (page.total === null || (page.records[0] && !('action_query' in page.records[0]))) {
         throw new ServiceNowError('The instance did not answer the question about query business rules as it was asked.', 'invalid_response', 'sys_script')
@@ -428,7 +445,7 @@ export class Dictionary {
   emptyOnInvalidQuery(): Promise<boolean | null> {
     return this.cached(this.settings, 'emptyOnInvalidQuery', async () => {
       const name = 'glide.invalid_query.returns_no_rows'
-      const page = await this.sn.query<Record<string, string>>({ table: 'sys_properties', query: `name=${name}`, fields: ['name', 'value'], limit: 1 }).catch(() => null)
+      const page = await this.gated.query<Record<string, string>>({ table: 'sys_properties', query: `name=${name}`, fields: ['name', 'value'], limit: 1 }).catch(() => null)
       if (!page || (page.records.length === 0 && (page.total ?? 0) > 0)) return null
       return page.records.find((row) => row.name === name)?.value === 'true'
     })
@@ -443,7 +460,7 @@ export class Dictionary {
     if (!info || info.kind === 'database_view') return null
     return this.cached(this.archiveCounts, table, async () => {
       const query = `tableIN${info.chain.join(',')}^active=true`
-      const page = await this.sn.query<Record<string, string>>({ table: 'sys_archive', query, fields: ['sys_id', 'table', 'active'], limit: 1 })
+      const page = await this.gated.query<Record<string, string>>({ table: 'sys_archive', query, fields: ['sys_id', 'table', 'active'], limit: 1 })
       // The answer checks its own query, as everywhere: a row without the fields means the conditions were ignored.
       if (page.total === null || (page.records[0] && !('table' in page.records[0] && 'active' in page.records[0]))) {
         throw new ServiceNowError('The instance did not answer the question about archive rules as it was asked.', 'invalid_response', 'sys_archive')
@@ -459,7 +476,7 @@ export class Dictionary {
   async rotation(table: string): Promise<{ rotations: number; days: number } | null> {
     assertTableName(table)
     return this.cached(this.rotations, table, async () => {
-      const page = await this.sn.query<Record<string, string>>({ table: 'sys_table_rotation', query: `name=${table}^type=rotate`, fields: ['name', 'type', 'duration', 'rotations'], limit: 1 })
+      const page = await this.gated.query<Record<string, string>>({ table: 'sys_table_rotation', query: `name=${table}^type=rotate`, fields: ['name', 'type', 'duration', 'rotations'], limit: 1 })
       const row = page.records.find((item) => item.name === table && item.type === 'rotate')
       // Measured: the duration is stored as a point in time counted from 1970-01-01, seven days as "1970-01-08 00:00:00".
       const length = row ? Date.parse(`${String(row.duration).replace(' ', 'T')}Z`) / 86_400_000 : NaN
@@ -526,7 +543,11 @@ export class Dictionary {
       }
       return null
     }
-    if (!/^[0-9a-f]{32}$/.test(String(view.sys_id))) return null
+    // Not every sys_id is 32 hex digits. One that cannot go into a query leaves the tables of the view unknown,
+    // which is not the same as "no such view".
+    if (!/^[0-9A-Za-z_]{1,32}$/.test(String(view.sys_id))) {
+      throw new ServiceNowError(`The definition of the database view "${name}" came back without a usable sys_id, so the tables it joins could not be read.`, 'invalid_response', 'sys_db_view')
+    }
 
     const joined = await this.sn.query<Record<string, string>>({
       table: 'sys_db_view_table',
@@ -534,8 +555,9 @@ export class Dictionary {
       fields: ['table', 'variable_prefix'],
       limit: 50,
     })
-    if (joined.total !== null && joined.records.length < joined.total) {
-      throw new ServiceNowError(`The tables of the database view "${name}" are only partly readable.`, 'acl', 'sys_db_view_table')
+    // Without a total a short list proves nothing: access rules take rows off a page after it was cut.
+    if (joined.total === null || joined.records.length < joined.total) {
+      throw new ServiceNowError(`The tables of the database view "${name}" are only partly readable, or it could not be told whether they are complete.`, 'acl', 'sys_db_view_table')
     }
 
     const members = joined.records

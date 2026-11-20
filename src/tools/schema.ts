@@ -73,6 +73,9 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
       try {
         assertTableName(table)
         if (filter) assertPlainValue(filter, 'filter')
+        // A table that is closed on this machine is not described either: its fields, its labels, its overrides.
+        const closed = await ctx.closed.reason(table)
+        if (closed) throw new ServiceNowError(`${closed[0].toUpperCase()}${closed.slice(1)}. Nothing was sent.`, 'blocked', table)
 
         // Asked for the structure itself, a person expects what is there now, not what was read ten minutes ago.
         ctx.dict.forget(table)

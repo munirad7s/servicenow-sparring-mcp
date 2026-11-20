@@ -139,10 +139,14 @@ provider, the data leaves your network. Five things limit what can go that way:
   include the tables the server reads for its own checks (`npm run doctor` lists them, `sys_*` covers most). A
   name can end in `*`. One set of rules decides for every request, whichever function sends it:
 
-  - A closed table is not asked for, and it is not reached through a dot-walk or a database view.
+  - A closed table is not asked for, and it is not reached through a dot-walk or a database view. `sn_schema`
+    and `sn_dependencies` do not describe it either.
   - A child table of a closed table is closed too, because its rows are rows of that table, and so is a child of
     that child, under whatever name. The server asks the instance once which tables are below the closed ones,
-    eight levels down, and sends nothing where it cannot establish that list.
+    eight levels down, and sends nothing where it cannot establish that list. With `SERVICENOW_TABLE_ALLOW` this
+    means: a table on the list is closed all the same if a table between it and the one you query is not on it.
+  - What the instance lists neither as a table nor as a database view counts as closed, and so does a database
+    view that joins another view: nothing says whose rows it holds.
   - A parent table answers without the rows of its closed child tables. The same holds where a query walks a
     reference into such a parent, or reads it through a database view.
   - The name behind a reference is left out where the record can be a row of a closed table: the reference points
@@ -151,7 +155,12 @@ provider, the data leaves your network. Five things limit what can go that way:
     with text and not sorted by, because both work on the names. A text search is refused on a table that has
     such a reference: measured, it finds a record by the name behind one.
   - The readable name and the payload of a captured change are withheld where its record is in a closed table,
-    and the names of other records are taken out of the payloads that are passed on.
+    and the names of other records are taken out of the payloads that are passed on. The same goes for deleted,
+    archived and linked records.
+  - The text of comments and work notes is rows of `sys_journal_field`: it is left out where that table is closed.
+  - The server's own look-ups follow the same rules. Four tables are read without them, because the rules are
+    decided from them: `sys_db_object`, `sys_db_view`, `sys_db_view_table` and `sys_dictionary`. Do not close
+    those; a list that closes `sys_db_object` or `sys_dictionary` through a parent table closes everything.
   - Where the server cannot establish which tables a request reads from, it does not send it.
 
   A closed table is reported as "could not be checked".

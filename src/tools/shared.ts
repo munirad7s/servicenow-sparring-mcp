@@ -111,22 +111,23 @@ export const CLOSED_NAME = '[withheld: the record is in a table closed on this m
  * 32 hex digits, so every way to cut the name is looked at. The readable name of that record is then not passed on.
  *
  * With a deny list, the closed tables are known by name: the record is in one if any cut gives one of them. With a
- * list of the only tables that may be read, the table has to be found and be open: where it is not found, the
- * answer is yes.
+ * list of the only tables that may be read, the record has to be in a table that is found and open, and its table
+ * is the longest beginning of the name that is a table: "sys_script_include_…" is no business rule. Where no table
+ * is found, or no name is given, the answer is yes.
  */
 export async function isClosedRecord(ctx: Context, updateName: string): Promise<boolean> {
   if (!ctx.sn.restricted) return false
+  if (!updateName) return true
   const parts = updateName.split('_')
-  const cuts = Array.from({ length: parts.length - 1 }, (_, index) => parts.slice(0, parts.length - 1 - index).join('_')).filter(isTableName)
+  const cuts = Array.from({ length: parts.length }, (_, index) => parts.slice(0, parts.length - index).join('_')).filter(isTableName)
   const denied = await ctx.dict.closedTables().catch(() => null)
   if (!denied) return true
   if (cuts.some((table) => denied.has(table))) return true
   if (!ctx.sn.openClasses()) return false
 
-  let lookups = 0
-  for (const table of cuts) {
-    if (!ctx.sn.allows(table)) continue
-    if (++lookups > 3) break
+  // The usual name ends in a generated sys_id, and what stands before it is the table.
+  const exact = /^(.+)_[0-9a-f]{32}$/.exec(updateName)?.[1]
+  for (const table of exact ? [exact] : cuts.slice(0, 4)) {
     const info = await ctx.dict.table(table).catch(() => undefined)
     if (info === undefined) return true
     if (info) return (await ctx.closed.reason(table)) !== null
@@ -135,26 +136,30 @@ export async function isClosedRecord(ctx: Context, updateName: string): Promise<
 }
 
 /**
- * Fields that hold the readable name of a record of another table, each with the field beside it that holds the
- * update name of that record. sn_delta, sn_upgrade_skips and sn_origin keep such a name back where the record is in
- * a closed table. A query has to do the same.
+ * Fields that hold the readable name of a record of another table, each with the field beside it that says which
+ * record: its update name, or its table. sn_delta, sn_upgrade_skips and sn_origin keep such a name back where the
+ * record is in a closed table. A query has to do the same. The field lists were read from the dictionary of an
+ * instance.
  */
-const RECORD_NAMES = new Map<string, Record<string, string>>([
-  ['sys_update_xml', { target_name: 'name' }],
-  ['sys_update_version', { record_name: 'name' }],
-  ['sys_update_preview_xml', { target_name: 'name' }],
-  ['sys_upgrade_history_log', { target_name: 'file_name' }],
+const RECORD_NAMES = new Map<string, Record<string, { key: string; holds: 'update_name' | 'table' }>>([
+  ['sys_update_xml', { target_name: { key: 'name', holds: 'update_name' } }],
+  ['sys_update_version', { record_name: { key: 'name', holds: 'update_name' } }],
+  ['sys_upgrade_history_log', { target_name: { key: 'file_name', holds: 'update_name' } }],
+  ['sys_audit_delete', { display_value: { key: 'tablename', holds: 'table' } }],
+  ['sys_archive_log', { display_value: { key: 'from_table', holds: 'table' } }],
+  ['sys_metadata_link', { sys_name: { key: 'tablename', holds: 'table' } }],
 ])
 
-/** For a field that holds the name of a record of another table: the path of the field that says which record. */
-export function recordNameKey(table: string, path: string, column?: Column): string | null {
+/** For a field that holds the name of a record of another table: the path of the field that says which record, and what that field holds. */
+export function recordNameKey(table: string, path: string, column?: Column): { path: string; holds: 'update_name' | 'table' } | null {
   const field = column ? (column.sourceField ?? column.name) : (path.split('.').at(-1) ?? path)
   const owner = column ? column.definedOn : path === field ? table : null
-  const key = owner ? RECORD_NAMES.get(owner)?.[field] : [...RECORD_NAMES.values()].find((fields) => field in fields)?.[field]
-  if (!key) return null
+  // Reached through a reference without a dictionary entry at hand: the names used for an update name decide.
+  const known = owner ? RECORD_NAMES.get(owner)?.[field] : [...RECORD_NAMES.values()].map((fields) => fields[field]).find((entry) => entry?.holds === 'update_name')
+  if (!known) return null
   // Beside the field, under the same prefix: "upgrade_detail.target_name" has "upgrade_detail.file_name".
-  if (column?.sourceField) return path.slice(0, path.length - field.length) + key
-  return path.includes('.') ? `${path.slice(0, path.lastIndexOf('.'))}.${key}` : key
+  if (column?.sourceField) return { path: path.slice(0, path.length - field.length) + known.key, holds: known.holds }
+  return { path: path.includes('.') ? `${path.slice(0, path.lastIndexOf('.'))}.${known.key}` : known.key, holds: known.holds }
 }
 
 /**
@@ -307,6 +312,11 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   // A text search names no field and still reads fields: it goes through every check below.
   if (!paths.length && !parsed.textSearch && !ctx.sn.restricted) return { fieldCheck: 'not needed: the call names no fields', query, parsed, resolved: new Map(), owners: new Map(), warnings }
 
+  // A child table of a closed table holds its rows. Refused before its fields are looked at: a hint about a
+  // misspelled field would name them.
+  const closed = await ctx.closed.reason(table)
+  if (closed) throw new ServiceNowError(`${closed[0].toUpperCase()}${closed.slice(1)}. Nothing was sent.`, 'blocked', table)
+
   const check = await ctx.dict.checkFields(table, paths)
 
   // A table that is closed on this machine must not be read through the side door either. Checked first: a hint about
@@ -332,10 +342,6 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
       table,
     )
   }
-  // The rows of a child table are rows of its parents: "customer_contact" holds users.
-  const closed = await ctx.closed.reason(table)
-  if (closed) throw new ServiceNowError(`${closed[0].toUpperCase()}${closed.slice(1)}. Nothing was sent.`, 'blocked', table)
-
   // The other way round, a query on a parent answers with the rows of its child tables: those of closed ones are left
   // out by the gate every request passes through, which also says so in the answer.
   const sent = await keepSecretsOutOfReach(ctx, table, query, parsed, check.resolved, warnings)

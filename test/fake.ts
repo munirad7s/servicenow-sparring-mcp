@@ -156,6 +156,13 @@ export const dictionaryRoutes: Route[] = [
   { table: 'sys_db_object', query: 'name=incident', rows: [tableRow('incident', 'Incident', 'task')] },
   { table: 'sys_db_object', query: 'name=task', rows: [tableRow('task', 'Task')] },
   { table: 'sys_db_object', query: 'name=sys_user', rows: [tableRow('sys_user', 'User')] },
+  // The tables the server looks things up in for its own checks. While tables are closed on the machine, a table
+  // the instance does not list is not asked for, so the stand-in lists them as an instance does.
+  ...['sys_script', 'sys_archive', 'sys_table_rotation', 'sys_properties', 'sys_choice', 'sys_documentation', 'sys_dictionary_override'].flatMap((name): Route[] => [
+    { table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] },
+    // Asked which tables are below it, each answers with itself and no child table.
+    { table: 'sys_db_object', query: `^ORname=${name}`, rows: [tableRow(name, name)] },
+  ]),
   // No table of this small world is a child of a closed one, unless a test says so with a route of its own.
   closedTables(),
   { table: 'sys_db_object', rows: [] },

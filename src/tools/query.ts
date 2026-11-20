@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Row } from '../client.js'
 import type { Column } from '../dictionary.js'
 import { ServiceNowError, validation } from '../errors.js'
-import { assertTableName } from '../query.js'
+import { assertTableName, isTableName } from '../query.js'
 import { clip, fail, listing, listShape, ok, rawOf, rowSchema, source, tidy } from '../result.js'
 import { traced } from '../trace.js'
 import {
@@ -104,9 +104,9 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
             out[key] = restricted ? text.replace(/(\sdisplay_value\s*=\s*)(?:"[^"]*"|'[^']*')/g, '$1"[withheld]"') : text
           }
         } else if (nameOf && filled(value)) {
-          // The readable name of a record of another table. Without its update name there is no telling which table.
-          const updateName = nameOf in row ? rawOf(row[nameOf]) : ''
-          const closed = !updateName || (await isClosedRecord(ctx, updateName))
+          // The readable name of a record of another table. Without what says which record, there is no telling.
+          const which = nameOf.path in row ? rawOf(row[nameOf.path]) : ''
+          const closed = !which || (nameOf.holds === 'table' ? !isTableName(which) || (await ctx.closed.reason(which)) !== null : await isClosedRecord(ctx, which))
           if (closed) counts.closedNames++
           out[key] = closed ? CLOSED_NAME : scrub(value)
         } else if (fromProperties || holdsSecret(column, key)) {
@@ -310,7 +310,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
 
         // The type of a system property decides whether its value is a secret, and without a type its name does: both are
         // read along. So is the update name beside the readable name of a record, which says whether its table is closed.
-        const beside = ctx.sn.restricted ? (fields ?? []).map((field) => recordNameKey(table, field, guard.resolved.get(field))).filter((key): key is string => key !== null) : []
+        const beside = ctx.sn.restricted ? (fields ?? []).map((field) => recordNameKey(table, field, guard.resolved.get(field))?.path).filter((key): key is string => Boolean(key)) : []
         const readAlong = [...new Set([...(table === 'sys_properties' && fields?.includes('value') ? ['type', 'name'] : []), ...beside])].filter((field) => !fields?.includes(field))
         const page = await ctx.sn.query<Row>({
           table,
