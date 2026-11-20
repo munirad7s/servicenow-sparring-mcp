@@ -78,6 +78,8 @@ export interface ClientOptions {
 type FetchLike = (url: string, init: RequestInit) => Promise<Response>
 
 const PAUSE_AFTER_REJECTED_LOGIN_MS = 60_000
+/** Requests with the instance at a time. */
+const MAX_IN_FLIGHT = 8
 const PAUSE_WHILE_UNREACHABLE_MS = 15_000
 
 /**
@@ -100,6 +102,8 @@ export class ServiceNowClient {
   /** Becomes true once the instance has accepted the credentials. Until then requests go one at a time. */
   private accepted = false
   private opening: Promise<void> | null = null
+  private inFlight = 0
+  private readonly waiting: Array<() => void> = []
   private paused: { until: number; error: ServiceNowError; rejected?: Auth } | null = null
   private readonly sleep: (ms: number) => Promise<void>
 
@@ -269,9 +273,7 @@ export class ServiceNowClient {
     try {
       // A table closed on this machine is not asked for, but the attempt is still written to the audit log.
       this.assertAllowed(table)
-      const answer = this.accepted
-        ? await this.send(api, table, params, count)
-        : await this.alone(() => this.send(api, table, params, count))
+      const answer = await this.inTurn(() => (this.accepted ? this.send(api, table, params, count) : this.alone(() => this.send(api, table, params, count))))
       if (!Array.isArray(answer.body.result)) {
         throw new ServiceNowError(`${this.host} answered without a result list.`, 'invalid_response', table)
       }
@@ -282,6 +284,23 @@ export class ServiceNowClient {
       // A request that was not sent has no HTTP status of its own.
       log(error instanceof ServiceNowError ? ((count.sent ? error.status : undefined) ?? error.kind) : 'unknown', null, null)
       throw error
+    }
+  }
+
+  /**
+   * No more than a few requests are with the instance at a time, whichever function sends them and however many
+   * rows it looks something up for. An instance gives an account only so many requests at once, and a burst beyond
+   * that is answered with "too many requests". A request that has to wait takes the place of the one that ends.
+   */
+  private async inTurn<T>(run: () => Promise<T>): Promise<T> {
+    if (this.inFlight < MAX_IN_FLIGHT) this.inFlight++
+    else await new Promise<void>((resolve) => this.waiting.push(resolve))
+    try {
+      return await run()
+    } finally {
+      const next = this.waiting.shift()
+      if (next) next()
+      else this.inFlight--
     }
   }
 

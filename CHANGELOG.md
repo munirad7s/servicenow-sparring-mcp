@@ -3,6 +3,17 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## Unreleased
+
+### Fixed
+
+- **Nothing held the number of requests that are with the instance at a time.** The README said eight, and the
+  functions kept to it where they knew what they were asking for. Measured with a list of the only tables that
+  may be read: `sn_delta` with 200 rows had 13 requests with the instance at once, because it looks up the table
+  of every row it returns at the same moment. With more kinds of records among the rows it would be more, and an
+  instance answers a burst with "too many requests". The limit is in the client now, for every request of every
+  function: the same call stays at eight and takes no longer.
+
 ## 0.3.4 (2026-11-20)
 
 ### Security

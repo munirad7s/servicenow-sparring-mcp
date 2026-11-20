@@ -202,7 +202,7 @@ it.
 - One `sn_query` is one request, plus five to seven the first time a table is used: to check its field names, and
   to look for rules that filter, archive or rotate it. The other functions cost more: `sn_origin` 4 to 9,
   `sn_upgrade_skips` about 10, `sn_dependencies` 25 to 35 (about 15 for one field), `sn_instance` about 50. Every
-  answer carries its count in `requests`. At most eight requests of one function are in flight at a time. With tables closed on the machine, the first call
+  answer carries its count in `requests`. At most eight requests are with the instance at a time, whichever function sends them. With tables closed on the machine, the first call
   on each table costs a few more: the server has to establish what the table is a child or a parent of.
 - What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is
   missing from an entry older than 30 seconds is looked up once more, so a field created during a session is

@@ -377,6 +377,34 @@ test('tables can be closed on the machine that runs the server', async () => {
   assert.equal(allowed.calls.length, 1)
 })
 
+test('no more than eight requests are with the instance at a time, however many are asked for', async () => {
+  let now = 0
+  let most = 0
+  let served = 0
+  const sn = new ServiceNowClient(config, async () => {
+    most = Math.max(most, ++now)
+    // Long enough for every waiting request to be there at once.
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    now--
+    served++
+    return json({ result: [] })
+  })
+  // The first request goes alone, until the instance has taken the login.
+  await sn.query({ table: 'incident' })
+  await Promise.all(Array.from({ length: 60 }, (_, index) => sn.query({ table: 'incident', query: `number=INC${index}` })))
+  assert.equal(served, 61)
+  assert.equal(most, 8)
+  // A request that fails gives its place to the next one all the same.
+  const failing = new ServiceNowClient(config, async (url) => {
+    await new Promise((resolve) => setTimeout(resolve, 1))
+    return String(url).includes('bad') ? json({ error: { message: 'no', detail: '' } }, 400) : json({ result: [] })
+  })
+  await failing.query({ table: 'incident' })
+  const outcomes = await Promise.allSettled(Array.from({ length: 30 }, (_, index) => failing.query({ table: index % 2 ? 'bad_table' : 'incident' })))
+  assert.equal(outcomes.filter((outcome) => outcome.status === 'fulfilled').length, 15)
+  assert.equal((await failing.query({ table: 'incident' })).records.length, 0)
+})
+
 test('every request carries a time limit', async () => {
   let signal: unknown
   const sn = new ServiceNowClient(config, async (_url, init) => {
