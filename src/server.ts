@@ -85,8 +85,10 @@ export function buildServer(sn: ServiceNowClient): McpServer {
               '1. If you have not called sn_instance in this session, call it and note the release and the last upgrades.\n' +
               `2. Call sn_upgrade_skips${upgrade ? ` with upgrade "${upgrade}"` : ''}. Read byDisposition, byType, notReviewed and laterUpgrades before you read the rows.\n` +
               '3. For the types that matter most to how the instance behaves (business rules, script includes, access controls, ' +
-              'UI actions, flows), list the entries with fileContains. For the ones you report on, call sn_origin with the file ' +
-              'name as updateName: it says whether a person changed the record, a system account, or nobody on record.\n' +
+              'UI actions, flows), list the entries with fileContains. "target" is the name of the record. For the ones you ' +
+              'report on, call sn_origin with the file name as updateName: it says whether a person changed the record, a ' +
+              'system account, or nobody on record. If it answers "unknown" because no record has that name, the instance ' +
+              'holds the record under another sys_id: find it by its target name with sn_query.\n' +
               '4. Report: which upgrade the answer covers; how many entries per disposition; how many are "Skipped Error", ' +
               'which are failures to apply a file and not customizations; how many nobody has reviewed; the entries that ' +
               'deserve attention first, and why; upgrades applied since; and what could not be checked.\n\n' +

@@ -320,7 +320,8 @@ What follows from that:
   leaves them out.
 - **The rule is measured on one instance.** The verdicts were compared with the upgrade engine and with the stored
   evidence, not checked by hand, and not on a second instance. Update rows and versions can be cleaned up or lost
-  in a clone. Run `npm run origin-check` on your instance before you rely on the verdicts there.
+  in a clone. Run `npm run origin-check` on your instance before you rely on the verdicts there, and check a
+  sheet of them by hand (see [Development](#development)).
 
 ## What it cannot know
 
@@ -353,6 +354,16 @@ npm run origin-check  # measures sn_origin on the configured instance, with abou
 verdicts, never record content. `npm run call` runs one function from the shell and prints what an agent would
 receive. In the Windows command prompt, write the JSON with escaped double quotes instead of single quotes:
 `"{\"table\":\"incident\"}"`.
+
+To check the verdicts of `sn_origin` by hand, let it write a sheet:
+
+```bash
+npm run --silent origin-check -- 25 --sheet > sheet.csv
+```
+
+That is one line per judged record instead of counts: 25 files the last upgrade skipped, 25 random application
+files and 25 random captured changes, each with its verdict, a link that opens the record, and two empty columns
+for your own verdict. The sheet names records of your instance, so keep it to yourself.
 
 What was tested, and what was not:
 

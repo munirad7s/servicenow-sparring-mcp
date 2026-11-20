@@ -101,7 +101,8 @@ measurements.
 - `servicenow-sparring doctor`, `--version` and `--help`. The doctor command checks the Aggregate API, the release
   property and the account's roles, not only the tables.
 - Two more prompts: `review_upgrade` and `assess_change`.
-- `npm run call` runs one tool from the shell. `npm run origin-check` measures `sn_origin` on your instance.
+- `npm run call` runs one tool from the shell. `npm run origin-check` measures `sn_origin` on your instance; with
+  `--sheet` it writes one line per judged record, for checking the verdicts by hand.
 - `sn_upgrade_skips` and the upgrade evidence of `sn_origin` show `target`, the name the upgrade gives the record,
   next to the file name.
 - `sn_origin` judges the entry of a system field (`sys_id`, `sys_created_on` and the like) by the package of its

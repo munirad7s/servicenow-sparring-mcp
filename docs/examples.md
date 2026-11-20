@@ -37,6 +37,68 @@ Sent as it is, the instance would have answered with every incident.
 
 Sent as it is, the instance would have answered "0 incidents".
 
+## A condition without a value
+
+```json
+{ "tool": "sn_query", "arguments": { "table": "incident", "query": "short_descriptionLIKE" } }
+```
+
+```json
+{
+  "error": "validation",
+  "message": "Cannot check the query term \"short_descriptionLIKE\": LIKE needs a value. Without one ServiceNow drops the condition or matches nothing; to ask for empty fields use ISEMPTY or ISNOTEMPTY. Supported: …",
+  "table": "incident",
+  "hint": "Nothing was sent to the instance. Correct the input and call again."
+}
+```
+
+Sent as it is, the instance would have answered with every incident. This is what a query looks like when an agent
+builds it from a variable that turned out empty.
+
+## A question about a secret
+
+```json
+{ "tool": "sn_query", "arguments": { "table": "sys_user", "query": "user_passwordSTARTSWITHa", "fields": ["user_name"] } }
+```
+
+```json
+{
+  "error": "validation",
+  "message": "\"user_password\" holds a secret. It can be neither compared nor sorted by: the number of matches would give its value away piece by piece. Asking whether it is filled works: ISEMPTY, ISNOTEMPTY. Nothing was sent.",
+  "table": "sys_user",
+  "hint": "Nothing was sent to the instance. Correct the input and call again."
+}
+```
+
+## "Is not", and the rows it leaves out
+
+```json
+{ "tool": "sn_query", "arguments": { "table": "incident", "query": "assigned_to!=0123456789abcdef0123456789abcdef", "fields": ["number"], "limit": 1 } }
+```
+
+```json
+{
+  "instance": "example.service-now.com",
+  "fetchedAt": "2026-11-20T02:14:07.512Z",
+  "requests": 1,
+  "warnings": [
+    "\"!=\", \"NOT IN\" and \"NOT LIKE\" leave out rows where the field is empty (assigned_to). To count those rows too, add ^ORassigned_toISEMPTY behind the condition."
+  ],
+  "table": "incident",
+  "query": "assigned_to!=0123456789abcdef0123456789abcdef",
+  "total": 49,
+  "returned": 1,
+  "offset": 0,
+  "truncated": true,
+  "nextOffset": 1,
+  "fieldCheck": "all field names verified against sys_dictionary",
+  "records": [{ "number": "INC0000001" }]
+}
+```
+
+On the instance this was measured on, 82 incidents exist and 33 of them have no assignee. "Not assigned to this
+user" returns 49.
+
 ## An empty result with a likely reason
 
 ```json
