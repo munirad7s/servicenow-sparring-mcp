@@ -121,26 +121,37 @@ provider, the data leaves your network. Five things limit what can go that way:
   value away piece by piece, and so would the order of rows sorted by it. A field that holds a secret can be asked
   whether it is filled, and nothing else. A query that compares or sorts by the value of system properties leaves
   out the properties of a password type and those without a type, and says so; a count per property value is
-  refused. So is a text search on a table that has a field with a secret.
+  refused. A text search reads fields it does not name: it is refused on a table that has a field with a secret
+  or a field that carries whole records, and on a table whose fields cannot be read completely.
 - **A record inside a text is cleaned.** The payload of a captured change, of a version or of an upgrade entry is
-  the whole record as text. What looks like a secret in it is taken out, by the name of its element. Such a
-  payload can be read, but not searched.
+  the whole record as text. What looks like a secret in it is taken out, by the name of its element, and a system
+  property in it is judged as one read from its table. Such a payload can be read, but not searched.
 - **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
-  away from the server. It does not ask for them. A query cannot reach them through a dot-walk or a database view.
-  A child table of a closed table is closed too, because its rows are rows of that table, and so is a child of
-  that child, under whatever name. A query on a parent table leaves the rows of all of them out: the server asks
-  the instance once which tables are below the closed ones, eight levels down, and sends nothing where it cannot
-  establish that list. The names behind references into a closed table are left out, for
-  single references and for lists, and such a reference can be compared with a sys_id, but not with text and not
-  sorted by, because both work on the names. The payload of a captured change is withheld where it carries a
-  record of a closed table. Where the type of a field cannot be read, its display value is left out as well.
-  `SERVICENOW_TABLE_ALLOW` names the only tables the server may ask for. That list has to include the tables the
-  server reads for its own checks: `npm run doctor` lists them, and `sys_*` covers most. A name can end in `*`.
+  away from the server. `SERVICENOW_TABLE_ALLOW` names the only tables the server may ask for; that list has to
+  include the tables the server reads for its own checks (`npm run doctor` lists them, `sys_*` covers most). A
+  name can end in `*`. One set of rules decides for every request, whichever function sends it:
+
+  - A closed table is not asked for, and it is not reached through a dot-walk or a database view.
+  - A child table of a closed table is closed too, because its rows are rows of that table, and so is a child of
+    that child, under whatever name. The server asks the instance once which tables are below the closed ones,
+    eight levels down, and sends nothing where it cannot establish that list.
+  - A parent table answers without the rows of its closed child tables. The same holds where a query walks a
+    reference into such a parent, or reads it through a database view.
+  - The name behind a reference is left out where the record can be a row of a closed table: the reference points
+    into one, or into a table that has one below it, or it cannot be told where it points. This goes for single
+    references, lists and the labels of counted groups. Such a reference can be compared with a sys_id, but not
+    with text and not sorted by, because both work on the names. A text search is refused on a table that has
+    such a reference: measured, it finds a record by the name behind one.
+  - The readable name and the payload of a captured change are withheld where its record is in a closed table,
+    and the names of other records are taken out of the payloads that are passed on.
+  - Where the server cannot establish which tables a request reads from, it does not send it.
+
   A closed table is reported as "could not be checked".
 
   What closing a table does not cover: a plain text field that happens to carry something from it, such as the
-  user name in `sys_created_by`; and tables that record the content of others, such as `sys_audit`,
-  `sys_history_line`, `sys_journal_field` and `live_profile`. Close those as well if they matter.
+  user name in `sys_created_by` or the author in the text of a journal entry; and tables that record the content
+  of others, such as `sys_audit`, `sys_history_line`, `sys_journal_field` and `live_profile`. Close those as well
+  if they matter.
 
 Record content that comes back (names, descriptions, scripts, error texts) is data from the instance. The server
 tells the agent to treat it as data, never as an instruction, and it cuts long values. It cannot make an agent obey.

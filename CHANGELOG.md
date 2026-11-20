@@ -5,28 +5,73 @@ answer; such changes are listed under "Changed".
 
 ## 0.3.2 (2026-11-20)
 
+Six reviews of 0.3.1 by a second model, each from another corner, and what they found. Every claim about the
+platform was measured on an instance before anything was changed; the numbers are in `docs/encoded-queries.md`.
+
 ### Security
 
-- **A query on a parent table returned rows of the child tables of a closed table.** With `cmdb_ci_server` on the
-  deny list, a query on `cmdb_ci` left out the rows of the class `cmdb_ci_server` and nothing else: the Linux and
-  Windows servers, which are rows of that table as well, came back. Measured on one instance: 19 rows were left out
-  where 41 belong to the closed table. The server now asks the instance once which tables are below the closed
-  ones, by name or by pattern, eight levels down, and leaves the rows of all of them out. The question checks
-  itself: it also asks for the row of the table of tables, and where that row does not come back, or a row comes
-  back that matches nothing, no query on a parent is sent. Since 0.3.0. With an allow list the gap did not exist.
-- A query on a table that has no closed table below it is no longer given a condition on `sys_class_name` and a
-  note about closed tables.
+- **A text search sent without a list of fields skipped every check on secrets.** A text search names no field, so
+  a call without `fields` named none at all, and the check ended early: `123TEXTQUERY321=…` on `sys_user` was sent,
+  and on `sys_properties` it was sent without leaving out the properties that hold secrets. Since 0.3.1, which
+  added that protection. A text search is now also refused where the fields of the table cannot be read
+  completely, where a field without a type has a name that suggests a secret, and on a table with a field that
+  carries whole records.
+- **Closed tables are now decided in one place, for every request of every function** (`src/closed.ts`). Until
+  now each function had to remember the rules, and several did not:
+  - A query on a parent table returned rows of the child tables of a closed table. With `cmdb_ci_server` on the
+    deny list, a query on `cmdb_ci` left out the rows of that class and nothing else: the Linux and Windows
+    servers came back. Measured on one instance: 19 rows were left out where 41 belong to the closed table. The
+    server now asks the instance once which tables are below the closed ones, eight levels down. The question
+    checks itself, and where its answer cannot be trusted nothing is sent. Since 0.3.0.
+  - The name behind a reference came back where the reference points to a child table of a closed table, to a
+    parent table of one, or to a target that did not come back from the dictionary. The same went for the labels
+    of counted groups, and such a reference could be compared with text and sorted by.
+  - A dot-walk into a parent table, and a database view that joins one, read the rows of its closed child tables.
+  - `sn_origin` read a record of a closed table, by its update name and through the table of application files,
+    and returned when it was created and by whom. `sn_upgrade_skips`, `sn_dependencies` and the look-up of the
+    account's roles walked references into closed tables. `sn_plugins` read store applications from the parent
+    table when their own table was closed.
+  - `sn_query` passed on the readable name of a captured record of a closed table (`target_name`,
+    `record_name`), which the other functions withheld, and let it be compared, sorted and counted.
+  - A payload was judged by the first record it carries. Measured: 127 of 150 payloads carry more than one. Now
+    every table in it counts, a payload that names none is withheld, and the names of other records are taken out
+    of the payloads that are passed on.
+  - A text search finds a record by the name behind one of its references (measured). It is refused on a table
+    that points into a closed one.
+- **Secrets inside a payload:** the value of a system property was passed on where its type carried an attribute
+  or was empty, a text shorter than 20 characters was not looked at, and a value of another record in the same
+  payload was taken out by mistake. JSON keys such as `x-api-key` and `accessKey`, numbers, and JSON inside a JSON
+  string are recognised.
+- `ref_<the table itself>.<field>` was refused only where the dictionary was fully readable.
+- A system property whose name and type both come back empty is withheld.
+- A payload reached through a reference could be searched where the dictionary was not readable.
 
 ### Added
 
 - **A choice label is refused behind a dot-walk too.** `parent_incident.category=Inquiry / Help` was answered with
   0 rows and a note that the values "could not be checked", and so was every correct query of that shape. The
-  values are now compared with the choice list of the table the reference points to: a label is refused with the
-  stored value to write, a stored value passes without a warning, and an unknown value is explained when nothing
-  matches.
+  values are now compared with the choice list of the table the reference points to.
+- **A name where a reference stores a sys_id is refused behind "is not".** Measured: `assignment_group!=Service
+  Desk` returned every incident that has a group, the ones of that group included. The value is looked up first,
+  because not every sys_id is 32 hex digits.
+- **`sn_query` with `groupBy` says how many different values there are** (`totalGroups`), and pages through the
+  groups with `offset`.
+- A word on a choice that stores numbers (`priority=High`) is refused with the list of values and labels.
+- `sn_query` says when it could not check whether business rules hide rows, whether records are archived, or
+  whether the table is rotated. Until now a failed look-up was silence.
 
 ### Fixed
 
+- **A condition the server adds made a query match too much** where a part of the query held no condition:
+  `EQ^NQpriority=1` with an added condition returned every row the condition allows. Measured: such a part is no
+  part to the instance.
+- Values the instance does not reject and answers wrongly, each measured: `NULL` behind an operator other than
+  `=` and `!=`, `BETWEEN` and `ON` on a true/false field, `ON` on a number field, a day that does not exist, a
+  list of nothing but commas, a text search without a word, a condition joined to a text search with `^OR`.
+- The warning about rows with an empty field came also where the query asked for those rows itself, and for
+  `!=NULL`, which asks for the opposite. It now comes for `NSAMEAS` as well, which leaves them out too.
+- A field that holds a secret can be asked whether it is filled also as `=NULL` and `!=NULL`.
+- A journal field read without a list of fields came back empty without a word, and could be counted by.
 - **`sn_dependencies` took an empty category for "nothing attached" on an instance that answers a query it cannot
   use with no rows** (`glide.invalid_query.returns_no_rows`, a setting of hardened instances). Its check that a
   condition was understood needs a row to look at. Where no row matches and that setting is on, or cannot be read,

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Page, Row, ServiceNowClient } from '../client.js'
-import { validation } from '../errors.js'
+import { ServiceNowError, validation } from '../errors.js'
 import { ORIGIN_CAVEATS } from '../limitations.js'
 import { assertSysId, isGeneratedSysId, isTableName } from '../query.js'
 import { fail, labelOf, ok, rawOf, rowSchema, source, sourceShape, tidy, withheldWarning } from '../result.js'
@@ -221,6 +221,10 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         if (updateName && !UPDATE_NAME.test(updateName)) {
           throw validation('updateName may contain only letters, digits, underscore, dot and hyphen.')
         }
+        // The update name says which table the record is in. Nothing about a record of a closed table is read.
+        if (updateName && (await isClosedRecord(ctx, updateName))) {
+          throw new ServiceNowError('This update name stands for a record in a table that is closed on this machine, or may stand for one. Nothing was sent.', 'blocked', 'sys_metadata')
+        }
 
         const warnings: string[] = []
         const read = async (table: string, query: string, fields: string[], limit: number): Promise<Page<Row> | null> => {
@@ -399,10 +403,11 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         // The decision is made on the stored codes: the labels come in the language of the account.
         const skipRecords = skips?.records.map(tidy) ?? []
         const codes = skipRecords.length ? await skipCodes(sn) : null
+        const closedRecord = await isClosedRecord(ctx, name)
         const skipRows = skipRecords.map((row) => ({
           disposition: labelOf(row['upgrade_detail.disposition']),
           review: labelOf(row.state),
-          target: isClosedRecord(sn, name) ? CLOSED_NAME : rawOf(row['upgrade_detail.target_name']),
+          target: closedRecord ? CLOSED_NAME : rawOf(row['upgrade_detail.target_name']),
           upgrade: rawOf(row['upgrade_detail.upgrade_history.to_version']),
           createdOn: rawOf(row.sys_created_on),
         }))
@@ -628,7 +633,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           record: file && compact({
             sysId: rawOf(file.sys_id),
             table: ownTable || kind,
-            name: sn.restricted && isTableName(ownTable || kind) && !sn.allows(ownTable || kind) ? CLOSED_NAME : rawOf(file.sys_name),
+            name: closedRecord || (isTableName(ownTable || kind) && (await ctx.closed.reason(ownTable || kind))) ? CLOSED_NAME : rawOf(file.sys_name),
             updateName: name,
             package: packageName,
             packageClass,

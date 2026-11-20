@@ -1,11 +1,14 @@
 import type { Row, ServiceNowClient } from '../client.js'
-import type { Column, Dictionary, FieldCheck } from '../dictionary.js'
+import type { ClosedTables } from '../closed.js'
+import type { Choice, Column, Dictionary, FieldCheck } from '../dictionary.js'
 import { quoteInstanceText, ServiceNowError, validation } from '../errors.js'
-import { assertFieldPath, isTableName, parseEncodedQuery, withCondition, type ParsedQuery } from '../query.js'
+import { assertFieldPath, isTableName, parseEncodedQuery, withCondition, type Condition, type ParsedQuery } from '../query.js'
 
 export interface Context {
   sn: ServiceNowClient
   dict: Dictionary
+  /** The rules for tables that are closed on this machine. The client asks them for every request. */
+  closed: ClosedTables
 }
 
 /** Failures that say the instance could not be used at all, as opposed to one table being closed. */
@@ -26,25 +29,27 @@ export const SECRET_NOTE = '[withheld: this field holds a secret]'
  * secret type on one instance: this pattern recognises all but a handful (a field called "key", "answer", "customer_uri").
  */
 export const LOOKS_SECRET =
-  /passw(or)?d|passphrase|passcode|pwd|secret|token|credential|api_?key|private_?key|(?:^|[_.])otp(?:$|[_.])|[a-z0-9]_key(?:$|[_.])|(?:^|[_.])key_|secure_|sensitive_|encrypt|encoded_value|client_?state|nonce|code_verifier|(?:^|[_.])seed(?:$|[_.])|(?:^|[_.]|soft)pin(?:$|[_.])/i
+  /passw(or)?d|passphrase|passcode|pwd|secret|token|credential|bearer|authorization|keystore|(?:api|private|access|auth|signing|encryption|shared|master|session|client)[_-]?key|(?:^|[_.])otp(?:$|[_.])|[a-z0-9]_key(?:$|[_.])|(?:^|[_.])key_|secure_|sensitive_|encrypt|encoded_value|client_?state|nonce|code_verifier|(?:^|[_.])seed(?:$|[_.])|(?:^|[_.]|soft)pin(?:$|[_.])/i
 
 /**
  * Fields that hold a whole record as text: the payload of a captured change, of a version, of an upgrade entry.
  * Whatever the record holds is in there, secrets included, under names the dictionary of this table does not know.
  */
-const RECORD_PAYLOADS: Record<string, string[]> = {
-  sys_update_xml: ['payload'],
-  sys_update_version: ['payload'],
-  sys_update_preview_xml: ['payload', 'payload_diff'],
-  sys_upgrade_history_log: ['payload', 'payload_diff'],
-  sys_update_diff: ['payload_diff'],
-}
+const PAYLOAD_FIELDS = new Map<string, string[]>([
+  ['sys_update_xml', ['payload']],
+  ['sys_update_version', ['payload']],
+  ['sys_update_preview_xml', ['payload', 'payload_diff']],
+  ['sys_upgrade_history_log', ['payload', 'payload_diff']],
+  ['sys_update_diff', ['payload_diff']],
+])
 
 /** "payload" or "diff" if the field carries a whole record, as itself or as a comparison of two. */
 export function recordPayload(table: string, path: string, column?: Column): 'payload' | 'diff' | null {
-  const owner = column?.definedOn && RECORD_PAYLOADS[column.definedOn] ? column.definedOn : table
   const field = column ? (column.sourceField ?? column.name) : (path.split('.').at(-1) ?? path)
-  if (!RECORD_PAYLOADS[owner]?.includes(field)) return null
+  // Reached through a reference or a view without a dictionary entry at hand: the table it belongs to is not known,
+  // so the name decides. Every field of that name in the tables above carries a record.
+  const carries = column ? PAYLOAD_FIELDS.get(column.definedOn)?.includes(field) : path === field ? PAYLOAD_FIELDS.get(table)?.includes(field) : field === 'payload' || field === 'payload_diff'
+  if (!carries) return null
   return field === 'payload_diff' ? 'diff' : 'payload'
 }
 
@@ -52,46 +57,114 @@ const WITHHELD = '[withheld]'
 
 /**
  * Takes out of a text that carries a record what looks like a secret: the content of an XML element, or the value
- * of a JSON key, whose name suggests one, and the value of a system property of a password type. Recognised by
- * name only: the types of the record's fields are not at hand here.
+ * of a JSON key, whose name suggests one, and the value of a system property that holds one. Recognised by name
+ * only: the types of the record's fields are not at hand here.
+ *
+ * A system property inside a payload is judged like one read from its table: by its type, without a type by its
+ * name, and without both its value is taken out.
  */
 export function scrubSecrets(text: string): { text: string; withheld: number } {
-  if (text.length < 20 || !/[<"]/.test(text)) return { text, withheld: 0 }
+  if (!/[<"]/.test(text)) return { text, withheld: 0 }
   let withheld = 0
-  let out = text.replace(/<([A-Za-z_][\w.-]*)((?:\s[^<>]*)?)>(<!\[CDATA\[[\s\S]*?\]\]>|[^<]+)<\/\1>/g, (whole, tag: string, attributes: string, content: string) => {
+  const CONTENT = String.raw`(\s*<!\[CDATA\[[\s\S]*?\]\]>\s*|[^<]+)`
+  let out = text.replace(new RegExp(String.raw`<([A-Za-z_][\w.-]*)(?:\s[^<>]*)?>${CONTENT}<\/\1>`, 'g'), (whole, tag: string, content: string) => {
+    const plain = content.replace(/^\s*<!\[CDATA\[|\]\]>\s*$/g, '').trim()
     // "true" and "false" are switches such as "display_password", not secrets.
-    if (!LOOKS_SECRET.test(tag) || !content.trim() || /^(true|false)$/.test(content.trim())) return whole
+    if (!LOOKS_SECRET.test(tag) || !plain || /^(true|false)$/.test(plain)) return whole
     withheld++
-    return `<${tag}${attributes}>${WITHHELD}</${tag}>`
+    // Without its attributes: a display value there would repeat the content.
+    return `<${tag}>${WITHHELD}</${tag}>`
   })
-  if (/<sys_properties[\s>]/.test(out) && /<type>password2?<\/type>/.test(out)) {
-    out = out.replace(/<value>(?:<!\[CDATA\[[\s\S]*?\]\]>|[^<]+)<\/value>/g, () => {
+  out = out.replace(/<sys_properties(?:\s[^<>]*)?>[\s\S]*?<\/sys_properties>/g, (record) => {
+    const read = (tag: string) => new RegExp(String.raw`<${tag}(?:\s[^<>]*)?>([^<]*)<\/${tag}>`).exec(record)?.[1].trim() ?? ''
+    const type = read('type')
+    const name = read('name')
+    const secret = type ? /^password2?$/i.test(type) : name ? LOOKS_SECRET.test(name) : true
+    if (!secret) return record
+    return record.replace(new RegExp(String.raw`<value(?:\s[^<>]*)?>${CONTENT}<\/value>`, 'g'), () => {
       withheld++
       return `<value>${WITHHELD}</value>`
     })
-  }
-  out = out.replace(/("([A-Za-z_][\w.-]*)"\s*:\s*)"(?:[^"\\]|\\.)+"/g, (whole, lead: string, key: string) => {
-    if (!LOOKS_SECRET.test(key)) return whole
-    withheld++
-    return `${lead}"${WITHHELD}"`
   })
+  // JSON, also where it sits inside a string of another JSON text and its quotes are escaped.
+  for (const quote of ['"', String.raw`\\"`]) {
+    const value = quote === '"' ? String.raw`"(?:[^"\\]|\\.)+"` : String.raw`\\"[^"\\]+\\"`
+    out = out.replace(new RegExp(String.raw`(${quote}([A-Za-z_][\w.-]*)${quote}\s*:\s*)(?:${value}|-?\d[\d.]*)`, 'g'), (whole, lead: string, key: string) => {
+      if (!LOOKS_SECRET.test(key) || /:\s*\\?"(true|false)\\?"$/.test(whole)) return whole
+      withheld++
+      const mark = quote === '"' ? '"' : String.raw`\"`
+      return `${lead}${mark}${WITHHELD}${mark}`
+    })
+  }
   return { text: out, withheld }
 }
 
 export const CLOSED_NAME = '[withheld: the record is in a table closed on this machine]'
 
 /**
- * true if an update name stands for a record of a table that is closed on this machine. Such a name ends in the
- * sys_id of the record and begins with its table. The readable name of that record is then not passed on.
+ * true if an update name stands for a record of a table that is closed on this machine, or may stand for one. Such
+ * a name begins with its table. Mostly the sys_id of the record follows, but not always, and a sys_id is not always
+ * 32 hex digits, so every way to cut the name is looked at. The readable name of that record is then not passed on.
+ *
+ * With a deny list, the closed tables are known by name: the record is in one if any cut gives one of them. With a
+ * list of the only tables that may be read, the table has to be found and be open: where it is not found, the
+ * answer is yes.
  */
-export function isClosedRecord(sn: ServiceNowClient, updateName: string): boolean {
-  const table = /^(.+)_[0-9a-f]{32}$/.exec(updateName)?.[1] ?? ''
-  return sn.restricted && isTableName(table) && !sn.allows(table)
+export async function isClosedRecord(ctx: Context, updateName: string): Promise<boolean> {
+  if (!ctx.sn.restricted) return false
+  const parts = updateName.split('_')
+  const cuts = Array.from({ length: parts.length - 1 }, (_, index) => parts.slice(0, parts.length - 1 - index).join('_')).filter(isTableName)
+  const denied = await ctx.dict.closedTables().catch(() => null)
+  if (!denied) return true
+  if (cuts.some((table) => denied.has(table))) return true
+  if (!ctx.sn.openClasses()) return false
+
+  let lookups = 0
+  for (const table of cuts) {
+    if (!ctx.sn.allows(table)) continue
+    if (++lookups > 3) break
+    const info = await ctx.dict.table(table).catch(() => undefined)
+    if (info === undefined) return true
+    if (info) return (await ctx.closed.reason(table)) !== null
+  }
+  return true
 }
 
-/** The table of the record a payload carries: the element that has the action on it. */
-export function payloadTable(text: string): string {
-  return /<([a-z0-9_]{1,80})\s[^<>]*\baction="/.exec(text)?.[1] ?? ''
+/**
+ * Fields that hold the readable name of a record of another table, each with the field beside it that holds the
+ * update name of that record. sn_delta, sn_upgrade_skips and sn_origin keep such a name back where the record is in
+ * a closed table. A query has to do the same.
+ */
+const RECORD_NAMES = new Map<string, Record<string, string>>([
+  ['sys_update_xml', { target_name: 'name' }],
+  ['sys_update_version', { record_name: 'name' }],
+  ['sys_update_preview_xml', { target_name: 'name' }],
+  ['sys_upgrade_history_log', { target_name: 'file_name' }],
+])
+
+/** For a field that holds the name of a record of another table: the path of the field that says which record. */
+export function recordNameKey(table: string, path: string, column?: Column): string | null {
+  const field = column ? (column.sourceField ?? column.name) : (path.split('.').at(-1) ?? path)
+  const owner = column ? column.definedOn : path === field ? table : null
+  const key = owner ? RECORD_NAMES.get(owner)?.[field] : [...RECORD_NAMES.values()].find((fields) => field in fields)?.[field]
+  if (!key) return null
+  // Beside the field, under the same prefix: "upgrade_detail.target_name" has "upgrade_detail.file_name".
+  if (column?.sourceField) return path.slice(0, path.length - field.length) + key
+  return path.includes('.') ? `${path.slice(0, path.lastIndexOf('.'))}.${key}` : key
+}
+
+/**
+ * The tables of the records a payload carries: the table named on its root, and every element that has an action
+ * on it. Measured on 150 captured changes: 127 carried more than one such element, the record itself and what was
+ * removed along with it.
+ */
+export function payloadTables(text: string): string[] {
+  const names = new Set<string>()
+  const root = /<record_update\s[^<>]*?(?<![\w-])table\s*=\s*["']([a-z0-9_]{1,80})["']/.exec(text)?.[1]
+  if (root) names.add(root)
+  for (const match of text.matchAll(/<([a-z0-9_]{1,80})\s[^<>]*?(?<![\w-])action\s*=\s*["']/g)) names.add(match[1])
+  names.delete('record_update')
+  return [...names]
 }
 
 /**
@@ -113,8 +186,10 @@ const COMPARES_STORED = new Set(['=', '!=', '>', '>=', '<', '<=', 'IN', 'NOT IN'
 const isDate = (text: string) => {
   const parts = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?Z?)?$/.exec(text.trim())
   if (!parts) return false
-  const [month, day, hour, minute, second] = parts.slice(2).map((part) => Number(part ?? 0))
-  return month >= 1 && month <= 12 && day >= 1 && day <= 31 && hour <= 23 && minute <= 59 && second <= 59
+  const [year, month, day, hour, minute, second] = parts.slice(1).map((part) => Number(part ?? 0))
+  // A day that exists: there is no 31 February.
+  const date = new Date(Date.UTC(year, month - 1, day))
+  return date.getUTCMonth() === month - 1 && date.getUTCDate() === day && hour <= 23 && minute <= 59 && second <= 59
 }
 const isNumber = (text: string) => /^\s*-?\d+(\.\d+)?\s*$/.test(text)
 const isBoolean = (text: string) => /^(true|false|1|0)$/i.test(text.trim())
@@ -122,13 +197,22 @@ const isBoolean = (text: string) => /^(true|false|1|0)$/i.test(text.trim())
 /** Operators that only ask whether a field is filled. They say nothing about what it holds. */
 const ASKS_IF_FILLED = new Set(['ISEMPTY', 'ISNOTEMPTY', 'ISEMPTYSTRING', 'ANYTHING'])
 /**
+ * "Is empty" and "is not empty", however they are written. Measured: "=" and "!=" without a value or with NULL ask
+ * the same as ISEMPTY and ISNOTEMPTY. 717 of 771 users had no login time, each of the three ways.
+ */
+const asksIfFilled = ({ operator, value }: Pick<Condition, 'operator' | 'value'>) =>
+  ASKS_IF_FILLED.has(operator) || ((operator === '=' || operator === '!=') && (value === '' || value === 'NULL'))
+/**
  * Operators that compare a reference with a sys_id, or ask nothing about its content. Measured: LIKE and STARTSWITH
  * on a reference match the name of the record behind it, and a sort orders by that name. Every operator not listed
  * here is treated like those.
  */
 const COMPARES_IDS = new Set(['=', '!=', 'IN', 'NOT IN', 'SAMEAS', 'NSAMEAS', ...ASKS_IF_FILLED])
-/** Measured: these leave out the rows where the field is empty. */
-const SKIPS_EMPTY = new Set(['!=', 'NOT IN', 'NOT LIKE'])
+/**
+ * Measured: these leave out the rows where the field is empty. For NSAMEAS: of 82 incidents, 2 had the same person
+ * assigned as opened them and 33 had nobody assigned, and "assigned_toNSAMEASopened_by" matched 47.
+ */
+const SKIPS_EMPTY = new Set(['!=', 'NOT IN', 'NOT LIKE', 'NSAMEAS'])
 /**
  * A system property says by its type whether its value is a secret. Measured: "NOT IN" leaves out the rows where the
  * field is empty, so properties without a type go as well. That is wanted: without a type, the name of a property
@@ -206,19 +290,16 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
     warnings.push('The query contains "^^". ServiceNow reads that as a literal ^ inside a value, not as a separator between conditions.')
   }
 
-  if (!paths.length && !ctx.sn.restricted) return { fieldCheck: 'not needed: the call names no fields', query, parsed, resolved: new Map(), owners: new Map(), warnings }
+  // A text search names no field and still reads fields: it goes through every check below.
+  if (!paths.length && !parsed.textSearch && !ctx.sn.restricted) return { fieldCheck: 'not needed: the call names no fields', query, parsed, resolved: new Map(), owners: new Map(), warnings }
 
   const check = await ctx.dict.checkFields(table, paths)
 
   // A table that is closed on this machine must not be read through the side door either. Checked first: a hint about
   // a misspelled field would name fields of that table.
-  const closed = [...check.reached].filter((name) => !ctx.sn.allows(name))
-  if (closed.length) {
-    throw new ServiceNowError(
-      `This query reads from ${closed.join(', ')} through a dot-walk or a database view, and ${closed.length === 1 ? 'that table is' : 'those tables are'} closed on this machine. Nothing was sent.`,
-      'blocked',
-      closed[0],
-    )
+  for (const name of check.reached) {
+    const why = await ctx.closed.reason(name)
+    if (why) throw new ServiceNowError(`This query reads from ${name} through a dot-walk or a database view, and ${why}. Nothing was sent.`, 'blocked', name)
   }
   if (check.unknown.length) {
     const details = check.unknown
@@ -237,27 +318,18 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
       table,
     )
   }
-  if (ctx.sn.restricted) {
-    // The rows of a child table are rows of its parents: "customer_contact" holds users.
-    for (const name of [table, ...check.reached]) {
-      const parent = (await ctx.dict.table(name).catch(() => null))?.chain.slice(1).find((ancestor) => !ctx.sn.allows(ancestor))
-      if (parent) {
-        throw new ServiceNowError(`"${name}" is a child table of ${parent}, which is closed on this machine: its rows are rows of that table. Nothing was sent.`, 'blocked', parent)
-      }
-    }
-  }
+  // The rows of a child table are rows of its parents: "customer_contact" holds users.
+  const closed = await ctx.closed.reason(table)
+  if (closed) throw new ServiceNowError(`${closed[0].toUpperCase()}${closed.slice(1)}. Nothing was sent.`, 'blocked', table)
 
-  let sent = await keepSecretsOutOfReach(ctx, table, query, parsed, check.resolved, warnings)
-  // And the other way round: a query on a parent answers with the rows of its child tables, closed ones included.
-  const classes = ctx.sn.restricted ? await closedClasses(ctx, table) : null
-  if (classes) {
-    sent = withCondition(sent, classes)
-    warnings.push('Tables are closed on this machine. Rows that belong to a closed child table of this one were left out by a condition on sys_class_name, and the total does not count them.')
-  }
+  // The other way round, a query on a parent answers with the rows of its child tables: those of closed ones are left
+  // out by the gate every request passes through, which also says so in the answer.
+  const sent = await keepSecretsOutOfReach(ctx, table, query, parsed, check.resolved, warnings)
   refuseJournalConditions(table, parsed, check.resolved)
   warnAboutEmptyFields(parsed, check.resolved, warnings)
   await refuseChoiceLabels(ctx, table, parsed, check, warnings)
   refuseValuesOfTheWrongKind(table, parsed, check.resolved)
+  await refuseNamesInPlaceOfIds(ctx, table, parsed, check.resolved, warnings)
 
   if (check.status === 'checked') {
     const fieldCheck = paths.length ? 'all field names verified against sys_dictionary' : 'not needed: the call names no fields'
@@ -303,36 +375,6 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
 }
 
 /**
- * The condition on sys_class_name that keeps the rows of closed child tables out of what a parent table answers.
- * null where no closed table is below this one, so that an answer about incidents carries no note about users.
- *
- * With a deny list the closed tables below are named one by one: the tables on the list, the tables its patterns
- * match, and their own child tables, which are closed under whatever name. With a list of the only tables that may
- * be read, every other class is left out, and that needs a field to filter on.
- */
-async function closedClasses(ctx: Context, table: string): Promise<string | null> {
-  const parts: string[] = []
-  const below = [...(await ctx.dict.closedTables())].filter(([name, chain]) => name !== table && chain.includes(table)).map(([name]) => name)
-  // Rows without a class stay in: measured, "NOT IN" alone would drop them.
-  if (below.length) parts.push(`sys_class_nameNOT IN${below.sort().join(',')}^ORsys_class_nameISEMPTY`)
-
-  const open = ctx.sn.openClasses()
-  if (open) {
-    const columns = await ctx.dict.columnSet(table).catch(() => null)
-    if (!columns || columns.partial || columns.columns.has('sys_class_name')) parts.push(open)
-  }
-  const filter = parts.join('^')
-  if (filter.length > 6_000) {
-    throw new ServiceNowError(
-      `"${table}" has ${below.length} child tables that are closed on this machine, more than a query can leave out. Query one of its open child tables instead. Nothing was sent.`,
-      'blocked',
-      table,
-    )
-  }
-  return filter || null
-}
-
-/**
  * A condition on a secret is a way to read it: "starts with a", "starts with b",
  * and the number of matches gives the value away piece by piece. The same goes
  * for the order of rows sorted by it. So a field that holds a secret can only be
@@ -349,16 +391,13 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
   // The names of the records in a closed table are kept back from the answer. "Starts with A" on a reference into
   // that table compares with those names, and sorting by the reference orders the rows by them.
   if (ctx.sn.restricted) {
-    const closedBehind = (field: string) => {
-      const column = resolved.get(field)
-      if (column?.reference) return ctx.sn.allows(column.reference) ? null : column.reference
-      // A field that can point to any table, or whose type did not come back: it may point into a closed one.
-      return !column?.type || column.type === 'document_id' ? 'a table that cannot be told' : null
-    }
-    const byName = [...parsed.conditions.filter(({ operator }) => !COMPARES_IDS.has(operator)).flatMap(({ field, second }) => (second ? [field, second] : [field])), ...parsed.sorts].find(closedBehind)
-    if (byName) {
+    const byName = [...parsed.conditions.filter(({ operator }) => !COMPARES_IDS.has(operator)).flatMap(({ field, second }) => (second ? [field, second] : [field])), ...parsed.sorts]
+    for (const field of new Set(byName)) {
+      const hidden = await ctx.closed.hidesNames(table, field)
+      if (!hidden) continue
+      const where = hidden === 'closed' ? `${resolved.get(field)?.reference ?? 'a table'}, which is closed on this machine or has closed tables below it` : 'a table that cannot be told, and tables are closed on this machine'
       throw new ServiceNowError(
-        `"${byName}" points into ${closedBehind(byName)}, and tables are closed on this machine. Comparing it with text or sorting by it works on the names of the records there, ` +
+        `"${field}" points into ${where}. Comparing it with text or sorting by it works on the names of the records there, ` +
           'so those names could be found out by trying. Compare it with a sys_id (=, IN) or ask whether it is filled. Nothing was sent.',
         'blocked',
         table,
@@ -366,17 +405,39 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
     }
   }
 
-  const compared = new Set([...parsed.otherFields, ...parsed.conditions.filter(({ operator }) => !ASKS_IF_FILLED.has(operator)).map(({ field }) => field)])
-  // A text search looks into fields the query does not name. Where one of them holds a secret, it is a way to probe it.
-  if (parsed.textSearch) {
-    const columns = table === 'sys_properties' ? null : await ctx.dict.columnSet(table).catch(() => null)
-    const secret = [...(columns?.columns.values() ?? [])].filter((column) => SECRET_TYPES.has(column.type)).map((column) => column.name)
-    if (secret.length || (await propertyValueFields(ctx, table)).size > (table === 'sys_properties' ? 1 : 0)) {
-      throw validation(
-        `A text search looks into the fields of "${table}" without naming them, and this table has fields that hold secrets` +
-          `${secret.length ? ` (${secret.slice(0, 5).join(', ')})` : ''}. Filter on named fields instead. Nothing was sent.`,
+  const compared = new Set([...parsed.otherFields, ...parsed.conditions.filter((condition) => !asksIfFilled(condition)).map(({ field }) => field)])
+  if (ctx.sn.restricted) {
+    const named = [...compared].find((field) => recordNameKey(table, field, resolved.get(field)))
+    if (named) {
+      throw new ServiceNowError(
+        `"${named}" holds the readable names of records of other tables, and tables are closed on this machine. It can be read, without the names of records in closed tables, ` +
+          'but not compared or sorted by: those names could be found out by trying. Filter on the update name instead. Nothing was sent.',
+        'blocked',
         table,
       )
+    }
+  }
+  // A text search looks into fields the query does not name. Where one of them holds a secret, it is a way to probe it.
+  if (parsed.textSearch) {
+    if (table !== 'sys_properties') {
+      const columns = await ctx.dict.columnSet(table).catch(() => null)
+      const refuse = (why: string) => validation(`A text search looks into the fields of "${table}" without naming them, and ${why}. Filter on named fields instead. Nothing was sent.`, table)
+      // Without the full list of fields there is no telling what the search would look into.
+      if (!columns || columns.partial) throw refuse('the fields of this table could not be read completely, so it cannot be told whether one of them holds a secret')
+      const all = [...columns.columns.values()]
+      const secret = all.filter((column) => holdsSecret(column, column.name)).map((column) => column.name)
+      if (secret.length) throw refuse(`this table has fields that hold secrets (${secret.slice(0, 5).join(', ')})`)
+      const payload = all.find((column) => recordPayload(table, column.name, column))
+      if (payload) throw refuse(`"${payload.name}" holds whole records as text, secrets included`)
+      if ((await propertyValueFields(ctx, table)).size) throw refuse('this view reads the values of system properties, and some of them are secrets')
+      // Measured: a text search finds a record by the name behind one of its references. A caller whose name stood in
+      // no text field of an incident was found on all 8 of his incidents. So it is a way to try out names.
+      if (ctx.sn.restricted) {
+        for (const column of all) {
+          if (!(await ctx.closed.hidesNames(table, column.name))) continue
+          throw refuse(`it also finds records by the names behind their references: "${column.name}" points into a table that is closed on this machine, or that cannot be told`)
+        }
+      }
     }
     if (table === 'sys_properties') compared.add('value')
   }
@@ -413,9 +474,16 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
   }
   if (!propertyValues) return query
 
+  const untyped = await ctx.sn.query<Row>({ table: 'sys_properties', query: 'typeISEMPTY', fields: ['sys_id'], limit: 1 }).then(
+    (page) => page.total,
+    () => null,
+  )
   warnings.push(
     'The query compares or sorts by the value of system properties. Properties that hold a secret (type password or password2) and properties without a type ' +
-      'were left out of it, so that no secret can be found out by trying. The total does not count them.',
+      'were left out of it, so that no secret can be found out by trying. The total does not count them. ' +
+      (untyped === 0
+        ? 'This instance has no property without a type.'
+        : `${untyped === null ? 'Properties' : `The ${untyped} propert${untyped === 1 ? 'y' : 'ies'}`} without a type can be read with the query typeISEMPTY: a value comes back there unless the name suggests a secret.`),
   )
   return withCondition(query, NO_SECRET_PROPERTIES)
 }
@@ -442,10 +510,28 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
     }
     if (!COMPARES_STORED.has(operator)) continue
     const named = operator === 'ON' || operator === 'NOTON'
-    // ON carries a label first, then the two ends of the range.
-    const given = (named ? value.split('@').slice(1) : operator === 'BETWEEN' ? value.split('@') : operator.endsWith('IN') ? value.split(',') : [value]).filter(
-      (item) => item !== '' && item !== 'NULL',
-    )
+    // "=NULL" and "!=NULL" ask whether the field is empty. With every other operator NULL is a value like any other,
+    // and measured it matches nothing: sys_created_on>NULL, <NULL and BETWEENNULL@NULL gave 0 of 82, "IN NULL" as well.
+    const asksEmpty = (operator === '=' || operator === '!=') && (value === '' || value === 'NULL')
+    if (asksEmpty) continue
+    // ON carries a label first, then the two ends of the range. An empty entry in a list is skipped by the instance.
+    const given = (named ? value.split('@').slice(1) : operator === 'BETWEEN' ? value.split('@') : operator.endsWith('IN') ? value.split(',') : [value])
+      .map((item) => item.trim())
+      .filter((item) => item !== '')
+    if (given.includes('NULL')) {
+      throw validation(
+        `NULL stands for "empty" only behind = and !=. Behind ${operator} it is a value, and measured it matches nothing. To ask for empty fields write ${field}ISEMPTY, also joined with ^OR. Nothing was sent.`,
+        table,
+      )
+    }
+    // Measured: activeBETWEENfoo@bar and activeONa@b@c returned the rows where the field is false, and ON on a number field none.
+    if ((type === 'boolean' && (named || operator === 'BETWEEN')) || (NUMBER_TYPES.has(type) && named)) {
+      throw validation(
+        `${operator} is for dates, and "${field}" ${type === 'boolean' ? 'is a true/false field' : 'holds a number'}. Measured: the instance does not reject it and answers with the wrong rows or with none. ` +
+          `Compare with ${type === 'boolean' ? '=true or =false' : '=, >, <, IN or BETWEEN'}. Nothing was sent.`,
+        table,
+      )
+    }
 
     if (DURATION_TYPES.has(type)) {
       const odd = given.find((item) => !isDate(item))
@@ -465,15 +551,15 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
           table,
         )
       }
-    } else if (type === 'boolean' && !named && operator !== 'BETWEEN') {
+    } else if (type === 'boolean') {
       const odd = given.find((item) => !isBoolean(item))
       if (odd !== undefined) {
         throw validation(
-          `"${field}" is a true/false field. Write true or false. Measured: ServiceNow reads every other value as false, so ${field}=${odd} would return the rows where it is false. Nothing was sent.`,
+          `"${field}" is a true/false field. Write true or false. Measured: ServiceNow reads every other value as false, so "${odd}" would be compared as false. Nothing was sent.`,
           table,
         )
       }
-    } else if (NUMBER_TYPES.has(type) && !named) {
+    } else if (NUMBER_TYPES.has(type)) {
       const odd = given.find((item) => !isNumber(item))
       if (odd !== undefined) {
         throw validation(
@@ -485,12 +571,55 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
   }
 }
 
+/**
+ * A reference stores the sys_id of a record. Measured on 82 incidents, 40 with a group and 12 of those in one group:
+ * "assignment_group!=<the name of that group>" matched all 40, because no row holds a name, and
+ * "assignment_group.name!=<the name>" matched 28. The first is an answer that looks right and leaves nothing out.
+ *
+ * Not every sys_id is 32 hex digits: "global" is the sys_id of a scope and "Default view" that of a view. So a value
+ * of another shape is looked up in the table the reference points to before anything is said. "=" with a name
+ * matches nothing, and an empty answer is explained where it is given.
+ */
+async function refuseNamesInPlaceOfIds(ctx: Context, table: string, parsed: ParsedQuery, resolved: Map<string, Column>, warnings: string[]): Promise<void> {
+  for (const { field, operator, value } of parsed.conditions) {
+    const column = resolved.get(field)
+    if (column?.type !== 'reference' || !column.reference || (operator !== '!=' && operator !== 'NOT IN')) continue
+    const odd = (operator === 'NOT IN' ? value.split(',') : [value]).map((item) => item.trim()).filter((item) => item !== '' && item !== 'NULL' && !/^[0-9a-f]{32}$/i.test(item))
+
+    for (const given of odd.slice(0, 3)) {
+      const shown = `"${quoteInstanceText(given, 60)}"`
+      const how = `To leave out a record by one of its fields write ${field}.<field>${operator}…, for example ${field}.name${operator}${given}. If ${shown} is a sys_id after all, write ${field}.sys_id${operator}${given}.`
+      // A sys_id has at most 32 characters. Whether a shorter value is one, the referenced table says.
+      const exists =
+        given.length > 32 || given.includes('^')
+          ? 0
+          : await ctx.sn.query<Row>({ table: column.reference, query: `sys_id=${given}`, fields: ['sys_id'], limit: 1 }).then(
+              (page) => page.total,
+              () => null,
+            )
+      if (exists === 0) {
+        throw validation(
+          `"${field}" is a reference to ${column.reference} and stores a sys_id, and no record there has the sys_id ${shown}. With a name, "${operator}" leaves no row out: ` +
+            `measured, the answer then counts the rows it was meant to exclude. ${how} Nothing was sent.`,
+          table,
+        )
+      }
+      if (exists === null) {
+        warnings.push(
+          `"${field}" is a reference to ${column.reference} and stores a sys_id. ${shown} does not look like one, and it could not be checked whether a record has it. ` +
+            `If it is a name, "${operator}" leaves no row out. ${how}`,
+        )
+      }
+    }
+  }
+}
+
 /** A condition on a journal field is applied, but not as written. The entries themselves can be queried exactly. */
 function refuseJournalConditions(table: string, parsed: ParsedQuery, resolved: Map<string, Column>): void {
   const used = [...parsed.conditions.flatMap(({ field, second }) => (second ? [field, second] : [field])), ...parsed.sorts]
   const journal = used.find((field) => JOURNAL_TYPES.has(resolved.get(field)?.type ?? ''))
   if (!journal) return
-  const element = journal.split('.').at(-1)
+  const element = resolved.get(journal)?.sourceField ?? journal.split('.').at(-1)
   throw validation(
     `"${journal}" is a journal field. Its entries are stored in the table sys_journal_field, and a condition on the field itself does not do what it says: ` +
       'measured, "is empty" and "is not empty" return the same rows, and LIKE also finds text of the other journal fields of a record. ' +
@@ -499,16 +628,21 @@ function refuseJournalConditions(table: string, parsed: ParsedQuery, resolved: M
   )
 }
 
-/** Measured: "is not" leaves out the rows where the field is empty. An agent counting "everything except X" misses them. */
+/**
+ * Measured: "is not" leaves out the rows where the field is empty. An agent counting "everything except X" misses
+ * them. Not said where the query asks for the empty rows itself, on the field or on the reference in front of it:
+ * measured, "assignment_group.name!=X^ORassignment_group.nameISEMPTY" also takes the rows without a group.
+ */
 function warnAboutEmptyFields(parsed: ParsedQuery, resolved: Map<string, Column>, warnings: string[]): void {
-  const fields = parsed.conditions
-    .filter(({ field, operator, value }) => SKIPS_EMPTY.has(operator) && value !== '' && resolved.get(field)?.type !== 'boolean')
-    .map(({ field }) => field)
-  if (!fields.length) return
-  const list = [...new Set(fields)]
+  const asked = parsed.conditions.filter(({ operator, value }) => operator === 'ISEMPTY' || (operator === '=' && (value === '' || value === 'NULL'))).map(({ field }) => field)
+  const covered = (field: string) => asked.some((empty) => field === empty || field.startsWith(`${empty}.`))
+  const skipping = parsed.conditions.filter((condition) => SKIPS_EMPTY.has(condition.operator) && !asksIfFilled(condition) && !covered(condition.field) && resolved.get(condition.field)?.type !== 'boolean')
+  if (!skipping.length) return
+  const fields = [...new Set(skipping.map(({ field }) => field))]
+  const operators = [...new Set(skipping.map(({ operator }) => `"${operator}"`))]
   warnings.push(
-    `"!=", "NOT IN" and "NOT LIKE" leave out rows where the field is empty (${list.join(', ')}). ` +
-      `To count those rows too, add ^OR${list[0]}ISEMPTY behind the condition.`,
+    `${operators.join(', ')} ${operators.length === 1 ? 'leaves' : 'leave'} out rows where the field is empty (${fields.join(', ')}). ` +
+      `To count those rows too, add ^OR${fields[0]}ISEMPTY behind the condition.`,
   )
 }
 
@@ -538,7 +672,8 @@ async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQue
     if (!choices.length) continue
     const stored = new Set(choices.map((choice) => choice.value.toLowerCase()))
 
-    for (const given of operator.endsWith('IN') ? value.split(',') : [value]) {
+    // Measured: a blank after a comma is ignored. "categoryINinquiry, software" matched what it matches without one.
+    for (const given of operator.endsWith('IN') ? value.split(',').map((item) => item.trim()) : [value.trim()]) {
       if (given === '' || given === 'NULL' || stored.has(given.toLowerCase())) continue
       const meant = choices.find((choice) => choice.label.toLowerCase() === given.toLowerCase())
       if (meant) {
@@ -548,8 +683,26 @@ async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQue
           table,
         )
       }
+      // A word on a choice that stores numbers: no label as it stands, but the list is at hand, so it is shown.
+      if (NUMBER_TYPES.has(column.type) && !isNumber(given)) {
+        const near = [...new Map(choices.filter((choice) => choice.label.toLowerCase().includes(given.toLowerCase())).map((choice) => [choice.value, choice])).values()]
+        const closest = near.length === 1 ? ` The label that contains it belongs to the value ${quoteInstanceText(near[0].value, 80)}.` : ''
+        throw validation(
+          `"${field}" stores the value of a choice, a number, and "${quoteInstanceText(given, 60)}" is neither one of its values nor one of its labels.${closest} ` +
+            `Its values: ${describeChoices(choices)}. Nothing was sent.`,
+          table,
+        )
+      }
     }
   }
+}
+
+/** The values of a choice list with their labels, one entry per value: its English label where it has one. */
+function describeChoices(choices: Choice[]): string {
+  const labels = new Map<string, string>()
+  for (const choice of choices) if (!labels.has(choice.value) || choice.language === 'en') labels.set(choice.value, choice.label)
+  const list = [...labels].slice(0, 15).map(([stored, label]) => `${quoteInstanceText(stored, 80)} (${quoteInstanceText(label, 80)})`)
+  return `${list.join(', ')}${labels.size > 15 ? `, and ${labels.size - 15} more` : ''}`
 }
 
 /**
@@ -575,13 +728,9 @@ export async function explainEmpty(ctx: Context, guard: Guard): Promise<string[]
       const owner = guard.owners.get(field)
       const choices = owner ? await ctx.dict.choices(owner.table, owner.field).catch(() => []) : []
       const stored = new Set(choices.map((choice) => choice.value.toLowerCase()))
-      const odd = given.find((item) => !stored.has(item.toLowerCase()))
+      const odd = given.map((item) => item.trim()).find((item) => !stored.has(item.toLowerCase()))
       if (choices.length && odd) {
-        // One entry per value: its English label where it has one.
-        const labels = new Map<string, string>()
-        for (const choice of choices) if (!labels.has(choice.value) || choice.language === 'en') labels.set(choice.value, choice.label)
-        const list = [...labels].slice(0, 15).map(([stored, label]) => `${quoteInstanceText(stored, 80)} (${quoteInstanceText(label, 80)})`).join(', ')
-        notes.push(`"${odd}" is not among the choice values of "${field}": that can be why nothing matched. Its values: ${list}.`)
+        notes.push(`"${odd}" is not among the choice values of "${field}": that can be why nothing matched. Its values: ${describeChoices(choices)}.`)
       }
     }
   }

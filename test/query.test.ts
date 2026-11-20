@@ -217,12 +217,29 @@ test('a condition can be added to every part of a query', () => {
   assert.equal(withCondition('a=1^NQb=2^NQc=3', 'x=1'), 'a=1^x=1^NQb=2^x=1^NQc=3^x=1')
   // A query may begin with NQ. In front of it there is nothing to add the condition to: on its own it would be a
   // part that matches every row the condition allows.
-  assert.equal(withCondition('NQa=1', 'x=1'), 'NQa=1^x=1')
-  assert.equal(withCondition('^NQa=1^NQb=2', 'x=1'), 'NQa=1^x=1^NQb=2^x=1')
+  assert.equal(withCondition('NQa=1', 'x=1'), 'a=1^x=1')
+  assert.equal(withCondition('^NQa=1^NQb=2', 'x=1'), 'a=1^x=1^NQb=2^x=1')
   assert.equal(withCondition('a=1^', 'x=1'), 'a=1^x=1')
+  // Measured: a part without a condition is no part. "EQ^NQpriority=1" and "ORDERBYnumber^NQpriority=1" matched what
+  // "priority=1" did, and a condition added in front made a part of its own that matched everything it allows.
+  assert.equal(withCondition('EQ^NQa=1', 'x=1'), 'EQ^NQa=1^x=1')
+  assert.equal(withCondition('ORDERBYc^NQa=1', 'x=1'), 'ORDERBYc^NQa=1^x=1')
+  assert.equal(withCondition('a=1^NQ', 'x=1'), 'a=1^x=1')
+  // Where no part has a condition, the query matches every row, and the condition is added once.
+  assert.equal(withCondition('ORDERBYc', 'x=1'), 'ORDERBYc^x=1')
+  assert.equal(withCondition('NQ', 'x=1'), 'x=1')
+  assert.equal(withCondition('EQ', 'x=1'), 'EQ^x=1')
   // A literal ^ inside a value stays one.
   assert.equal(withCondition('aLIKEp^^q^NQb=2', 'x=1'), 'aLIKEp^^q^x=1^NQb=2^x=1')
   assert.deepEqual(fieldsInEncodedQuery(withCondition('aLIKEp^^q^NQb=2', 'x=1')), ['a', 'x', 'b'])
+})
+
+test('a text search needs a word, and nothing is joined to it with ^OR', () => {
+  // Measured: "123TEXTQUERY321=" matched nothing, and "123TEXTQUERY321=x^ORpriority=1" matched none of the 27 rows with priority 1.
+  assert.throws(() => fieldsInEncodedQuery('123TEXTQUERY321='), /needs a word to look for/)
+  assert.throws(() => fieldsInEncodedQuery('123TEXTQUERY321=printer^ORpriority=1'), /nothing can be joined to a text search with \^OR/)
+  assert.throws(() => fieldsInEncodedQuery('priority=1^OR123TEXTQUERY321=printer'), /cannot be joined with \^OR/)
+  assert.deepEqual(fieldsInEncodedQuery('123TEXTQUERY321=printer^priority=1^ORpriority=2'), ['priority'])
 })
 
 test('a refusal names the term and how to write it', () => {

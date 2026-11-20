@@ -7,6 +7,7 @@
  */
 import { ServiceNowClient } from './client.js'
 import { loadSettings } from './config.js'
+import { createContext } from './server.js'
 import { accountRoles, probe, SOURCES } from './tools/instance.js'
 import { errorKind, mapLimit, NO_CONNECTION } from './tools/shared.js'
 
@@ -18,18 +19,20 @@ export async function runDoctor(given?: ServiceNowClient, print: (line: string) 
   // Run by a person in a folder they chose, so a .env there may be used.
   const config = given ? null : loadSettings(process.env, process.cwd(), { cwdFile: true })
   const sn = given ?? new ServiceNowClient(config!)
+  // The rules for closed tables apply to what the doctor asks as well.
+  createContext(sn)
   print(`Checking ${sn.host}${config?.envFile ? `, settings from ${config.envFile}` : ''}\n`)
 
-  // One request first. A wrong password or address should fail once, not once per table.
-  const first = await probe(sn, SOURCES[0].table)
+  // One request first, to a table this machine may ask for. A wrong password or address should fail once, not once per table.
+  const opener = SOURCES.find((item) => sn.allows(item.table)) ?? SOURCES[0]
+  const first = await probe(sn, opener.table)
   if (NO_CONNECTION.has(first.status)) {
     print(`The instance cannot be used: ${first.error instanceof Error ? first.error.message : first.status}`)
     print('Check the address and the login. For a certificate or proxy problem see "Proxies and certificates" in the README.')
     return 1
   }
 
-  const others = await mapLimit(SOURCES.slice(1), 4, async (item) => ({ ...item, ...(await probe(sn, item.table)) }))
-  const results = [{ ...SOURCES[0], ...first }, ...others]
+  const results = await mapLimit(SOURCES, 4, async (item) => (item === opener ? { ...item, ...first } : { ...item, ...(await probe(sn, item.table)) }))
   const width = Math.max(...results.map((result) => result.table.length))
   for (const result of results) {
     const mark = result.status === 'readable' ? 'ok ' : 'NO '

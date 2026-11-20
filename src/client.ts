@@ -14,6 +14,25 @@ export interface QueryOptions {
   offset?: number
   /** true returns every field as {display_value, value}. */
   display?: boolean
+  /** For the lookups the gate of closed tables is built from: sent without passing through it. */
+  trusted?: boolean
+}
+
+/**
+ * What stands between a request and the instance while tables are closed on this machine. The server sets it once.
+ * Every request passes through it, whichever tool sends it, so that no tool has to remember the rules.
+ */
+export interface Gate {
+  /**
+   * Refuses a request that would read from a closed table: the table itself, a table one of its paths walks into,
+   * a table a database view joins. Returns the query to send, in which the rows of closed child tables are left out.
+   */
+  enter(table: string, query: string, paths: string[]): Promise<string>
+  /**
+   * Whether the display value of a field can be the name of a record in a closed table: "closed" if it points
+   * into one, "untold" if it cannot be told where it points.
+   */
+  hidesNames(table: string, path: string): Promise<'closed' | 'untold' | null>
 }
 
 export interface Page<T = Row> {
@@ -74,6 +93,9 @@ export class ServiceNowClient {
   readonly host: string
   requestCount = 0
 
+  /** Set by the server. Asked for every request while tables are closed on this machine. */
+  gate: Gate | null = null
+
   private auth: Auth
   /** Becomes true once the instance has accepted the credentials. Until then requests go one at a time. */
   private accepted = false
@@ -97,10 +119,12 @@ export class ServiceNowClient {
   }
 
   async query<T = Row>(opts: QueryOptions): Promise<Page<T>> {
-    const { table, query = '', fields, limit = 20, offset = 0, display = false } = opts
+    const { table, fields, limit = 20, offset = 0, display = false } = opts
     assertTableName(table)
-    fieldsInEncodedQuery(query, table)
+    const named = fieldsInEncodedQuery(opts.query ?? '', table)
     fields?.forEach((field) => assertFieldPath(field, table))
+    const gate = this.restricted && !opts.trusted ? this.gate : null
+    const query = gate ? await gate.enter(table, opts.query ?? '', [...named, ...(fields ?? [])]) : (opts.query ?? '')
 
     const params = new URLSearchParams()
     if (query) params.set('sysparm_query', query)
@@ -119,7 +143,27 @@ export class ServiceNowClient {
     const header = headers.get('x-total-count')
     const total = header !== null && /^\d+$/.test(header) ? Number(header) : null
     const records = (body.result as unknown[]).filter((row): row is T => row !== null && typeof row === 'object')
+    if (gate && display) await this.withoutClosedNames(gate, table, records as Row[])
     return { table, query, limit, offset, records, total }
+  }
+
+  /** Takes the display value off every field whose name could be that of a record in a closed table. */
+  private async withoutClosedNames(gate: Gate, table: string, records: Row[]): Promise<void> {
+    const verdicts = new Map<string, 'closed' | 'untold' | null>()
+    const notes = currentCall()?.closed
+    for (const row of records) {
+      for (const [key, value] of Object.entries(row)) {
+        if (!value || typeof value !== 'object' || !('display_value' in value)) continue
+        const { value: raw, display_value: shown } = value as { value?: unknown; display_value?: unknown }
+        // A display value that only repeats what is stored names nothing.
+        if (shown === raw || shown === '' || shown === null || shown === undefined) continue
+        if (!verdicts.has(key)) verdicts.set(key, await gate.hidesNames(table, key))
+        const verdict = verdicts.get(key)
+        if (!verdict) continue
+        ;(verdict === 'closed' ? notes?.names : notes?.untold)?.add(key)
+        row[key] = raw
+      }
+    }
   }
 
   /**
@@ -158,9 +202,20 @@ export class ServiceNowClient {
 
   /** Counts rows per value of one field, through the Aggregate API. */
   async groupCount(table: string, groupBy: string, query = '', display = false): Promise<GroupCount[]> {
+    return (await this.groupCountSent(table, groupBy, query, display)).groups
+  }
+
+  /** The same, together with the query that was sent: it differs from the one given where rows of closed tables were left out. */
+  async groupCountSent(table: string, groupBy: string, given = '', labels = false): Promise<{ groups: GroupCount[]; query: string }> {
     assertTableName(table)
     assertFieldPath(groupBy, table)
-    fieldsInEncodedQuery(query, table)
+    const named = fieldsInEncodedQuery(given, table)
+    const gate = this.restricted ? this.gate : null
+    const query = gate ? await gate.enter(table, given, [...named, groupBy]) : given
+    // The label of a group is the name behind a reference: not asked for where that could be a record of a closed table.
+    const hidden = gate && labels ? await gate.hidesNames(table, groupBy) : null
+    const display = labels && !hidden
+    if (hidden) (hidden === 'closed' ? currentCall()?.closed.names : currentCall()?.closed.untold)?.add(groupBy)
 
     const params = new URLSearchParams({ sysparm_count: 'true', sysparm_group_by: groupBy })
     if (query) params.set('sysparm_query', query)
@@ -171,7 +226,7 @@ export class ServiceNowClient {
       throw new ServiceNowError(`${this.host} answered without a result list.`, 'invalid_response', table)
     }
 
-    return (body.result as Array<{ stats?: { count?: unknown }; groupby_fields?: Array<{ value?: unknown; display_value?: unknown }> } | null>).map((group) => {
+    const groups = (body.result as Array<{ stats?: { count?: unknown }; groupby_fields?: Array<{ value?: unknown; display_value?: unknown }> } | null>).map((group) => {
       const count = String(group?.stats?.count ?? '')
       if (!/^\d+$/.test(count)) {
         throw new ServiceNowError(`${this.host} answered with a count that is not a number.`, 'invalid_response', table)
@@ -181,6 +236,7 @@ export class ServiceNowClient {
       const shown = String(field?.display_value ?? '')
       return { value, count: Number(count), ...(shown && shown !== value ? { display: shown } : {}) }
     })
+    return { groups, query }
   }
 
   private async get(
@@ -411,15 +467,16 @@ export class ServiceNowClient {
   /**
    * A query on a parent table answers with the rows of its child tables too: "task" holds every incident. With a
    * list of the only tables that may be read, this condition on sys_class_name keeps the rows of every other class
-   * out. Rows without a class stay in: measured, "IN" alone would drop them. null without such a list.
+   * out. Rows without a class stay in: measured, "IN" alone would drop them. null without such a list. "field" is
+   * the class field as the query has to name it: behind a dot-walk or under the prefix of a database view.
    */
-  openClasses(): string | null {
+  openClasses(field = 'sys_class_name'): string | null {
     const { allow } = this.config.tables
     if (!allow.length) return null
     const names = allow.filter((pattern) => !pattern.endsWith('*'))
     const prefixes = allow.filter((pattern) => pattern.endsWith('*')).map((pattern) => pattern.slice(0, -1))
-    const open = [names.length ? `sys_class_nameIN${names.join(',')}` : '', ...prefixes.map((prefix) => (prefix ? `sys_class_nameSTARTSWITH${prefix}` : 'sys_class_nameISNOTEMPTY'))].filter(Boolean)
-    return `${open.join('^OR')}^ORsys_class_nameISEMPTY`
+    const open = [names.length ? `${field}IN${names.join(',')}` : '', ...prefixes.map((prefix) => (prefix ? `${field}STARTSWITH${prefix}` : `${field}ISNOTEMPTY`))].filter(Boolean)
+    return `${open.join('^OR')}^OR${field}ISEMPTY`
   }
 
   private assertAllowed(table: string): void {

@@ -50,6 +50,8 @@ export const SOURCES: Array<{ table: string; usedBy: string }> = [
   { table: 'sys_data_policy_rule', usedBy: 'sn_dependencies for one field' },
   { table: 'sys_ui_element', usedBy: 'sn_dependencies for one field (forms)' },
   { table: 'sys_ui_list_element', usedBy: 'sn_dependencies for one field (lists)' },
+  { table: 'sys_archive', usedBy: 'sn_query (whether records of a table are archived)' },
+  { table: 'sys_table_rotation', usedBy: 'sn_query (whether old rows of a table are dropped)' },
 ]
 
 
@@ -77,13 +79,15 @@ export async function accountRoles(sn: ServiceNowClient): Promise<{ roles: numbe
   if (!user || !isPlainValue(user) || !sn.allows('sys_user')) return null
   try {
     const { records, total, complete } = await sn.all<Record<string, string>>(
-      { table: 'sys_user_has_role', query: `user.user_name=${user}^state=active`, fields: ['role.name'] },
+      { table: 'sys_user_has_role', query: `user.user_name=${user}^state=active`, fields: ['role.name', 'user.user_name'] },
       2_000,
     )
     if (!complete || (total !== null && records.length < total)) return null
     // No row at all: an account that reads these tables has roles, so the lookup through the user table did not work.
     // A row without a role name: the name is hidden from this account, and it could be the one that matters.
     if (!records.length || records.some((row) => !row['role.name'])) return null
+    // The answer checks its own query: a row of another user means the condition on the user was not applied.
+    if (records.some((row) => String(row['user.user_name'] ?? '').toLowerCase() !== user.toLowerCase())) return null
     const names = new Set(records.map((row) => row['role.name']))
     return { roles: names.size, admin: names.has('admin'), readOnlyRole: names.has('snc_read_only') }
   } catch {
@@ -137,7 +141,7 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         invalidQueryReturnsNoRows: z
           .string()
           .nullable()
-          .describe('Value of glide.invalid_query.returns_no_rows. "true" makes the instance answer a query it cannot use with no rows instead of all rows. null if not returned, which means the default: all rows.'),
+          .describe('Value of glide.invalid_query.returns_no_rows. "true" makes the instance answer a query it cannot use with no rows instead of all rows. null if it was not returned: hidden from this account, or not set. Not set means the default, all rows.'),
         queryRulesOnEveryTable: z
           .number()
           .nullable()
@@ -150,7 +154,7 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         lastFamilyUpgrade: upgradeShape.nullable().describe('Most recent change of release family among the last 30 upgrades.'),
         counts: z.object({
           customerUpdates: z.number().nullable().describe('Rows in sys_update_xml: captured changes, by people and by system accounts.'),
-          storeApps: z.number().nullable().describe('Active applications installed from a store or repository.'),
+          storeApps: z.number().nullable().describe('Active applications installed from a store or repository, applications of the own company that came from its repository included. null if they could not be counted.'),
           customApps: z.number().nullable().describe('Applications developed on this instance (sys_app).'),
           activePlugins: z.number().nullable(),
         }),
@@ -168,13 +172,17 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
     },
     traced('sn_instance', async () => {
       try {
-        // One request first: wrong credentials or a wrong address should fail once, not once per source.
-        const first = await probe(sn, SOURCES[0].table)
+        // One request first, to a table this machine may ask for: wrong credentials or a wrong address should fail
+        // once, not once per source.
+        const opener = SOURCES.find(({ table }) => sn.allows(table)) ?? SOURCES[0]
+        const first = await probe(sn, opener.table)
         if (NO_CONNECTION.has(first.status)) throw first.error
 
         const warnings: string[] = []
-        const rest = await mapLimit(SOURCES.slice(1), 4, async ({ table }) => [table, await probe(sn, table)] as const)
-        const probes = [[SOURCES[0].table, first] as const, ...rest]
+        const probes = await mapLimit(SOURCES, 4, async ({ table }) => [table, table === opener.table ? first : await probe(sn, table)] as const)
+        // The applications are rows of their parent table too. Where their own table is closed on this machine, they
+        // are not read from there either.
+        const appsClosed = Boolean(await ctx.closed.reason('sys_store_app').catch(() => 'unknown'))
         const sources: Record<string, string> = Object.fromEntries(probes.map(([table, result]) => [table, result.status]))
         const totalOf = (table: string) => probes.find(([name]) => name === table)?.[1].total ?? null
 
@@ -191,7 +199,7 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
             .catch(() => null),
           recentUpgrades(sn).catch(() => null),
           probe(sn, 'sys_store_app', 'active=true'),
-          probe(sn, 'sys_scope', 'sys_class_name=sys_store_app^active=true'),
+          appsClosed ? Promise.resolve<Probe>({ status: 'blocked', total: null }) : probe(sn, 'sys_scope', 'sys_class_name=sys_store_app^active=true'),
           probe(sn, 'v_plugin', 'active=active'),
           accountRoles(sn),
           // The table exists only where domain separation is installed.
@@ -233,8 +241,6 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
             'The account of this server has the admin role and not snc_read_only. The server only ever reads, but the ' +
               'instance would accept a write from this account. With a read-only account the instance enforces that too.',
           )
-        } else if (account && !account.readOnlyRole) {
-          warnings.push('The account of this server does not have the role snc_read_only, so the instance itself does not prevent writes from it. The server only ever reads.')
         }
 
         return ok({
@@ -269,7 +275,9 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         'Return the plugins and installed applications of the instance with version and active state. Use it to ' +
         'establish which baseline a question is answered against, or whether a product is installed at all. The filter ' +
         'matches the name, the plugin id (com.snc.incident) and the application scope (sn_hr_core). Applications are ' +
-        'read from sys_store_app, or through sys_scope when that table is not readable.',
+        'read from sys_store_app, or through sys_scope when that table is not readable. They include applications of ' +
+        'the own company that were installed from its repository; applications developed on this instance are rows of ' +
+        'sys_app, which sn_instance counts and sn_query lists.',
       inputSchema: {
         filter: z.string().max(120).optional().describe('Text the name, plugin id or application scope must contain, e.g. "Incident", "com.snc.incident", "sn_hr_core".'),
         activeOnly: z.boolean().default(true).describe('true returns only active entries.'),
@@ -311,10 +319,13 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         const appFields = ['name', 'scope', 'version', 'active', 'vendor']
 
         let apps = await attempt(sn.query<Row>({ table: 'sys_store_app', query: appQuery(), fields: appFields, limit }))
-        if (!apps || hidden(apps)) {
+        // The applications are rows of their parent table as well: read from there where the instance does not hand out
+        // the table itself. Not where the table is closed on this machine: then they are not to be read at all.
+        const appsClosed = Boolean(await ctx.closed.reason('sys_store_app').catch(() => 'unknown'))
+        if ((!apps || hidden(apps)) && !appsClosed) {
           apps = await attempt(sn.query<Row>({ table: 'sys_scope', query: appQuery('sys_class_name=sys_store_app'), fields: appFields, limit }))
         }
-        if (!apps) warnings.push('Installed applications could not be read from sys_store_app or sys_scope. That is "could not be checked", not "none installed".')
+        if (!apps) warnings.push(`Installed applications could not be read${appsClosed ? ': sys_store_app is closed on this machine' : ' from sys_store_app or sys_scope'}. That is "could not be checked", not "none installed".`)
         else withheldWarning('Installed applications', apps, warnings)
 
         // Nothing could be read at all: that is an error, with the reason of the first failure.

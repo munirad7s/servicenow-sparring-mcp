@@ -5,7 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { InstanceConfig } from '../src/config.js'
 import { buildServer } from '../src/server.js'
 import { queryByContent } from '../src/tools/origin.js'
-import { LOOKS_SECRET, scrubSecrets } from '../src/tools/shared.js'
+import { LOOKS_SECRET, payloadTables, scrubSecrets } from '../src/tools/shared.js'
 import { closedTables, column, dictionaryRoutes, fakeInstance, labelled, tableRow, type Route } from './fake.js'
 
 type Data = Record<string, any>
@@ -130,10 +130,13 @@ test('sn_query says when business rules run on every read of the table', async (
   const none = await connect([rules([]), ...dictionaryRoutes, incident])
   assert.deepEqual((await none.answer('sn_query', { table: 'incident', fields: ['number'] })).warnings, [])
 
-  // Not readable, or the instance does not know the field that marks such a rule: nothing is claimed.
-  for (const route of [{ table: 'sys_script', status: 403 }, rules([{ sys_id: 'r1' }], 500)]) {
+  // Not readable, or the instance does not know the field that marks such a rule: nothing is claimed, and the answer
+  // says that it was not checked. "Could not be checked" is not "there are none".
+  for (const [route, kind] of [[{ table: 'sys_script', status: 403 }, 'acl'], [rules([{ sys_id: 'r1' }], 500), 'invalid_response']] as Array<[Route, string]>) {
     const blind = await connect([route, ...dictionaryRoutes, incident])
-    assert.deepEqual((await blind.answer('sn_query', { table: 'incident', fields: ['number'] })).warnings, [])
+    assert.deepEqual((await blind.answer('sn_query', { table: 'incident', fields: ['number'] })).warnings, [
+      `Not checked: whether business rules hide rows on every read (sys_script: ${kind}). Rows and total can be fewer than what was once there.`,
+    ])
   }
 })
 
@@ -287,6 +290,12 @@ test('sn_query counts rows per value of a field', async () => {
   assert.equal(sentTo('incident', 'stats')[0].params.get('sysparm_group_by'), 'state')
   assert.equal(sentTo('incident', 'stats')[0].query, 'active=true')
   assert.equal(sentTo('incident').length, 0, 'no rows are read')
+
+  // "How many different values" is answered whatever the page holds, the rows without a value forming one group.
+  assert.equal(data.totalGroups, 3)
+  assert.equal(data.nextOffset, 2)
+  const rest = await answer('sn_query', { table: 'incident', query: 'active=true', groupBy: 'state', limit: 2, offset: 2 })
+  assert.deepEqual({ groups: rest.groups, returned: rest.returned, offset: rest.offset, truncated: rest.truncated, totalGroups: rest.totalGroups, next: rest.nextOffset }, { groups: [{ value: '', count: 3 }], returned: 1, offset: 2, truncated: false, totalGroups: 3, next: undefined })
 
   // The Aggregate API ignores an unknown field as well, and would answer with one group of every row.
   assert.equal((await call('sn_query', { table: 'incident', groupBy: 'stat' })).data.error, 'validation')
@@ -445,7 +454,7 @@ test('a value of the wrong kind is refused: the instance would not reject it', a
     ['due_date=1.6.2026', /holds a date/],
     ['sys_created_onON2026-01-15@15.01.2026 00:00:00@2026-01-15 23:59:59', /holds a date/],
     // "active=yes" returned the 29 inactive rows.
-    ['active=yes', /true\/false field.*would return the rows where it is false/],
+    ['active=yes', /true\/false field.*"yes" would be compared as false/],
     ['active=on', /true\/false field/],
     ['activeINyes', /true\/false field/],
     ['active!=maybe', /true\/false field/],
@@ -464,6 +473,22 @@ test('a value of the wrong kind is refused: the instance would not reject it', a
     // "business_duration>3600" matched all 39 filled rows; the stored form is a date counted from 1970.
     ['business_duration>3600', /holds a duration.*One hour is 1970-01-01 01:00:00/],
     ['business_duration>01:00:00', /holds a duration/],
+    // A day that does not exist.
+    ['sys_created_on>2026-02-31', /holds a date/],
+    ['sys_created_on>2026-04-31 10:00:00', /holds a date/],
+    // "activeBETWEENfoo@bar" and "activeONa@b@c" returned the 29 inactive rows, "reassignment_countONfoo@bar@baz" none.
+    ['activeBETWEENfoo@bar', /BETWEEN is for dates, and "active" is a true\/false field/],
+    ['activeONa@b@c', /ON is for dates/],
+    ['activeBETWEENtrue@false', /BETWEEN is for dates/],
+    ['reassignment_countONfoo@bar@baz', /ON is for dates, and "reassignment_count" holds a number/],
+    // NULL means "empty" only behind = and !=. "sys_created_on>NULL", "<NULL" and "BETWEENNULL@NULL" matched none of 82 rows.
+    ['sys_created_on>NULL', /NULL stands for "empty" only behind = and !=.*sys_created_onISEMPTY/],
+    ['sys_created_onBETWEENNULL@NULL', /NULL stands for "empty"/],
+    ['reassignment_countIN1,NULL', /NULL stands for "empty"/],
+    ['short_descriptionINNULL', /NULL stands for "empty"/],
+    // A list of nothing: "reassignment_countIN," matched none.
+    ['reassignment_countIN,', /needs at least one value in its list/],
+    ['short_descriptionNOT IN, ,', /needs at least one value in its list/],
   ]
   for (const [query, why] of refused) {
     const { data } = await call('sn_query', { table: 'incident', query, fields: ['number'] })
@@ -478,6 +503,9 @@ test('a value of the wrong kind is refused: the instance would not reject it', a
     'sys_created_onBETWEEN2026-01-01@2026-12-31', 'sys_created_on=', 'due_date!=', 'sys_created_onON2026-01-15@2026-01-15 00:00:00@2026-01-15 23:59:59',
     'active=true', 'active=TRUE', 'active=1', 'active=0', 'active!=false', 'activeINtrue,false',
     'reassignment_count=1', 'reassignment_count= 1', 'reassignment_count>=0', 'reassignment_countIN1, 2', 'reassignment_count=1.0', 'reassignment_countBETWEEN2@4', 'reassignment_count=NULL',
+    // Measured: "=NULL" and "!=NULL" are "is empty" and "is not empty" on every kind of field, an empty entry in a list is
+    // skipped ("priorityIN1," matched what "priorityIN1" did), and a blank around a value is ignored.
+    'sys_created_on=NULL', 'sys_created_on!=NULL', 'active!=NULL', 'reassignment_countIN1,', 'sys_created_on> 2026-03-03', 'active= true', 'sys_created_on>2024-02-29',
     'business_duration>1970-01-01 01:00:00', 'business_durationISNOTEMPTY',
     // Measured: LIKE and STARTSWITH on a date work on its stored text.
     'sys_created_onSTARTSWITH2026-0', 'sys_created_onLIKE2026',
@@ -510,6 +538,15 @@ test('journal fields: a condition on one is refused, and an empty value is expla
   const shown = await answer('sn_query', { table: 'incident', fields: ['number', 'work_notes'], displayValue: true })
   assert.match(shown.records[0].work_notes.display, /Restarted the service/)
   assert.deepEqual(shown.warnings, [])
+
+  // Without a list of fields the row carries the journal field too, and it is as empty.
+  const whole = await answer('sn_query', { table: 'incident' })
+  assert.match(whole.warnings.join(' '), /work_notes: a journal field comes back empty unless displayValue is true/)
+  // Nothing to count by: the field itself holds nothing.
+  const counted = await call('sn_query', { table: 'incident', groupBy: 'work_notes' })
+  assert.equal(counted.data.error, 'validation')
+  assert.match(counted.data.message, /is a journal field.*Count there instead: element=work_notes/)
+  assert.equal(sentTo('incident', 'stats').length, 0)
 })
 
 test('a closed table is reached neither through its child tables nor through its parent', async () => {
@@ -560,9 +597,20 @@ test('a closed table is reached neither through its child tables nor through its
   assert.match(asked[0].query, /^nameINincident\^ORnameSTARTSWITHsc_\^ORsuper_class\.nameINincident\^ORsuper_class\.nameSTARTSWITHsc_\^ORsuper_class\.super_class\.nameINincident/)
 
   // With a list of the only tables that may be read, the rows of every other child table are left out.
-  const onlyTasks = await connect(family, { tables: { allow: ['task', 'sys_*'], deny: [] } })
-  await onlyTasks.answer('sn_query', { table: 'task', fields: ['number'] })
+  const children: Route = { table: 'sys_db_object', query: '^ORname=task', rows: [tableRow('task', 'Task'), tableRow('incident', 'Incident', 'task')] }
+  const onlyTasks = await connect([children, ...family], { tables: { allow: ['task', 'sys_*'], deny: [] } })
+  const some = await onlyTasks.answer('sn_query', { table: 'task', fields: ['number'] })
   assert.equal(onlyTasks.sentTo('task')[0].query, 'sys_class_nameINtask^ORsys_class_nameSTARTSWITHsys_^ORsys_class_nameISEMPTY')
+  assert.equal(some.query, onlyTasks.sentTo('task')[0].query, 'the answer names the query that was sent')
+  // Where the tables below cannot be listed, the condition is added all the same.
+  const unlisted = await connect([{ table: 'sys_db_object', exact: 'name=task', rows: [tableRow('task', 'Task')] }, ...family.filter((route) => route.query !== 'name=task')], { tables: { allow: ['task', 'sys_*'], deny: [] } })
+  await unlisted.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(unlisted.sentTo('task')[0].query, 'sys_class_nameINtask^ORsys_class_nameSTARTSWITHsys_^ORsys_class_nameISEMPTY')
+  // And where every table below is on the list, nothing is left out and nothing is said.
+  const everything = await connect([children, ...family], { tables: { allow: ['task', 'incident', 'sys_*'], deny: [] } })
+  const all = await everything.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(everything.sentTo('task')[0].query, '')
+  assert.deepEqual(all.warnings, [])
 })
 
 test('where the child tables of a closed table cannot be listed, nothing is sent', async () => {
@@ -590,39 +638,264 @@ test('where the child tables of a closed table cannot be listed, nothing is sent
   }
 })
 
+/** A small world with a family of tables on each side of a reference: contacts are users, incidents are tasks. */
+function familyWorld(extra: Route[] = []): Route[] {
+  const one = (name: string, ...parents: string[]): Route => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name, ...parents)] })
+  return [
+    ...extra,
+    one('customer_contact', 'sys_user'),
+    one('task_sla'),
+    one('sys_update_xml'),
+    { table: 'sys_dictionary', query: 'nameINcustomer_contact,sys_user', rows: [column('sys_user', 'name'), column('customer_contact', 'account')] },
+    {
+      table: 'sys_dictionary',
+      query: 'nameINincident,task',
+      rows: [
+        column('task', 'number'),
+        column('task', 'sys_class_name', 'sys_class_name'),
+        column('task', 'parent', 'reference', 'task'),
+        column('incident', 'caller_id', 'reference', 'sys_user'),
+        column('incident', 'u_contact', 'reference', 'customer_contact'),
+        column('incident', 'u_owner', 'reference', ''),
+        column('incident', 'u_watchers', 'glide_list', ''),
+      ],
+    },
+    // The longer name first: a route matches by a part of the query.
+    { table: 'sys_dictionary', query: 'nameINtask_sla', rows: [column('task_sla', 'task', 'reference', 'task'), column('task_sla', 'stage')] },
+    { table: 'sys_dictionary', query: 'nameINtask', rows: [column('task', 'number'), column('task', 'sys_class_name', 'sys_class_name'), column('task', 'parent', 'reference', 'task')] },
+    { table: 'sys_dictionary', query: 'nameINsys_update_xml', rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'target_name'), column('sys_update_xml', 'type'), column('sys_update_xml', 'payload')] },
+    ...dictionaryRoutes,
+  ]
+}
+
+test('the name behind a reference is left out where the record can be a row of a closed table', async () => {
+  const noUsers = { tables: { allow: [], deny: ['sys_user'] } }
+  const users = closedTables(tableRow('sys_user', 'User'), tableRow('customer_contact', 'Contact', 'sys_user'))
+  const row = { number: 'INC1', u_contact: labelled(ID, 'Abel Tuter'), u_owner: labelled(ID, 'Beth Anglin'), u_watchers: labelled(ID, 'Carol Coughlin') }
+  const group = { table: 'incident', api: 'stats' as const, rows: [{ stats: { count: '3' }, groupby_fields: [{ field: 'u_contact', value: ID, display_value: 'Abel Tuter' }] }] }
+  const world = familyWorld([users, { table: 'incident', rows: [row] }, group])
+
+  // A contact is a user. The reference points to the child table, which no list names: the name is left out all the same.
+  const { answer, call, sentTo } = await connect(world, noUsers)
+  const read = await answer('sn_query', { table: 'incident', fields: ['number', 'u_contact', 'u_owner', 'u_watchers'], displayValue: true })
+  assert.deepEqual(read.records, [{ number: 'INC1', u_contact: ID, u_owner: ID, u_watchers: ID }])
+  assert.match(read.warnings.join(' '), /closed on this machine were left out: u_contact\./)
+  // A reference or a list whose target did not come back can point anywhere.
+  assert.match(read.warnings.join(' '), /could not be told which table these fields point to, so their display values were left out: u_owner, u_watchers/)
+  assert.doesNotMatch(JSON.stringify(read), /Abel|Beth|Carol/)
+
+  const counted = await answer('sn_query', { table: 'incident', groupBy: 'u_contact' })
+  assert.deepEqual(counted.groups, [{ value: ID, count: 3 }])
+  assert.equal(sentTo('incident', 'stats')[0].params.get('sysparm_display_value'), null)
+  assert.match(counted.warnings.join(' '), /were left out: u_contact/)
+
+  // Comparing with text or sorting works on those names.
+  for (const query of ['u_contactSTARTSWITHAbel', 'ORDERBYu_contact', 'u_ownerLIKEBeth', 'ORDERBYDESCu_watchers']) {
+    const { data } = await call('sn_query', { table: 'incident', query, fields: ['number'] })
+    assert.equal(data.error, 'blocked', query)
+    assert.match(data.message, /Comparing it with text or sorting by it works on the names/, query)
+  }
+  assert.equal((await answer('sn_query', { table: 'incident', query: `u_contact=${ID}^u_ownerISNOTEMPTY`, fields: ['number'] })).returned, 1)
+})
+
+test('a reference into a parent table does not give away the rows of its closed child tables', async () => {
+  const noIncidents = { tables: { allow: [], deny: ['incident'] } }
+  const below = closedTables(tableRow('incident', 'Incident', 'task'), tableRow('u_major_incident', 'Major incident', 'incident', 'task'))
+  const LEFT_OUT = 'task.sys_class_nameNOT INincident,u_major_incident^ORtask.sys_class_nameISEMPTY'
+  const sla = { table: 'task_sla', rows: [{ stage: 'in_progress', task: labelled(ID, 'INC0010001'), 'task.number': 'INC0010001' }] }
+  const group = { table: 'task_sla', api: 'stats' as const, rows: [{ stats: { count: '2' }, groupby_fields: [{ field: 'task', value: ID, display_value: 'INC0010001' }] }] }
+  const { answer, call, sentTo } = await connect(familyWorld([below, sla, group, { table: 'task', rows: [{ number: 'TASK1' }] }]), noIncidents)
+
+  // The task behind the reference can be an incident: its number is the name of a record of the closed table.
+  const read = await answer('sn_query', { table: 'task_sla', fields: ['stage', 'task'], displayValue: true })
+  assert.deepEqual(read.records, [{ stage: 'in_progress', task: ID }])
+  assert.match(read.warnings.join(' '), /were left out: task\./)
+  assert.deepEqual((await answer('sn_query', { table: 'task_sla', groupBy: 'task' })).groups, [{ value: ID, count: 2 }])
+  assert.equal((await call('sn_query', { table: 'task_sla', query: 'taskSTARTSWITHINC', fields: ['stage'] })).data.error, 'blocked')
+
+  // Walking the reference reads fields of the task. The rows whose task is of a closed class are left out.
+  const walked = await answer('sn_query', { table: 'task_sla', query: 'stage=in_progress^NQstage=paused', fields: ['stage', 'task.number'] })
+  assert.equal(sentTo('task_sla').at(-1)!.query, `stage=in_progress^${LEFT_OUT}^NQstage=paused^${LEFT_OUT}`)
+  assert.equal(walked.query, sentTo('task_sla').at(-1)!.query)
+  assert.match(walked.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
+  // A reference from a task to its parent task is such a walk as well, on top of the condition for the table itself.
+  await answer('sn_query', { table: 'task', fields: ['number', 'parent.number'] })
+  assert.equal(
+    sentTo('task').at(-1)!.query,
+    'parent.sys_class_nameNOT INincident,u_major_incident^ORparent.sys_class_nameISEMPTY^sys_class_nameNOT INincident,u_major_incident^ORsys_class_nameISEMPTY',
+  )
+})
+
+test('a database view that joins a parent table leaves out the rows of its closed child tables', async () => {
+  const view: Route[] = [
+    { table: 'sys_db_object', exact: 'name=task_with_sla', rows: [] },
+    { table: 'sys_db_view', query: 'name=task_with_sla', rows: [{ sys_id: 'd'.repeat(32), name: 'task_with_sla', label: 'Tasks with SLA' }] },
+    { table: 'sys_db_view_table', rows: [{ table: 'task', variable_prefix: 'tsk' }, { table: 'task_sla', variable_prefix: 'sla' }] },
+    { table: 'task_with_sla', rows: [{ tsk_number: 'TASK1' }] },
+  ]
+  const below = closedTables(tableRow('incident', 'Incident', 'task'))
+  const { answer, sentTo } = await connect(familyWorld([below, ...view]), { tables: { allow: [], deny: ['incident'] } })
+  const data = await answer('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
+  assert.equal(sentTo('task_with_sla')[0].query, 'tsk_sys_class_nameNOT INincident^ORtsk_sys_class_nameISEMPTY')
+  assert.match(data.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
+})
+
+test('the name and the payload of a captured change are kept back where its record is in a closed table', async () => {
+  const noUsers = { tables: { allow: [], deny: ['sys_user'] } }
+  const users = closedTables(tableRow('sys_user', 'User'), tableRow('customer_contact', 'Contact', 'sys_user'))
+  const payload = (inner: string) => `<?xml version="1.0" encoding="UTF-8"?><record_update>${inner}</record_update>`
+  const rows = [
+    { name: `sys_user_${ID}`, target_name: 'Abel Tuter', type: 'User', payload: payload('<sys_user action="INSERT_OR_UPDATE"><name>Abel Tuter</name></sys_user>') },
+    { name: `customer_contact_${ID}`, target_name: 'Beth Anglin', type: 'Contact', payload: payload('<customer_contact action="INSERT_OR_UPDATE"><name>Beth Anglin</name></customer_contact>') },
+    // The record of an open table first, then one of a closed table: measured, most payloads carry more than one element.
+    { name: `sys_ui_section_${ID}`, target_name: 'Incident form', type: 'Form section', payload: payload('<sys_ui_section action="INSERT_OR_UPDATE"><caption/></sys_ui_section><sys_user action="DELETE"><name>Carol Coughlin</name></sys_user>') },
+    { name: NAME, target_name: 'Example rule', type: 'Business Rule', payload: payload('<sys_script action="INSERT_OR_UPDATE"><name>Example rule</name><sys_created_by display_value="Dan Smith">dan</sys_created_by></sys_script>') },
+    // No element says which table the record is in.
+    { name: 'u_odd_thing', target_name: 'Odd', type: 'Other', payload: '<something>else</something>' },
+  ]
+  const { answer, call, sentTo } = await connect(familyWorld([users, { table: 'sys_update_xml', rows }]), noUsers)
+  const WITHHELD = '[withheld: the record is in a table closed on this machine]'
+
+  // The update name is read along, because it says which table the record is in. It is not added to the answer.
+  const names = await answer('sn_query', { table: 'sys_update_xml', fields: ['target_name'] })
+  assert.equal(sentTo('sys_update_xml')[0].params.get('sysparm_fields'), 'target_name,name')
+  assert.deepEqual(names.records, [{ target_name: WITHHELD }, { target_name: WITHHELD }, { target_name: 'Incident form' }, { target_name: 'Example rule' }, { target_name: 'Odd' }])
+  assert.match(names.warnings.join(' '), /2 record name\(s\) were withheld/)
+
+  const payloads = await answer('sn_query', { table: 'sys_update_xml', fields: ['name', 'payload'] })
+  assert.deepEqual(payloads.records.map((item: Data) => item.payload === WITHHELD), [true, true, true, false, true])
+  // What is passed on names nobody: a payload carries the name behind every reference of its record.
+  assert.match(payloads.records[3].payload, /<sys_created_by display_value="\[withheld\]">dan<\/sys_created_by>/)
+  assert.doesNotMatch(JSON.stringify(payloads), /Abel|Beth|Carol|Dan Smith/)
+  assert.match(payloads.warnings.join(' '), /4 payload\(s\) were withheld/)
+
+  // The names could be found out by trying, so they are not compared, sorted by or counted.
+  for (const args of [{ query: 'target_nameSTARTSWITHAbel' }, { query: 'ORDERBYtarget_name' }, { groupBy: 'target_name' }]) {
+    const { data } = await call('sn_query', { table: 'sys_update_xml', fields: ['name'], ...args })
+    assert.equal(data.error, 'blocked', JSON.stringify(args))
+    assert.match(data.message, /holds the readable names of records of other tables/)
+  }
+
+  // Without closed tables nothing of this applies.
+  const open = await connect(familyWorld([{ table: 'sys_update_xml', rows }]))
+  assert.equal((await open.answer('sn_query', { table: 'sys_update_xml', fields: ['target_name'] })).records[0].target_name, 'Abel Tuter')
+  assert.equal((await open.answer('sn_query', { table: 'sys_update_xml', query: 'target_nameSTARTSWITHAbel', fields: ['name'] })).returned, 5)
+})
+
+test('a tool that walks a reference of its own is held to the closed tables like a query', async () => {
+  // sn_upgrade_skips reads the entries of an upgrade through a reference. With that table closed, nothing is sent.
+  const world: Route[] = [
+    closedTables(tableRow('sys_upgrade_history_log', 'Upgrade History Log')),
+    { table: 'sys_db_object', exact: 'name=upgrade_history_task', rows: [tableRow('upgrade_history_task', 'Skipped change')] },
+    { table: 'sys_dictionary', query: 'nameINupgrade_history_task', rows: [column('upgrade_history_task', 'upgrade_detail', 'reference', 'sys_upgrade_history_log'), column('upgrade_history_task', 'state', 'integer')] },
+    ...dictionaryRoutes,
+    { table: 'sys_upgrade_history', rows: [{ sys_id: ID, from_version: 'glide-zurich-07-01-2025__patch1.zip', to_version: 'glide-australia-02-11-2026__patch1.zip', upgrade_finished: '2026-09-25 17:00:00' }] },
+    { table: 'upgrade_history_task', rows: [{ 'upgrade_detail.file_name': NAME, 'upgrade_detail.target_name': 'Example rule' }] },
+    { table: 'upgrade_history_task', api: 'stats', rows: [] },
+  ]
+  const { call, sentTo } = await connect(world, { tables: { allow: [], deny: ['sys_upgrade_history_log'] } })
+  const { data } = await call('sn_upgrade_skips', { upgrade: 'all' })
+  assert.equal(data.error, 'blocked')
+  assert.match(data.message, /reads from sys_upgrade_history_log through a dot-walk/)
+  assert.equal(sentTo('upgrade_history_task').length + sentTo('upgrade_history_task', 'stats').length, 0)
+})
+
 test('a text search is not a way to probe a field that holds a secret', async () => {
   const LEFT_OUT = 'typeNOT INpassword,password2'
-  const { answer, call, sentTo } = await connect([
+  const world: Route[] = [
     { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] },
     { table: 'sys_dictionary', query: 'nameINsys_properties', rows: [column('sys_properties', 'name'), column('sys_properties', 'value'), column('sys_properties', 'type')] },
+    { table: 'sys_db_object', query: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Customer Update')] },
+    { table: 'sys_dictionary', query: 'nameINsys_update_xml', rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'payload')] },
     ...dictionaryRoutes,
     { table: 'sys_user', rows: [{ name: 'Abel' }] },
     { table: 'incident', rows: [{ number: 'INC1' }] },
     { table: 'sys_properties', rows: [{ name: 'glide.war' }] },
-  ])
-  // It looks into fields the query does not name. sys_user has one that holds a secret.
-  const refused = await call('sn_query', { table: 'sys_user', query: '123TEXTQUERY321=hash', fields: ['name'] })
-  assert.equal(refused.data.error, 'validation')
-  assert.match(refused.data.message, /text search.*fields that hold secrets \(user_password\)/)
+    { table: 'sys_update_xml', rows: [{ name: NAME }] },
+  ]
+  const { answer, call, sentTo } = await connect(world)
+  // It looks into fields the query does not name. sys_user has one that holds a secret. With or without a list of
+  // fields to return: a search names no field, so nothing else in the call has to.
+  for (const fields of [['name'], undefined]) {
+    const refused = await call('sn_query', { table: 'sys_user', query: '123TEXTQUERY321=hash', fields })
+    assert.equal(refused.data.error, 'validation')
+    assert.match(refused.data.message, /text search.*fields that hold secrets \(user_password\)/)
+  }
   assert.equal(sentTo('sys_user').length, 0)
+  // A field that carries whole records is searched as well.
+  assert.match((await call('sn_query', { table: 'sys_update_xml', query: '123TEXTQUERY321=secret', fields: ['name'] })).data.message, /"payload" holds whole records as text/)
+  assert.equal(sentTo('sys_update_xml').length, 0)
 
   assert.equal((await answer('sn_query', { table: 'incident', query: '123TEXTQUERY321=printer', fields: ['number'] })).returned, 1)
-  // The value of a property is among the fields a text search reads: the properties that hold secrets are left out.
-  await answer('sn_query', { table: 'sys_properties', query: '123TEXTQUERY321=zurich', fields: ['name'] })
-  assert.equal(sentTo('sys_properties')[0].query, `123TEXTQUERY321=zurich^${LEFT_OUT}`)
+  // The value of a property is among the fields a text search reads: the properties that hold secrets are left out,
+  // again with or without a list of fields.
+  for (const fields of [['name'], undefined]) {
+    await answer('sn_query', { table: 'sys_properties', query: '123TEXTQUERY321=zurich', fields })
+    assert.equal(sentTo('sys_properties').at(-1)!.query, `123TEXTQUERY321=zurich^${LEFT_OUT}`)
+  }
+
+  // Where the fields of the table cannot be read completely, there is no telling what the search looks into.
+  const unreadable = dictionaryRoutes.map((route) => (route.table === 'sys_dictionary' && route.query === 'nameINincident,task' ? { table: 'sys_dictionary', query: route.query, status: 403 } : route))
+  const blind = await connect([...unreadable, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  assert.match((await blind.call('sn_query', { table: 'incident', query: '123TEXTQUERY321=printer' })).data.message, /could not be read completely/)
+  assert.equal(blind.sentTo('incident').length, 0)
+  // A field whose type did not come back is judged by its name.
+  const untyped = dictionaryRoutes.map((route) => (route.query === 'nameINsys_user' ? { ...route, rows: [column('sys_user', 'name'), column('sys_user', 'user_password', '')] } : route))
+  const byName = await connect([...untyped, { table: 'sys_user', rows: [{ name: 'Abel' }] }])
+  assert.match((await byName.call('sn_query', { table: 'sys_user', query: '123TEXTQUERY321=hash', fields: ['name'] })).data.message, /fields that hold secrets \(user_password\)/)
+
+  // Measured: a text search finds a record by the name behind one of its references. With the table of those records
+  // closed, it would be a way to try out their names.
+  const closed = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }], { tables: { allow: [], deny: ['sys_user'] } })
+  const probing = await closed.call('sn_query', { table: 'incident', query: '123TEXTQUERY321=Abel', fields: ['number'] })
+  assert.equal(probing.data.error, 'validation')
+  assert.match(probing.data.message, /finds records by the names behind their references: "assigned_to" points into a table that is closed/)
+  assert.equal(closed.sentTo('incident').length, 0)
 })
 
-test('the readable name of a record in a closed table is not passed on by the other tools either', async () => {
+test('a record in a closed table is not read by the other tools either, and its readable name is not passed on', async () => {
   const closed = { tables: { allow: [], deny: ['sys_script'] } }
+  // The dictionary of the tables the tools read: without it, no request that walks a reference is sent while tables are closed.
+  const world: Route[] = [
+    closedTables(tableRow('sys_script', 'Business Rule', 'sys_metadata')),
+    ...['sys_metadata', 'sys_package', 'sys_scope', 'sys_update_xml', 'sys_update_version', 'upgrade_history_task', 'sys_upgrade_history_log', 'sys_upgrade_history'].map((name) => ({
+      table: 'sys_db_object',
+      query: `name=${name}`,
+      exact: `name=${name}`,
+      rows: [tableRow(name, name)],
+    })),
+    { table: 'sys_dictionary', query: 'nameINsys_metadata', rows: [column('sys_metadata', 'sys_package', 'reference', 'sys_package'), column('sys_metadata', 'sys_scope', 'reference', 'sys_scope'), column('sys_metadata', 'sys_class_name', 'sys_class_name'), column('sys_metadata', 'sys_name')] },
+    { table: 'sys_dictionary', query: 'nameINsys_package', rows: [column('sys_package', 'sys_class_name', 'sys_class_name'), column('sys_package', 'name')] },
+    { table: 'sys_dictionary', query: 'nameINsys_scope', rows: [column('sys_scope', 'scope'), column('sys_scope', 'name')] },
+    { table: 'sys_dictionary', query: 'nameINsys_update_xml', rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'target_name'), column('sys_update_xml', 'type')] },
+    { table: 'sys_dictionary', query: 'nameINupgrade_history_task', rows: [column('upgrade_history_task', 'upgrade_detail', 'reference', 'sys_upgrade_history_log'), column('upgrade_history_task', 'state', 'integer')] },
+    { table: 'sys_dictionary', query: 'nameINsys_upgrade_history_log', rows: [column('sys_upgrade_history_log', 'file_name'), column('sys_upgrade_history_log', 'target_name'), column('sys_upgrade_history_log', 'disposition', 'integer'), column('sys_upgrade_history_log', 'upgrade_history', 'reference', 'sys_upgrade_history')] },
+    { table: 'sys_dictionary', query: 'nameINsys_upgrade_history', rows: [column('sys_upgrade_history', 'to_version')] },
+    ...dictionaryRoutes,
+  ]
   const row = { name: NAME, type: 'Business Rule', target_name: 'Example rule', sys_created_by: 'abel', sys_updated_by: 'abel' }
-  const delta = await connect([{ table: 'sys_update_xml', rows: [row, { ...row, name: 'sys_ui_action_' + ID, target_name: 'Example action' }] }, stats('sys_update_xml', { 'Business Rule': 2 })], closed)
+  const delta = await connect([...world, { table: 'sys_update_xml', rows: [row, { ...row, name: 'sys_ui_action_' + ID, target_name: 'Example action' }] }, stats('sys_update_xml', { 'Business Rule': 2 })], closed)
   const data = await delta.answer('sn_delta')
   assert.deepEqual(data.updates.map((item: Data) => item.target_name), ['[withheld: the record is in a table closed on this machine]', 'Example action'])
 
-  const judged = await connect(origin('sys_plugins', [], [], {}, [skip('Skipped')]), closed)
-  const answer = await judged.answer('sn_origin', { sysId: ID })
-  assert.equal(answer.record.name, '[withheld: the record is in a table closed on this machine]')
-  assert.equal(answer.evidence.upgradeSkips.rows[0].target, '[withheld: the record is in a table closed on this machine]')
+  // Asked for by its update name, which says where the record is, nothing is sent at all.
+  const judged = await connect([...world, ...origin('sys_plugins', [], [], {}, [skip('Skipped')])], closed)
+  const refused = await judged.call('sn_origin', { updateName: NAME })
+  assert.equal(refused.data.error, 'blocked')
+  assert.match(refused.data.message, /stands for a record in a table that is closed on this machine/)
+  assert.equal(judged.sentTo('sys_metadata').length + judged.sentTo('sys_update_xml').length, 0)
+
+  // Asked for by its sys_id, the table of application files is read without the rows of the closed table, so the
+  // record is not found, and the answer says that rows were left out.
+  const filtered = await connect(
+    [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_script', rows: [] }, ...origin('sys_plugins', [], [], {}, [skip('Skipped')])],
+    closed,
+  )
+  const answer = await filtered.answer('sn_origin', { sysId: ID })
+  assert.equal(filtered.sentTo('sys_metadata')[0].query, `sys_id=${ID}^sys_class_nameNOT INsys_script^ORsys_class_nameISEMPTY`)
+  assert.equal(answer.record, null)
+  assert.match(answer.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
+  assert.doesNotMatch(JSON.stringify(answer), /Example rule/)
 })
 
 test('a field of an encrypted type is withheld and cannot be compared', async () => {
@@ -634,6 +907,22 @@ test('a field of an encrypted type is withheld and cannot be compared', async ()
   ])
   assert.deepEqual((await answer('sn_query', { table: 'u_vault' })).records, [{ u_owner: 'abel', u_blob: '[withheld: this field holds a secret]' }])
   assert.equal((await call('sn_query', { table: 'u_vault', query: 'u_blobSTARTSWITHa' })).data.error, 'validation')
+
+  // Measured: the instance takes "ref_<the table itself>.<field>" as another name for the field. With a dictionary that
+  // is only partly readable, that name was checked against a row and found there, and the field under it was not known
+  // to hold a secret. The name is refused whatever can be read.
+  const partly = await connect([
+    { table: 'sys_db_object', query: 'name=u_vault', rows: [tableRow('u_vault', 'Vault')] },
+    { table: 'sys_dictionary', query: 'nameINu_vault', rows: [column('u_vault', 'u_owner'), column('u_vault', 'u_blob', 'glide_encrypted'), null] },
+    ...dictionaryRoutes,
+    { table: 'u_vault', rows: [{ u_owner: 'abel', u_blob: 'encrypted-value', 'ref_u_vault.u_blob': 'encrypted-value' }] },
+  ])
+  for (const args of [{ fields: ['ref_u_vault.u_blob'] }, { query: 'ref_u_vault.u_blobSTARTSWITHa', fields: ['u_owner'] }, { groupBy: 'ref_u_vault.u_blob' }]) {
+    const { data } = await partly.call('sn_query', { table: 'u_vault', ...args })
+    assert.equal(data.error, 'validation', JSON.stringify(args))
+    assert.match(data.message, /"ref_u_vault\." names the table itself/)
+  }
+  assert.equal(partly.sentTo('u_vault').length, 0)
 })
 
 test('a field that can point to any table loses its names when tables are closed', async () => {
@@ -683,6 +972,60 @@ test('sn_query says what it could not check about choices, and what "is not" lea
   const data = await answer('sn_query', { table: 'incident', query: `assigned_to!=${ID}^active!=true^category!=^short_descriptionNOT LIKEtest` })
   assert.match(data.warnings.join(' '), /leave out rows where the field is empty \(assigned_to, short_description\)\. To count those rows too, add \^ORassigned_toISEMPTY/)
   assert.deepEqual((await answer('sn_query', { table: 'incident', query: 'active!=true^category!=' })).warnings, [])
+  // A query that asks for the empty rows itself has them, and "!=NULL" asks for the rows that are not empty.
+  for (const query of [`assigned_to!=${ID}^ORassigned_toISEMPTY`, `assigned_to!=${ID}^ORassigned_to=NULL`, `assigned_to.name!=Abel^ORassigned_toISEMPTY`, 'assigned_to!=NULL', 'short_description!=NULL']) {
+    assert.deepEqual((await answer('sn_query', { table: 'incident', query })).warnings, [], query)
+  }
+  // Measured: "is different from another field" leaves the empty rows out as well.
+  assert.match((await answer('sn_query', { table: 'incident', query: 'assigned_toNSAMEAScaller_id' })).warnings.join(' '), /"NSAMEAS" leaves out rows where the field is empty \(assigned_to\)/)
+})
+
+test('a name where a reference needs a sys_id is refused when it is to be left out', async () => {
+  // Measured on 82 incidents, 40 with a group, 12 of them in one group: "assignment_group!=<its name>" matched all 40.
+  const groups = (rows: Array<Record<string, string>>, total = rows.length): Route => ({ table: 'sys_user', query: 'sys_id=', rows, total })
+  const { answer, call, sentTo } = await connect([groups([]), ...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  for (const query of ['assigned_to!=Abel Tuter', `assigned_toNOT IN${ID},Abel Tuter`, 'caller_id!=abel']) {
+    const { data } = await call('sn_query', { table: 'incident', query, fields: ['number'] })
+    assert.equal(data.error, 'validation', query)
+    assert.match(data.message, /is a reference to sys_user and stores a sys_id, and no record there has the sys_id "(Abel Tuter|abel)".*leaves no row out.*\.name(!=|NOT IN)/, query)
+  }
+  assert.equal(sentTo('incident').length, 0)
+  // Looked up by exactly that value, in the table the reference points to.
+  assert.equal(sentTo('sys_user')[0].query, 'sys_id=Abel Tuter')
+  // A sys_id is at most 32 characters: nothing has to be asked.
+  const long = await call('sn_query', { table: 'incident', query: `assigned_to!=${'x'.repeat(40)}`, fields: ['number'] })
+  assert.equal(long.data.error, 'validation')
+
+  // A sys_id is not always 32 hex digits: "global" is the sys_id of a scope. Where a record has it, the query is sent.
+  const real = await connect([groups([{ sys_id: 'global' }]), ...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  assert.deepEqual((await real.answer('sn_query', { table: 'incident', query: 'assigned_to!=global^ORassigned_toISEMPTY', fields: ['number'] })).warnings, [])
+  // A 32-digit sys_id and "is" are not looked up: "is" with a name matches nothing, and the empty answer says why.
+  const plain = await connect([...dictionaryRoutes, { table: 'incident', rows: [] }])
+  await plain.answer('sn_query', { table: 'incident', query: `assigned_to!=${ID}^ORassigned_toISEMPTY`, fields: ['number'] })
+  assert.match((await plain.answer('sn_query', { table: 'incident', query: 'assigned_to=Abel Tuter', fields: ['number'] })).warnings.join(' '), /does not look like one/)
+  assert.equal(plain.sentTo('sys_user').length, 0)
+
+  // Where the table behind the reference cannot be asked, the answer says what could not be checked.
+  const hidden = await connect([{ table: 'sys_user', status: 403 }, ...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  const unsure = await hidden.answer('sn_query', { table: 'incident', query: 'assigned_to!=Abel Tuter', fields: ['number'] })
+  assert.match(unsure.warnings.join(' '), /"Abel Tuter" does not look like one, and it could not be checked whether a record has it/)
+})
+
+test('a word on a choice that stores numbers is refused with the list of its values', async () => {
+  const priorities = { table: 'sys_choice', query: 'element=priority', rows: [
+    { name: 'task', value: '1', label: '1 - Critical', language: 'en' },
+    { name: 'task', value: '2', label: '2 - High', language: 'en' },
+    { name: 'task', value: '2', label: '2 - Hoch', language: 'de' },
+    { name: 'task', value: '3', label: '3 - Moderate', language: 'en' },
+  ] }
+  const typed = { table: 'sys_dictionary', query: 'nameINincident,task', rows: [column('task', 'number'), column('task', 'priority', 'integer', '', { choice: '1' })] }
+  const { call, answer } = await connect([typed, priorities, ...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  const { data } = await call('sn_query', { table: 'incident', query: 'priority=High', fields: ['number'] })
+  assert.equal(data.error, 'validation')
+  assert.match(data.message, /"priority" stores the value of a choice, a number, and "High" is neither one of its values nor one of its labels\. The label that contains it belongs to the value 2\. Its values: 1 \(1 - Critical\), 2 \(2 - High\), 3 \(3 - Moderate\)\./)
+  // A word that fits several labels, or none: the list alone.
+  assert.doesNotMatch((await call('sn_query', { table: 'incident', query: 'priority=Urgent', fields: ['number'] })).data.message, /belongs to/)
+  assert.equal((await answer('sn_query', { table: 'incident', query: 'priorityIN1, 2', fields: ['number'] })).returned, 1)
 })
 
 test('an empty result on a database view is explained from the choices of the table behind it', async () => {
@@ -751,6 +1094,14 @@ test('a system property is withheld when nothing says whether it holds a secret'
   const nothing = await bare.answer('sn_query', { table: 'sys_properties', query: 'name=glide.smtp.pw', fields: ['value'] })
   assert.deepEqual(nothing.records, [{ value: '[withheld: this field holds a secret]' }])
   assert.match(nothing.warnings.join(' '), /neither type nor name came back/)
+  // Both come back, and both are empty: an empty name is no name.
+  const blank = await connect([...dictionary, { table: 'sys_properties', rows: [{ name: '', type: '', value: 'ciphertext' }] }])
+  assert.deepEqual((await blank.answer('sn_query', { table: 'sys_properties', fields: ['name', 'value'] })).records, [{ name: '', value: '[withheld: this field holds a secret]' }])
+
+  // A withheld value is not looked into: a note about what it contains would say something about it.
+  const nested = await connect([...dictionary, { table: 'sys_properties', rows: [{ name: 'glide.smtp.pw', type: 'password2', value: '<x><token>abc1234567890</token></x>' }] }])
+  const quiet = await nested.answer('sn_query', { table: 'sys_properties', fields: ['name', 'value', 'type'] })
+  assert.doesNotMatch(quiet.warnings.join(' '), /inside a text/)
 })
 
 test('a field that holds a secret can be asked whether it is filled, and nothing else', async () => {
@@ -788,14 +1139,16 @@ test('the values of system properties that hold secrets cannot be found out by t
   // A condition on the value, or a sort by it: the properties of type password are taken out, in every part of the query.
   const found = await answer('sn_query', { table: 'sys_properties', query: 'valueLIKEzurich^NQname=glide.war^ORDERBYvalue', fields: ['name', 'value'] })
   const sent = `valueLIKEzurich^${LEFT_OUT}^NQname=glide.war^ORDERBYvalue^${LEFT_OUT}`
-  assert.equal(sentTo('sys_properties')[0].query, sent)
+  // First the properties without a type are counted, so that the answer can say how many the search does not cover.
+  assert.deepEqual(sentTo('sys_properties').map((entry) => entry.query), ['typeISEMPTY', sent])
   assert.equal(found.query, sent)
-  assert.match(found.warnings.join(' '), /Properties that hold a secret \(type password or password2\) and properties without a type were left out/)
+  assert.match(found.warnings.join(' '), /Properties that hold a secret \(type password or password2\) and properties without a type were left out.*The 1 property without a type can be read with the query typeISEMPTY/)
 
-  // Nothing compares the value: the query goes out as written. Asking whether it is filled compares nothing.
+  // Nothing compares the value: the query goes out as written. Asking whether it is filled compares nothing, however it is written.
   await answer('sn_query', { table: 'sys_properties', query: 'name=glide.war', fields: ['name', 'value'] })
   await answer('sn_query', { table: 'sys_properties', query: 'valueISEMPTY', fields: ['name'] })
-  assert.deepEqual(sentTo('sys_properties').slice(1).map((entry) => entry.query), ['name=glide.war', 'valueISEMPTY'])
+  await answer('sn_query', { table: 'sys_properties', query: 'value!=NULL', fields: ['name'] })
+  assert.deepEqual(sentTo('sys_properties').slice(2).map((entry) => entry.query), ['name=glide.war', 'valueISEMPTY', 'value!=NULL'])
 
   // Listed as groups, every value would be in the answer.
   const grouped = await call('sn_query', { table: 'sys_properties', groupBy: 'value' })
@@ -836,6 +1189,43 @@ test('secrets are taken out of a text that carries a record', () => {
   assert.equal(scrubSecrets('<pwd_reset action="INSERT_OR_UPDATE"><display_password>true</display_password></pwd_reset>').withheld, 0)
   assert.deepEqual(scrubSecrets('A short text.'), { text: 'A short text.', withheld: 0 })
   assert.deepEqual(scrubSecrets('<p>The password must be changed every 90 days.</p>'), { text: '<p>The password must be changed every 90 days.</p>', withheld: 0 })
+
+  // An attribute on the type, an empty type with a telling name, an attribute on the value: all the same property.
+  const record = (inner: string) => `<record_update><sys_properties action="INSERT_OR_UPDATE">${inner}</sys_properties><sys_choice action="INSERT_OR_UPDATE"><value>6</value></sys_choice></record_update>`
+  for (const inner of [
+    '<name>x.smtp</name><type display_value="Password2">password2</type><value>ENC_SECRET</value>',
+    '<name>glide.smtp.password</name><type/><value>MY_PASS</value>',
+    '<name>a</name><type>password</type><value display_value="********">cipher</value>',
+    // Neither a type nor a name: nothing says that the value is harmless.
+    '<value>cipher</value>',
+  ]) {
+    const scrubbed = scrubSecrets(record(inner))
+    assert.match(scrubbed.text, /<sys_properties action="INSERT_OR_UPDATE">.*<value>\[withheld\]<\/value><\/sys_properties>/, inner)
+    // The value of another record in the same payload is not touched.
+    assert.match(scrubbed.text, /<sys_choice action="INSERT_OR_UPDATE"><value>6<\/value>/, inner)
+  }
+  assert.equal(scrubSecrets(record('<name>glide.ui.width</name><type/><value>120</value>')).withheld, 0)
+
+  // A short text, blanks around a CDATA section, and an attribute that repeats the content.
+  assert.equal(scrubSecrets('<pwd>s3cr3t</pwd>').text, '<pwd>[withheld]</pwd>')
+  assert.equal(scrubSecrets('<r><api_key> <![CDATA[sk-999]]> </api_key></r>').text, '<r><api_key>[withheld]</api_key></r>')
+  assert.equal(scrubSecrets('<u_api_key display_value="raw">raw</u_api_key>').text, '<u_api_key>[withheld]</u_api_key>')
+  // JSON keys in other spellings, a number as the value, and JSON inside a JSON string.
+  assert.equal(
+    scrubSecrets('{"x-api-key":"sk-live","accessKey":"AKIA","otp":482913,"body":"{\\"token\\":\\"eyJ\\"}","name":"plain"}').text,
+    '{"x-api-key":"[withheld]","accessKey":"[withheld]","otp":"[withheld]","body":"{\\"token\\":\\"[withheld]\\"}","name":"plain"}',
+  )
+  assert.equal(scrubSecrets('{"display_password":"false"}').withheld, 0)
+  // Code that only names a secret is left as it is.
+  assert.equal(scrubSecrets('var x = gs.getProperty("glide.smtp.password");').withheld, 0)
+})
+
+test('the tables of the records a payload carries are all found', () => {
+  assert.deepEqual(payloadTables('<record_update table="sys_user" data-action="x"><sys_user action="INSERT_OR_UPDATE"><name>A</name></sys_user></record_update>'), ['sys_user'])
+  assert.deepEqual(payloadTables("<record_update><sys_metadata_link action=\"INSERT_OR_UPDATE\"/><sys_user action='DELETE'>x</sys_user></record_update>"), ['sys_metadata_link', 'sys_user'])
+  // The attribute "table" of a dictionary entry names the table the field belongs to, not the table of the record.
+  assert.deepEqual(payloadTables('<record_update><sys_dictionary action="INSERT_OR_UPDATE" element="x" table="incident"><active>true</active></sys_dictionary></record_update>'), ['sys_dictionary'])
+  assert.deepEqual(payloadTables('no record in here'), [])
 })
 
 test('the payload of a captured change is passed on without its secrets, and cannot be searched', async () => {
@@ -2143,7 +2533,7 @@ test('sn_instance names the release, the account and what cannot be read', async
     { table: 'sys_update_xml', rows: [{ sys_id: '1' }], total: 321 },
     { table: 'sys_store_app', status: 403 },
     { table: 'sys_script', rows: [], total: 12 },
-    { table: 'sys_user_has_role', rows: [{ 'role.name': 'admin' }, { 'role.name': 'itil' }] },
+    { table: 'sys_user_has_role', rows: [{ 'role.name': 'admin', 'user.user_name': 'reader' }, { 'role.name': 'itil', 'user.user_name': 'reader' }] },
     upgradeRoutes[0],
     ...sourceTables.filter((table) => table !== 'sys_user_has_role').map((table) => ({ table, rows: [{ sys_id: '1' }] })),
   ])
@@ -2167,16 +2557,41 @@ test('sn_instance names the release, the account and what cannot be read', async
   assert.doesNotMatch(warnings, /domains|returns_no_rows/)
 })
 
+test('applications are not read through their parent table where their own table is closed on this machine', async () => {
+  const world: Route[] = [
+    closedTables(tableRow('sys_store_app', 'Store application', 'sys_scope', 'sys_package')),
+    ...dictionaryRoutes,
+    { table: 'v_plugin', rows: [{ id: 'com.snc.incident', name: 'Incident', active: 'active', version: '1.0' }] },
+    { table: 'sys_scope', rows: [{ name: 'Example application', scope: 'sn_example', version: '1.0', active: 'true' }] },
+  ]
+  const { answer, sentTo } = await connect(world, { tables: { allow: [], deny: ['sys_store_app'] } })
+  const data = await answer('sn_plugins')
+  assert.equal(data.plugins.returned, 1)
+  assert.equal(data.storeApps.table, null)
+  assert.match(data.warnings.join(' '), /Installed applications could not be read: sys_store_app is closed on this machine.*not "none installed"/)
+  assert.equal(sentTo('sys_scope').length, 0)
+
+  // Where the instance does not hand the table out and nothing is closed here, the parent table is the way to them.
+  const viaParent = await connect([{ table: 'sys_store_app', status: 403 }, ...world.slice(1)])
+  assert.equal((await viaParent.answer('sn_plugins')).storeApps.table, 'sys_scope')
+})
+
 test('sn_instance: an account that is no administrator and has no read-only role is named as such', async () => {
   const routes = sourceTables.filter((table) => table !== 'sys_user_has_role').map((table) => ({ table, rows: [{ sys_id: '1' }] }))
-  const { answer } = await connect([{ table: 'sys_user_has_role', rows: [{ 'role.name': 'itil' }] }, ...routes])
+  const { answer } = await connect([{ table: 'sys_user_has_role', rows: [{ 'role.name': 'itil', 'user.user_name': 'reader' }] }, ...routes])
   const data = await answer('sn_instance')
   assert.deepEqual(data.account, { roles: 1, admin: false, readOnlyRole: false })
-  assert.match(data.warnings.join(' '), /does not have the role snc_read_only/)
+  // The account says it. A warning is for what limits the answer, and this does not: only an administrator without
+  // the role is named there, because the instance would take a write from that account.
+  assert.doesNotMatch(data.warnings.join(' '), /snc_read_only/)
+
+  // The look-up checks itself: rows of another user mean that the condition on the user was not applied.
+  const other = await connect([{ table: 'sys_user_has_role', rows: [{ 'role.name': 'admin', 'user.user_name': 'somebody.else' }] }, ...routes])
+  assert.equal((await other.answer('sn_instance')).account, null)
 })
 
 test('sn_instance does not look the account up through the user table when that table is closed', async () => {
-  const routes = sourceTables.map((table) => ({ table, rows: [{ sys_id: '1', 'role.name': 'admin' }] }))
+  const routes = sourceTables.map((table) => ({ table, rows: [{ sys_id: '1', 'role.name': 'admin', 'user.user_name': 'reader' }] }))
   const { answer, sentTo } = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
   assert.equal((await answer('sn_instance')).account, null)
   assert.equal(sentTo('sys_user_has_role').some((entry) => entry.query.includes('user.user_name')), false)
@@ -2221,18 +2636,18 @@ test('sn_instance says so when the release property is hidden', async () => {
   assert.equal((await none.answer('sn_instance')).account, null)
 
   // One name is visible, one is hidden: the hidden one could be "admin", so nothing is claimed.
-  const some = await connect([{ table: 'sys_user_has_role', rows: [{ 'role.name': 'snc_read_only' }, { 'role.name': '' }] }, ...sourceTables.filter((table) => table !== 'sys_user_has_role').map((table) => ({ table, rows: [{ sys_id: '1' }] }))])
+  const some = await connect([{ table: 'sys_user_has_role', rows: [{ 'role.name': 'snc_read_only', 'user.user_name': 'reader' }, { 'role.name': '', 'user.user_name': 'reader' }] }, ...sourceTables.filter((table) => table !== 'sys_user_has_role').map((table) => ({ table, rows: [{ sys_id: '1' }] }))])
   assert.equal((await some.answer('sn_instance')).account, null)
 })
 
 test('sn_instance with a token does not guess the account, and stays quiet about a read-only one', async () => {
   const routes = sourceTables.filter((table) => table !== 'sys_user_has_role').map((table) => ({ table, rows: [{ sys_id: '1' }] }))
-  const token = await connect([{ table: 'sys_user_has_role', rows: [{ 'role.name': 'admin' }] }, ...routes], { auth: { kind: 'bearer', token: 'abc' } })
+  const token = await connect([{ table: 'sys_user_has_role', rows: [{ 'role.name': 'admin', 'user.user_name': 'reader' }] }, ...routes], { auth: { kind: 'bearer', token: 'abc' } })
   assert.equal((await token.answer('sn_instance')).account, null)
   assert.equal(token.sentTo('sys_user_has_role').filter((entry) => entry.query.includes('user.user_name')).length, 0)
 
   const readOnly = await connect([
-    { table: 'sys_user_has_role', rows: [{ 'role.name': 'snc_read_only' }] },
+    { table: 'sys_user_has_role', rows: [{ 'role.name': 'snc_read_only', 'user.user_name': 'reader' }] },
     { table: 'sys_store_app', status: 403 },
     { table: 'sys_scope', query: 'sys_class_name=sys_store_app^active=true', rows: [{ sys_id: '1' }], total: 14 },
     ...routes,
@@ -2286,7 +2701,7 @@ test('every request any tool sends is a GET to one of two read endpoints', async
     { table: 'sys_store_app', rows: [], total: 5 },
     { table: 'sys_scope', rows: [{ name: 'App', scope: 'sn_app', active: 'true' }] },
     { table: 'sys_script', rows: [rule('a1', 'incident')] },
-    { table: 'sys_user_has_role', rows: [{ 'role.name': 'snc_read_only' }] },
+    { table: 'sys_user_has_role', rows: [{ 'role.name': 'snc_read_only', 'user.user_name': 'reader' }] },
   ])
   for (const [name, args] of [
     ['sn_instance', {}],

@@ -39,7 +39,20 @@ export const listShape = {
   nextOffset: z.number().optional().describe('Pass as offset to read on.'),
 }
 
+export const ROWS_LEFT_OUT =
+  'Tables are closed on this machine. Rows that belong to a closed child table of this one were left out by a condition on sys_class_name, and the total does not count them.'
+
 export function source(sn: ServiceNowClient, warnings: string[] = []) {
+  // What the gate of closed tables did to the requests of this call, whichever tool sent them.
+  const closed = currentCall()?.closed
+  const add = (text: string) => {
+    if (!warnings.includes(text)) warnings.push(text)
+  }
+  if (closed?.rowsLeftOut) add(ROWS_LEFT_OUT)
+  if (closed?.names.size) add(`The names behind references into a table that is closed on this machine were left out: ${[...closed.names].sort().join(', ')}.`)
+  if (closed?.untold.size) {
+    add(`Tables are closed on this machine, and it could not be told which table these fields point to, so their display values were left out: ${[...closed.untold].sort().join(', ')}.`)
+  }
   return { instance: sn.host, fetchedAt: new Date().toISOString(), requests: currentCall()?.requests ?? 0, warnings }
 }
 

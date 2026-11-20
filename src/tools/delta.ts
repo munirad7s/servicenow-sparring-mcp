@@ -120,7 +120,9 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
         }
 
         // The readable name of a record in a table that is closed on this machine is not passed on.
-        const rows = page.records.map(tidy).map((row) => (isClosedRecord(sn, rawOf(row.name)) ? { ...row, target_name: CLOSED_NAME } : row))
+        const rows = await Promise.all(
+          page.records.map(tidy).map(async (row) => ((await isClosedRecord(ctx, rawOf(row.name))) ? { ...row, target_name: CLOSED_NAME } : row)),
+        )
         const updates = clip(rows, warnings)
         return ok({ ...listing(sn, page, warnings, updates.length), byType, capturedBySystemAccounts: bySystem, updates, notCaptured: DELTA_GAPS })
       } catch (error) {

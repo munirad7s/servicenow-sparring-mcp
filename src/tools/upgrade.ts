@@ -238,15 +238,17 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
           later.length ? counts('upgrade_detail.upgrade_history', shared.join('^')) : Promise.resolve([]),
         ])
 
-        const rows = page.records.map(tidy).map((row) => ({
-          file: rawOf(row['upgrade_detail.file_name']),
-          target: isClosedRecord(sn, rawOf(row['upgrade_detail.file_name'])) ? CLOSED_NAME : rawOf(row['upgrade_detail.target_name']),
-          type: labelOf(row['upgrade_detail.type']),
-          disposition: labelOf(row['upgrade_detail.disposition']),
-          review: labelOf(row.state),
-          upgrade: rawOf(row['upgrade_detail.upgrade_history.to_version']),
-          createdOn: rawOf(row.sys_created_on),
-        }))
+        const rows = await Promise.all(
+          page.records.map(tidy).map(async (row) => ({
+            file: rawOf(row['upgrade_detail.file_name']),
+            target: (await isClosedRecord(ctx, rawOf(row['upgrade_detail.file_name']))) ? CLOSED_NAME : rawOf(row['upgrade_detail.target_name']),
+            type: labelOf(row['upgrade_detail.type']),
+            disposition: labelOf(row['upgrade_detail.disposition']),
+            review: labelOf(row.state),
+            upgrade: rawOf(row['upgrade_detail.upgrade_history.to_version']),
+            createdOn: rawOf(row.sys_created_on),
+          })),
+        )
         if (rows.length && rows.every((row) => !row.file)) {
           warnings.push('The entries came back without file names: the upgrade details behind them are not readable for this account, so the filter on disposition may not have been applied either.')
         }

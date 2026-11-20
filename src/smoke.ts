@@ -74,9 +74,15 @@ const count = async (query: string) => (await call('sn_query', { table: 'inciden
 const [everything, unassigned, notNobody] = [await count(''), await count('assigned_toISEMPTY'), await count(`assigned_to!=${'0'.repeat(32)}`)]
 check(
   '"is not" leaves out rows with an empty field, and the answer says so',
-  notNobody.total === everything.total - unassigned.total && notNobody.warnings.some((warning: string) => warning.includes('leave out rows where the field is empty')),
+  notNobody.total === everything.total - unassigned.total && notNobody.warnings.some((warning: string) => warning.includes('out rows where the field is empty')),
   `${everything.total} rows, ${unassigned.total} without assignee, ${notNobody.total} returned by "is not"`,
 )
+const [isNull, notNull] = [await count('assigned_to=NULL'), await count('assigned_to!=NULL')]
+check('"=NULL" and "!=NULL" ask whether the field is empty', isNull.total === unassigned.total && notNull.total === everything.total - unassigned.total && notNull.warnings.length === notNobody.warnings.length - 1, `${isNull.total} and ${notNull.total}`)
+// A name where a reference stores a sys_id: "is not" would leave nothing out, so it is refused.
+check('a name in place of a sys_id behind "is not" is refused', refused(await call('sn_query', { table: 'incident', query: 'assigned_to!=Nobody Of This Name', fields: ['sys_id'], limit: 1 })))
+// A text search reads fields it does not name, with or without a list of fields to return.
+check('a text search on a table with a secret field is refused', refused(await call('sn_query', { table: 'sys_user', query: '123TEXTQUERY321=admin' })))
 
 const label = await call('sn_query', { table: 'incident', query: 'state=New' })
 check('a choice label in place of the stored value is refused', refused(label) && /label of "1"/.test(label.data.message))
@@ -88,7 +94,7 @@ check('sn_query pages and reports the total', !paged.isError && paged.data.trunc
 
 const perState = await call('sn_query', { table: 'incident', groupBy: 'state' })
 const counted = (perState.data.groups ?? []).reduce((sum: number, group: Data) => sum + group.count, 0)
-check('sn_query counts rows per value of a field', !perState.isError && perState.data.records.length === 0 && counted === perState.data.total, `${perState.data.groups?.length} groups, ${perState.data.total} rows`)
+check('sn_query counts rows per value of a field', !perState.isError && perState.data.records.length === 0 && counted === perState.data.total && perState.data.totalGroups === perState.data.groups?.length, `${perState.data.totalGroups} groups, ${perState.data.total} rows`)
 
 const secrets = await call('sn_query', { table: 'sys_properties', query: 'typeINpassword,password2^valueISNOTEMPTY', fields: ['name', 'value'], limit: 5 })
 check(

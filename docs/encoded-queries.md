@@ -44,6 +44,8 @@ A value of the wrong kind belongs here too. The instance does not reject it:
 | `LIKE`, `NOT LIKE`, `STARTSWITH`, `ENDSWITH` or `CONTAINS` on a number field | `priorityLIKE1` | matches nothing: 0 rows where `priority=1` finds 27 | refuses |
 | The same operators on a true/false field | `activeLIKEtrue` | returns the rows where the field is false | refuses |
 | A duration written as a number or a time | `business_duration>3600`, `>01:00:00` | `>3600` matches every filled row, `>01:00:00` none: a duration is stored as a date counted from 1970-01-01 | refuses, and names the form: `1970-01-01 01:00:00` for one hour |
+| `BETWEEN` or `ON` on a true/false field | `activeBETWEENfoo@bar`, `activeONa@b@c` | returns the rows where the field is false: 29 of 82 | refuses: these are for dates |
+| A name in place of a sys_id behind `!=` or `NOT IN` | `assignment_group!=Service Desk` | leaves no row out: all 40 incidents with a group came back, the 12 of that group among them. By name, `assignment_group.name!=Service Desk`, it is 28 | looks the value up in the referenced table and refuses where no record has it as its sys_id. A sys_id is not always 32 hex digits: `global` and `Default view` are sys_ids |
 
 Read as dates, when measured: `2026-01-01 00:00:00`, `2026-01-01`, `2026-1-1`, `2026-01-01 00:00`,
 `2026-01-01T00:00:00` with and without a `Z`, and also `20260101` and `2026/01/01`, which the server refuses all
@@ -66,6 +68,12 @@ the same to keep one form.
 | `MORETHAN` or `LESSTHAN` with the unit `minute`, `second` or `dayofweek` | `closed_atMORETHANopened_at@minute@after@240` | refuses: the units that work are `year`, `quarter`, `month`, `week`, `day`, `hour` |
 | `INSTANCEOF` or `IN_HIERARCHY` without a value | `sys_class_nameINSTANCEOF` | refuses |
 | `IN` without a value | `close_notesIN` | refuses: it matched none of the 53 rows with an empty field |
+| `IN` or `NOT IN` with nothing but commas | `reassignment_countIN,` | refuses: it matched nothing. An empty entry among others is skipped: `priorityIN1,` matched what `priorityIN1` did |
+| `NULL` behind an operator other than `=` and `!=` | `sys_created_on>NULL`, `<NULL`, `BETWEENNULL@NULL`, `assigned_toINNULL` | refuses: each matched none of 82 rows |
+| `ON` on a number field | `reassignment_countONfoo@bar@baz` | refuses: it matched nothing |
+| A text search without a word | `123TEXTQUERY321=` | refuses: it matched nothing |
+| A condition joined to a text search with `^OR` | `123TEXTQUERY321=printer^ORpriority=1` | refuses: it matched none of the 27 rows with priority 1 |
+| A word on a choice that stores numbers | `priority=High` | refuses, and lists the values with their labels |
 | `>`, `>=`, `<` or `<=` without a value | `priority>` | refuses: on a number or a date it matched nothing, on a text field the empty rows |
 
 ## Applied, but not as written
@@ -77,7 +85,8 @@ the same to keep one form.
 | `GT_FIELD` with `@day` behind the field | answers with a different count than without | refuses: these operators take a plain field |
 | `^OR` in front of a text search | applies something, but not an "or" | refuses |
 | A condition on a journal field such as `work_notes` or `comments` | does not look at that field: `work_notesISEMPTY` and `work_notesISNOTEMPTY` both returned the same 36 of 82 incidents, and `work_notesLIKEa` returned 34 incidents although only 24 work notes exist | refuses, and names the exact source: `sys_journal_field` with `element=work_notes^valueLIKE<text>` |
-| `!=`, `NOT IN`, `NOT LIKE` | leaves out the rows where the field is empty: of 82 incidents, 33 without an assignee, `assigned_to!=<sys_id nobody has>` returns 49 | sends it, with a warning that names `^OR<field>ISEMPTY` |
+| `!=`, `NOT IN`, `NOT LIKE`, `NSAMEAS` | leaves out the rows where the field is empty: of 82 incidents, 33 without an assignee, `assigned_to!=<sys_id nobody has>` returns 49. `assigned_toNSAMEASopened_by` returned 47: the 2 rows where both are the same person are left out, and the 33 without an assignee as well | sends it, with a warning that names `^OR<field>ISEMPTY`, unless the query asks for the empty rows itself |
+| A part of a query that holds no condition, joined by `^NQ` | is no part: `EQ^NQpriority=1`, `ORDERBYnumber^NQpriority=1` and `priority=1^NQ` match what `priority=1` does | where the server has to add a condition of its own, it adds it only to the parts that have one: added to an empty part it made that part match everything (29 rows where 10 was the answer) |
 
 ## Runs script on the instance
 
@@ -122,7 +131,18 @@ Also measured:
 - A string is compared without regard to case: `category=Inquiry` finds `inquiry`.
 - `ref_<child table>.<field>` on a parent table reaches a field of the child table.
 - `=` without a value is applied as "is empty", and `!=` without a value as "is not empty", on text, reference,
-  number, date and boolean fields alike.
+  number, date and boolean fields alike. `=NULL` and `!=NULL` mean the same: 717 of 771 users had no login time
+  with `ISEMPTY`, with `=NULL` and with `=`, and 54 with each of the three ways to write "is not empty".
+- A blank around a value is ignored: `priority= 1`, `active= true` and `sys_created_on> 2026-03-03` matched what
+  they match without it, and so did `categoryINinquiry, software`.
+- A dot-walked field of an empty reference is empty: `assignment_group.nameISEMPTY` matched the 42 incidents
+  without a group, and `assignment_group.name!=X^ORassignment_group.nameISEMPTY` the 28 of other groups and those 42.
+- A text search finds a record by the name behind one of its references. A caller whose name stood in no text
+  field of an incident was found on all 8 of his incidents. Where a table is closed on the machine that runs the
+  server, a text search on a table that points into it is therefore refused.
+- A list field (`glide_list`) with one entry is matched by `=`, `IN`, `LIKE` and `CONTAINS` alike.
+- `^NQ` works in the Aggregate API as in the Table API: the groups of a query with two parts added up to the
+  3,619 rows the Table API counted, not to the sum of the parts.
 - A condition written behind an `ORDERBY` is applied.
 - A journal field comes back empty unless display values are asked for: the stored value of `work_notes` had
   length 0 where its display value had 1,020 characters. The entries are rows of `sys_journal_field`. The server

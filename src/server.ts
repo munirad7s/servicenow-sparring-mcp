@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { ServiceNowClient } from './client.js'
+import { closedTables } from './closed.js'
 import { Dictionary } from './dictionary.js'
 import { INSTRUCTIONS, LIMITATIONS_DOCUMENT } from './limitations.js'
 import { registerDeltaTool } from './tools/delta.js'
@@ -9,14 +10,26 @@ import { registerInstanceTools } from './tools/instance.js'
 import { registerOriginTool } from './tools/origin.js'
 import { registerQueryTool } from './tools/query.js'
 import { registerSchemaTool } from './tools/schema.js'
+import type { Context } from './tools/shared.js'
 import { registerUpgradeTool } from './tools/upgrade.js'
 import { NAME, VERSION } from './version.js'
 
 export { NAME, VERSION } from './version.js'
 
+/**
+ * What every tool works with: the client, the dictionary of the instance, and the rules for closed tables. The
+ * client is given those rules as its gate, so that every request passes through them.
+ */
+export function createContext(sn: ServiceNowClient): Context {
+  const dict = new Dictionary(sn)
+  const closed = closedTables(sn, dict)
+  sn.gate = closed
+  return { sn, dict, closed }
+}
+
 export function buildServer(sn: ServiceNowClient): McpServer {
   const server = new McpServer({ name: NAME, version: VERSION }, { instructions: INSTRUCTIONS })
-  const ctx = { sn, dict: new Dictionary(sn) }
+  const ctx = createContext(sn)
 
   registerInstanceTools(server, ctx)
   registerQueryTool(server, ctx)

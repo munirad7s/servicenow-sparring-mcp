@@ -20,7 +20,7 @@ test('the doctor command lists what the account can read, and what it cannot', a
     { table: 'sys_script', rows: [null], total: 12 },
     { table: 'sys_update_xml', api: 'stats', rows: [{ stats: { count: '3' }, groupby_fields: [{ value: 'Business Rule' }] }] },
     { table: 'upgrade_history_task', rows: [{ sys_id: '1', 'upgrade_detail.file_name': 'sys_script_1' }] },
-    { table: 'sys_user_has_role', query: 'user.user_name=', rows: [{ 'role.name': 'itil' }] },
+    { table: 'sys_user_has_role', query: 'user.user_name=', rows: [{ 'role.name': 'itil', 'user.user_name': 'reader' }] },
     ...readable(['sys_store_app', 'sys_script']),
   ])
   assert.equal(exitCode, 0)

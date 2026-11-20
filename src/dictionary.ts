@@ -1,4 +1,4 @@
-import type { ServiceNowClient } from './client.js'
+import type { Page, QueryOptions, Row, ServiceNowClient } from './client.js'
 import { ServiceNowError } from './errors.js'
 import { assertTableName, isTableName } from './query.js'
 
@@ -57,6 +57,8 @@ export interface FieldCheck {
   owners: Map<string, { table: string; field: string }>
   /** Tables the paths read from besides the queried one: targets of dot-walks, child tables, tables a view joins. */
   reached: Set<string>
+  /** Each reference a path walks through, as written up to that point, and the table it lands on. */
+  walks: Map<string, string>
 }
 
 export interface Choice {
@@ -103,11 +105,27 @@ export class Dictionary {
   private readonly settings = new Map<string, Entry<boolean | null>>()
   private readonly closedSets = new Map<string, Entry<Map<string, string[]>>>()
 
+  /** The client, for the dictionary's own lookups. The gate of closed tables is built from them, so they do not pass through it. */
+  private readonly sn: {
+    query<T = Row>(opts: QueryOptions): Promise<Page<T>>
+    all<T = Row>(opts: Omit<QueryOptions, 'limit' | 'offset'>, maxRows?: number, pageSize?: number): Promise<{ records: T[]; total: number | null; complete: boolean }>
+    readonly denied: { names: string[]; prefixes: string[] }
+  }
+  private readonly childSets = new Map<string, Entry<string[] | null>>()
+
   constructor(
-    private readonly sn: ServiceNowClient,
+    client: ServiceNowClient,
     private readonly ttlMs = 10 * 60_000,
     private readonly recheckMs = 30_000,
-  ) {}
+  ) {
+    this.sn = {
+      query: <T = Row>(opts: QueryOptions) => client.query<T>({ ...opts, trusted: true }),
+      all: <T = Row>(opts: Omit<QueryOptions, 'limit' | 'offset'>, maxRows?: number, pageSize?: number) => client.all<T>({ ...opts, trusted: true }, maxRows, pageSize),
+      get denied() {
+        return client.denied
+      },
+    }
+  }
 
   table(name: string): Promise<TableInfo | null> {
     assertTableName(name)
@@ -199,7 +217,7 @@ export class Dictionary {
    * field. "ref_<child>.<field>" reaches a field of a child table.
    */
   async checkFields(table: string, paths: string[]): Promise<FieldCheck> {
-    const check: FieldCheck = { status: 'checked', unknown: [], resolved: new Map(), owners: new Map(), reached: new Set() }
+    const check: FieldCheck = { status: 'checked', unknown: [], resolved: new Map(), owners: new Map(), reached: new Set(), walks: new Map() }
     const unavailable = (reason: string) => {
       check.status = 'unavailable'
       check.reason ??= reason
@@ -221,8 +239,13 @@ export class Dictionary {
 
           if (!last && segment.startsWith('ref_') && isTableName(segment.slice(4))) {
             const child = await this.table(segment.slice(4))
-            // Measured: the instance also takes "ref_<the table itself>.". That is no way around a check made on the plain name.
-            if (child && child.name !== current && child.chain.includes(current)) {
+            // Measured: the instance also takes "ref_<the table itself>.". That is no way around a check made on the
+            // plain name, so it is refused here, whatever else can or cannot be read of the dictionary.
+            if (child && child.name === current) {
+              check.unknown.push({ field: path, table: current, segment, reason: `"${segment}." names the table itself: write the field without it`, suggestions: [] })
+              break
+            }
+            if (child && child.chain.includes(current)) {
               current = child.name
               check.reached.add(current)
               continue
@@ -254,6 +277,7 @@ export class Dictionary {
           } else {
             current = column.reference
             check.reached.add(current)
+            check.walks.set(segments.slice(0, index + 1).join('.'), current)
           }
         }
       } catch (error) {
@@ -339,6 +363,25 @@ export class Dictionary {
   }
 
   /**
+   * The names of every table below a table, eight levels down. Used where a list names the only tables that may be
+   * read: a table below an open one can be closed. null if the list cannot be trusted, for the reasons given at
+   * closedTables: the caller then has to assume that a closed table is among them.
+   */
+  childTables(table: string): Promise<string[] | null> {
+    assertTableName(table)
+    return this.cached(this.childSets, table, async () => {
+      const query = `${PARENT_FIELDS.map((path) => `${path}=${table}`).join('^OR')}^ORname=${table}`
+      const read = await this.sn.all<Record<string, string>>({ table: 'sys_db_object', query, fields: ['name', ...PARENT_FIELDS] }, 3_000).catch(() => null)
+      if (!read || !read.complete || (read.total !== null && read.records.length < read.total)) return null
+      // The table itself is asked for as proof that the query was applied as written.
+      if (!read.records.some((row) => row.name === table)) return null
+      const below = read.records.filter((row) => row.name !== table)
+      if (below.some((row) => !PARENT_FIELDS.some((path) => row[path] === table))) return null
+      return below.map((row) => row.name).filter((name): name is string => typeof name === 'string' && name !== '')
+    })
+  }
+
+  /**
    * The active business rules that run on every read of a table ("before query"). Such a rule can add conditions
    * that depend on who asks, so the rows and the total an account gets are what the rule lets through. Rules on a
    * parent table run for the table too. Rules on the table "global" run for every table: they are counted once,
@@ -351,7 +394,9 @@ export class Dictionary {
       const query = `collectionIN${info.chain.join(',')}^action_query=true^active=true`
       const page = await this.sn.query<Record<string, string>>({ table: 'sys_script', query, fields: ['sys_id', 'action_query'], limit: 1 })
       // The answer checks its own query: a row without the field means the instance does not know it and ignored the condition.
-      if (page.total === null || (page.records[0] && !('action_query' in page.records[0]))) return null
+      if (page.total === null || (page.records[0] && !('action_query' in page.records[0]))) {
+        throw new ServiceNowError('The instance did not answer the question about query business rules as it was asked.', 'invalid_response', 'sys_script')
+      }
       return { count: page.total, query }
     })
   }
@@ -381,7 +426,9 @@ export class Dictionary {
       const query = `tableIN${info.chain.join(',')}^active=true`
       const page = await this.sn.query<Record<string, string>>({ table: 'sys_archive', query, fields: ['sys_id', 'table', 'active'], limit: 1 })
       // The answer checks its own query, as everywhere: a row without the fields means the conditions were ignored.
-      if (page.total === null || (page.records[0] && !('table' in page.records[0] && 'active' in page.records[0]))) return null
+      if (page.total === null || (page.records[0] && !('table' in page.records[0] && 'active' in page.records[0]))) {
+        throw new ServiceNowError('The instance did not answer the question about archive rules as it was asked.', 'invalid_response', 'sys_archive')
+      }
       return { count: page.total, query }
     })
   }

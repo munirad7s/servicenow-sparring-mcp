@@ -227,6 +227,7 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
     return path
   }
 
+  let afterTextSearch = false
   for (const raw of splitTerms(query)) {
     if (raw === '' || raw === 'EQ') continue
 
@@ -245,9 +246,13 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
     if (term.startsWith('NQ') || joinedWithOr) term = term.slice(2)
     if (term.startsWith('GOTO')) term = term.slice(4)
 
+    if (afterTextSearch && joinedWithOr) throw unsupported(raw, 'nothing can be joined to a text search with ^OR: measured, the query then matches nothing')
+    afterTextSearch = false
     if (term.startsWith('123TEXTQUERY321=')) {
       if (joinedWithOr) throw unsupported(raw, 'a text search cannot be joined with ^OR')
+      if (term === '123TEXTQUERY321=') throw unsupported(raw, 'a text search needs a word to look for: without one it matches nothing')
       parsed.textSearch = true
+      afterTextSearch = true
       continue
     }
 
@@ -280,26 +285,34 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
 
 /**
  * Adds a condition to every part of a query that is joined by ^NQ, so that it
- * holds for all of them. Measured: a condition behind an ORDERBY is applied.
+ * holds for all of them.
+ *
+ * Measured on 82 incidents, 27 of them with priority 1: a part that holds no
+ * condition is not a part. "EQ^NQpriority=1", "ORDERBYnumber^NQpriority=1" and
+ * "priority=1^NQ" all match the 27. A condition added to such a part would make
+ * it one: "EQ^active=false^NQpriority=1^active=false" matched all 29 inactive
+ * incidents, where 10 was the answer. So the condition goes only to the parts
+ * that have one already, and where no part has one, once to the end. A condition
+ * behind an ORDERBY is applied: measured as well.
  */
 export function withCondition(query: string, condition: string): string {
-  const terms: string[] = []
-  // Whether the part being read holds anything yet. A query may begin with NQ: in front of that there is no part
-  // to add the condition to, and adding it there would make a part of its own that matches everything else.
-  let open = false
+  const parts: string[][] = [[]]
   for (const term of splitTerms(query)) {
     if (term === '') continue
     if (term.startsWith('NQ')) {
-      if (open) terms.push(condition)
-      // The part that begins here may be empty too ("NQ" alone, or "NQ" right before another one).
-      open = term.length > 2
+      parts.push([])
+      if (term.length > 2) parts.at(-1)!.push(term.slice(2))
     } else {
-      open = true
+      parts.at(-1)!.push(term)
     }
-    terms.push(term.replaceAll('^', '^^'))
   }
-  if (open || !terms.length) terms.push(condition)
-  return terms.join('^')
+  const filters = (term: string) => term !== 'EQ' && !/^(ORDERBYDESC|ORDERBY|GROUPBY)/.test(term)
+  const filled = parts.filter((part) => part.length)
+  const filtering = filled.filter((part) => part.some(filters))
+  for (const part of filtering.length ? filtering : filled.slice(-1)) part.push(condition)
+  if (!filled.length) return condition
+  // A literal caret inside a value is written twice. The condition is written by this server and carries none.
+  return filled.map((part) => part.map((term) => (term === condition ? term : term.replaceAll('^', '^^'))).join('^')).join('^NQ')
 }
 
 /**
@@ -345,6 +358,9 @@ function checkValue(operator: Operator, value: string, unsupported: (why: string
     return parts[0]
   } else if (value === '' && !EMPTY_VALUE_ALLOWED.has(operator)) {
     throw unsupported(`${operator} needs a value. Without one ServiceNow drops the condition or matches nothing; to ask for empty fields use ISEMPTY or ISNOTEMPTY`)
+  } else if ((operator === 'IN' || operator === 'NOT IN') && value.split(',').every((item) => item.trim() === '')) {
+    // Measured: "IN," matches nothing. An empty item among others is skipped: "IN1," matched what "IN1" did.
+    throw unsupported(`${operator} needs at least one value in its list; a list of nothing but commas matches nothing`)
   }
   return undefined
 }
