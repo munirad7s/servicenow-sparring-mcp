@@ -104,6 +104,9 @@ measurements.
 - `npm run call` runs one tool from the shell. `npm run origin-check` measures `sn_origin` on your instance.
 - `sn_upgrade_skips` and the upgrade evidence of `sn_origin` show `target`, the name the upgrade gives the record,
   next to the file name.
+- `sn_origin` judges the entry of a system field (`sys_id`, `sys_created_on` and the like) by the package of its
+  table. Such entries belong to no package, and were half of the records it could not decide. Every `unknown` now
+  says why in `explanation`.
 
 ### Changed
 

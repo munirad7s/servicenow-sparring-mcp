@@ -893,6 +893,57 @@ test('sn_origin abstains when the evidence does not decide', async () => {
   assert.equal((await noPackage.answer('sn_origin', { sysId: ID })).provenance, 'unknown')
 })
 
+test('sn_origin: the entry of a system field is judged by the table it belongs to', async () => {
+  // Measured: such entries belong to no package, and nine in ten entries without a package are of this kind.
+  const entry = (kind: string) => ({ sys_update_name: '', sys_class_name: kind, sys_package: '' })
+  const routes = (kind: string, element: string, tablePackage: string): Route[] => [
+    { table: kind, rows: [{ sys_id: ID, name: 'x_acme_case', element, language: 'en' }] },
+    { table: 'sys_db_object', query: 'name=x_acme_case', rows: [{ sys_package: tablePackage ? labelled('p9', 'Example app') : '', 'sys_package.sys_class_name': tablePackage }] },
+    ...origin('', [], [], entry(kind)),
+  ]
+
+  const field = await connect(routes('sys_dictionary', 'sys_id', 'sys_store_app'))
+  const data = await field.answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ verdict: data.verdict, provenance: data.provenance, from: data.record.package }, { verdict: 'out_of_box_as_captured', provenance: 'installed_application', from: 'Example app' })
+  assert.match(data.warnings.join(' '), /belongs to no package itself.*that of the table "x_acme_case" \(sys_db_object, name=x_acme_case\)/)
+  assert.equal(field.sentTo('sys_dictionary').length, 1, 'the row that names the table is read once')
+
+  const label = await connect(routes('sys_documentation', 'sys_created_on', 'sys_plugins'))
+  assert.equal((await label.answer('sn_origin', { sysId: ID })).verdict, 'out_of_box_as_captured')
+
+  // The table of an application developed here: its system fields are part of that application.
+  const own = await connect(routes('sys_dictionary', 'sys_updated_by', 'sys_app'))
+  assert.equal((await own.answer('sn_origin', { sysId: ID })).verdict, 'custom_application_file')
+
+  // Not a system field, or a table without a package: nothing says who delivered the entry.
+  const other = await connect(routes('sys_dictionary', 'word', 'sys_plugins'))
+  assert.equal((await other.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
+  assert.equal(other.sentTo('sys_db_object').length, 0)
+  const bare = await connect(routes('sys_dictionary', 'sys_id', ''))
+  const undecided = await bare.answer('sn_origin', { sysId: ID })
+  assert.equal(undecided.verdict, 'unknown')
+  assert.match(undecided.explanation, /belongs to no package/)
+})
+
+test('sn_origin says why, whenever it does not decide', async () => {
+  const cases: Array<[string, Route[], RegExp]> = [
+    // Measured: one application file in nine belongs to no package, and almost none of those was ever captured.
+    ['no package', origin('', [], []), /belongs to no package.*Nothing on the instance says who delivered it/],
+    ['global scope, untouched', origin('sys_scope', [], []), /belongs to the global scope and not to a package/],
+    ['changed inside an installed application', origin('sys_store_app', [], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')]), /delivered and then changed, or created here/],
+    ['hidden from the account', [{ table: 'sys_metadata', rows: [null] }], /could not be established whether the record exists/],
+    ['a part of another record', origin('sys_plugins', [], [], { sys_update_name: '', sys_class_name: 'sys_hub_action_input' }), /no update name of its own/],
+    ['evidence not readable', [{ table: 'sys_metadata', rows: [file('sys_plugins')] }, { table: 'sys_update_xml', status: 403 }, { table: 'sys_update_version', rows: [] }, stats('sys_update_version', {})], /part of the evidence is missing or hidden/],
+    ['known to an upgrade only', origin(null, [], [], {}, [skip('Skipped Manual Merge')]), /no record answers to it/],
+  ]
+  for (const [label, routes, reason] of cases) {
+    const { answer } = await connect(routes)
+    const data = await answer('sn_origin', label === 'known to an upgrade only' ? { updateName: NAME } : { sysId: ID })
+    assert.equal(data.verdict, 'unknown', label)
+    assert.match(data.explanation, reason, label)
+  }
+})
+
 test('sn_origin: a record that is gone', async () => {
   const deleted = await connect(origin(null, [change({ action: 'DELETE' })], []))
   const bySysId = await deleted.answer('sn_origin', { sysId: ID })

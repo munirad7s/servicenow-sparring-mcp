@@ -278,6 +278,13 @@ Inside an installed application both happen often, a file made here and a delive
 undecided case stays undecided. In a platform package a file made here is rare (5 of 1,885 changed files on the
 test instance), so there a captured change means `customized`.
 
+Two kinds of record need a detour. A dictionary entry or a field label that was never captured stores no update
+name; asked for by the name it would get, it is found by the table and field that name describes. And the entry of
+a system field such as `sys_id` belongs to no package, because the platform generates it together with the table:
+for it, the package of the table answers the first question, and the answer says so.
+
+An `unknown` always comes with its reason in `explanation`.
+
 ### What was measured
 
 On one instance of the Australia release, with `npm run origin-check`:
@@ -288,15 +295,18 @@ On one instance of the Australia release, with `npm run origin-check`:
   name and the verdict is `unknown`. This is not an independent confirmation for all 77: 36 of them have no
   customer update at all, and `sn_origin` knows about them only because it reads what the upgrade found. Before it
   did, it called those 36 out-of-the-box.
-- **200 random application files:** 162 `out_of_box_as_captured`, 34 `unknown`, 3 `customer_created`, 1
-  `customized`. It abstains on about one file in six (three samples of 200 gave 27, 30 and 34). Most of those
-  belong to no package: parts of flows and actions, which are captured with their parent and carry no name of
-  their own.
-- **198 random captured changes:** 104 `customer_created`, 69 `customized`, 22 `custom_application_file`, 3
-  `deleted_here`. Of the 69 customized records, 61 were captured under system accounts and 8 by people.
+- **198 random application files:** 184 `out_of_box_as_captured`, 14 `unknown`. It abstains on one file in
+  fourteen. Those belong to no package: parts of flows and actions, which are captured with their parent and carry
+  no name of their own, and the tables of the text index.
+- **197 random captured changes:** 100 `customer_created`, 69 `customized`, 26 `custom_application_file`, 2
+  `deleted_here`. Of the 69 customized records, 60 were captured under system accounts and 9 by people.
 - **Fields nobody touched.** Two in three dictionary entries of the instance (207,943 of 299,720) store no update
   name, because they were never captured. Asked for by the name they would get, such as
   `sys_dictionary_incident_category`, they are found by the table and field the name describes.
+- **System fields.** One application file in nine (143,264 of 1,236,269) belongs to no package. Most of them are
+  the entries and labels of system fields. In a sample of 150 such entries, 131 described a system field of a
+  table that has a package. Before these were judged by their table, `sn_origin` left one file in six `unknown`
+  (27, 30 and 34 in three samples of 200).
 
 What follows from that:
 
@@ -305,7 +315,7 @@ What follows from that:
   notices, by comparing content, and this server cannot compare content. Where no upgrade has looked at a record
   yet, such a change is invisible here.
 - **"Customized" is the platform's word, not a statement about people.** On this instance most of the customized
-  records were changed by installations, upgrades and jobs (61 of 69 in the sample), and 2,783 of all 6,631
+  records were changed by installations, upgrades and jobs (60 of 69 in the sample), and 2,783 of all 6,631
   captured changes have no person on them at all. `capturedBy` tells them apart, `sn_delta` counts them, and its `peopleOnly`
   leaves them out.
 - **The rule is measured on one instance.** The verdicts were compared with the upgrade engine and with the stored

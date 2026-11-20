@@ -194,6 +194,8 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         // true where it could not be established whether the record exists: then "not found" is not an answer.
         let untraceable = false
         let name = ''
+        // For a dictionary entry or a label: the table and the field it describes.
+        let describes: Record<string, string> | null = null
 
         // A dictionary entry or a label that was never captured stores no update name. Asked for by the name it would
         // get, it is found by what it describes. Measured: two in three dictionary entries of an instance are like that.
@@ -206,6 +208,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             file = again.records[0] ? tidy(again.records[0]) : null
             hidden = !file
             name = updateName
+            describes = hit
           } else if (typeof own === 'string' ? own !== 'not_found' : hidesRows(own)) {
             untraceable = true
             warnings.push(`${described.table} could not be read completely, so it is not known whether a record of this name exists.`)
@@ -222,6 +225,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           } else {
             const own = await sn.query<Record<string, string>>({ table: kind, query: `sys_id=${rawOf(file.sys_id)}`, fields: ['name', 'element', 'language'], limit: 1 }).catch((error) => errorKind(error))
             name = typeof own === 'string' || !own.records[0] ? '' : NAMED_BY_CONTENT[kind](own.records[0])
+            if (name && typeof own !== 'string') describes = own.records[0]
             if (!name) {
               warnings.push(
                 `The update name of this record is built from the table and field it describes, and those could not be read from ${kind}` +
@@ -344,7 +348,34 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           warnings.push('A customer update row exists, but the version marked current is the vendor\'s and is not older than the last captured change: the record was reverted to the vendor version while the update row stayed. An upgrade still skips it.')
         }
 
-        const packageClass = file && !ownTable ? rawOf(file['sys_package.sys_class_name']) : ''
+        let packageClass = file && !ownTable ? rawOf(file['sys_package.sys_class_name']) : ''
+        let packageName = file ? labelOf(file.sys_package) : ''
+
+        // The entry of a system field such as sys_id, and its label, belong to no package: the platform generates them
+        // together with the table. Measured: nine in ten entries without a package are of that kind, and for all of
+        // them in a sample of 150 the table itself had a package. Who delivered such an entry is answered by its table.
+        const kind = file && !ownTable ? rawOf(file.sys_class_name) : ''
+        if (file && !packageClass && NAMED_BY_CONTENT[kind]) {
+          describes ??= await sn
+            .query<Record<string, string>>({ table: kind, query: `sys_id=${rawOf(file.sys_id)}`, fields: ['name', 'element'], limit: 1 })
+            .then((page) => page.records[0] ?? null)
+            .catch(() => null)
+          const table = describes?.name
+          if (isTableName(table) && String(describes?.element ?? '').startsWith('sys_')) {
+            const owner = await sn
+              .query<Row>({ table: 'sys_db_object', query: `name=${table}`, fields: ['sys_package', 'sys_package.sys_class_name'], limit: 1, display: true })
+              .then((page) => (page.records[0] ? tidy(page.records[0]) : null))
+              .catch(() => null)
+            if (owner && rawOf(owner['sys_package.sys_class_name'])) {
+              packageClass = rawOf(owner['sys_package.sys_class_name'])
+              packageName = labelOf(owner.sys_package)
+              warnings.push(
+                `This entry belongs to no package itself: it describes a system field, which the platform generates together with the table. ` +
+                  `The package named here is that of the table "${table}" (sys_db_object, name=${table}).`,
+              )
+            }
+          }
+        }
         const provenance: Provenance = PROVENANCE[packageClass] ?? 'unknown'
         const inDeliveredPackage = provenance === 'vendor' || provenance === 'installed_application'
 
@@ -388,11 +419,14 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         const upgradeKnows = Boolean(skips) && (skips?.total ?? skipRows.length) > 0
 
         let verdict: Verdict = 'unknown'
+        // Why the evidence does not decide, where it does not. An "unknown" without a reason is of no use to anyone.
+        let undecided = ''
         if (!file) {
-          if (hidden || untraceable) verdict = 'unknown'
+          if (hidden || untraceable) undecided = 'It could not be established whether the record exists, or what it is: see the warnings.'
           else if (updateRows.some((row) => rawOf(row.action) === 'DELETE')) verdict = 'deleted_here'
           else if (!name || (updates && versions && captured === 0 && (versions.total ?? versionRows.length) === 0 && !upgradeKnows)) verdict = 'not_found'
           else {
+            undecided = 'Something is recorded under this name, but no record answers to it: see the warnings.'
             if (updateRows.length || versionRows.length) {
               warnings.push('Update rows or versions exist under this name, but the record itself is not readable: it was removed without a captured delete, or it lives in a table this account cannot read.')
             }
@@ -414,20 +448,33 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             // Without the count of versions "created here" cannot be ruled out, and the rarity is no argument.
             if (created === 'here') verdict = 'customer_created'
             else if (created === 'delivered' || divergence === 'changed_without_capture' || (provenance === 'vendor' && sources !== null)) verdict = 'customized'
+            else undecided = 'It was changed on this instance and belongs to a delivered package. Whether it was delivered and then changed, or created here inside that package, could not be told: no vendor version of it was found, and its dates do not decide it.'
           } else if (created === 'delivered') {
             // No package says who delivered it, but a vendor version exists.
             verdict = 'customized'
           } else if (created === 'here') {
             verdict = 'customer_created'
+          } else {
+            undecided = 'It was changed on this instance and belongs to no delivered package. Whether a vendor version of it exists could not be established, so it is not known whether it was delivered or created here.'
           }
         } else if (divergence === 'no_customer_changes_captured') {
           if (inDeliveredPackage || (vendorVersions ?? 0) > 0) verdict = 'out_of_box_as_captured'
+          else {
+            // Measured: one application file in nine belongs to no package, and almost none of those was ever captured.
+            undecided =
+              `No change is captured for it, it belongs to ${provenance === 'global_scope' ? 'the global scope and not to a package' : 'no package'}, and no version from an upgrade or an installation exists. ` +
+              'Nothing on the instance says who delivered it: records the platform generates look like this, and so do records a script created. See who created it, and when, in "record".'
+          }
+        } else {
+          undecided = name
+            ? 'Whether it was changed on this instance could not be established: part of the evidence is missing or hidden. See the warnings.'
+            : 'Its change history could not be looked up, because it has no update name of its own: see the warnings.'
         }
 
         return ok({
           ...source(sn, warnings),
           verdict,
-          explanation: EXPLANATIONS[verdict],
+          explanation: verdict === 'unknown' && undecided ? undecided : EXPLANATIONS[verdict],
           provenance,
           divergence,
           created,
@@ -437,7 +484,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             table: ownTable || rawOf(file.sys_class_name),
             name: rawOf(file.sys_name),
             updateName: name,
-            package: labelOf(file.sys_package),
+            package: packageName,
             packageClass,
             scope: labelOf(file.sys_scope),
             protection: rawOf(file.sys_policy),
