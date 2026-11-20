@@ -111,7 +111,10 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
           warnings.push('sys_documentation could not be read completely, so a label can be the one of the parent table where this table has its own.')
         }
         if (info.kind === 'database_view') {
-          warnings.push('This is a database view. Its fields are listed as the joined tables define them: dictionary overrides, and the labels a child table gives to a field it inherits, are not applied. Ask for the joined table to see those.')
+          warnings.push(
+            'This is a database view. Its fields are listed as the joined tables define them: dictionary overrides, and the labels a child table gives to a field it inherits, are not applied. Ask for the joined table to see those. ' +
+              'A view does not filter by every field it shows: before sn_query filters, sorts or counts by one, it asks the instance for proof that a condition on it is applied.',
+          )
         }
         if (outside.length) {
           const listing = [...new Set((info.members ?? []).filter((member) => Array.isArray(member.fields)).map((member) => member.table))]

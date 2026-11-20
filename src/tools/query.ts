@@ -22,6 +22,7 @@ import {
   NAMED_LIKE_A_PAYLOAD,
   payloadTables,
   propertyValueFields,
+  requireProofOnView,
   shapeOf,
   READ_ONLY,
   recordNameKey,
@@ -249,6 +250,10 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     if (ctx.sn.restricted && recordNameKey(table, groupBy, column, guard.owners.get(groupBy)?.table)) {
       throw new ServiceNowError(`"${groupBy}" holds the readable names of records of other tables, and tables are closed on this machine: its values are not listed as groups. Nothing was sent.`, 'blocked', table)
     }
+
+    // A view is asked first whether it applies a condition on the field: one that it drops would count every row
+    // as one group. A field outside the list of the view was asked about when its name was checked.
+    if ((await shapeOf(ctx, table)).kind === 'view' && !guard.resolved.get(groupBy.split('.')[0])?.outsideList) await requireProofOnView(ctx, table, [groupBy])
 
     // The label of a group is the name behind a reference. The client leaves it out where that name could be the name
     // of a record in a closed table, and the answer says so.

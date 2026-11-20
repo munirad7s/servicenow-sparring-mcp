@@ -17,6 +17,12 @@
  *    withholds, a long text it cuts, a text it took a secret out of. With display
  *    values it also keeps a time as it is stored, in UTC.
  * 4. Counts per value, against the Aggregate API, read by pages as an agent would.
+ * 5. Database views. A view can list the fields it takes from a table it joins,
+ *    and the instance drops a condition on any other field of that table, and on
+ *    some it lists. For views with such a list, each field sn_schema lists is
+ *    asked directly whether a condition on it is applied ("empty and filled at
+ *    once" has to match nothing), and then through sn_query: the server has to
+ *    refuse a condition on a field the instance drops, and pass on the others.
  *
  * It only reads. It prints counts, and for a difference the field or the query
  * concerned, with sys_ids replaced, never a value. It ends with 1 if anything
@@ -417,8 +423,42 @@ console.log(`  ${String(counted).padStart(5)}  the same groups and counts as the
 console.log(`  ${String(miscounted.length).padStart(5)}  difference(s)`)
 for (const line of miscounted) console.log(`         ${line}`)
 
+// ------------------------------------------------------------------------ views
+
+// Views that carry a field list first: those are the ones that drop conditions.
+const withList = [...new Set(((await get('sys_db_view_table_field', { sysparm_fields: 'view_table.view.name', sysparm_limit: 3_000 })).rows ?? []).map((row) => row['view_table.view.name']).filter(Boolean))]
+const droppedFields: string[] = []
+let viewsTried = 0
+let applied = 0
+let refusedByInstance = 0
+let refusedByServer = 0
+for (const view of withList) {
+  if (viewsTried >= 12) break
+  if (Number((await get(view, { sysparm_fields: 'sys_id', sysparm_limit: 1 })).total ?? 0) < 1) continue
+  const described = await call('sn_schema', { table: view })
+  if (described.isError) continue
+  viewsTried++
+  for (const column of (described.data.columns as Data[]).filter((item) => !item.inactive).slice(0, 12)) {
+    const asked = await get(view, { sysparm_query: `${column.name}ISEMPTY^${column.name}ISNOTEMPTY`, sysparm_fields: 'sys_id', sysparm_limit: 1 })
+    const through = await call('sn_query', { table: view, query: `${column.name}ISNOTEMPTY`, fields: [column.name], limit: 1 })
+    if (asked.status !== 200) refusedByInstance++
+    else if (Number(asked.total) === 0) {
+      // Applied by the instance. A refusal for another reason, a field that holds a secret for one, is no finding.
+      if (through.isError && /did not prove that it applies a condition/.test(String(through.data.message))) droppedFields.push(`${view}.${column.name}: the instance applies a condition on it, and the server refuses it for want of proof`)
+      else applied++
+    } else if (through.isError) refusedByServer++
+    else droppedFields.push(`${view}.${column.name}: the instance drops a condition on it, and the server sends one`)
+  }
+}
+console.log(`\nDatabase views with a field list: ${viewsTried} tried`)
+console.log(`  ${String(applied).padStart(5)}  listed field(s) on which the instance applies a condition, and the server sends it`)
+if (refusedByServer) console.log(`  ${String(refusedByServer).padStart(5)}  listed field(s) on which the instance drops a condition, and the server refuses it`)
+if (refusedByInstance) console.log(`  ${String(refusedByInstance).padStart(5)}  listed field(s) the instance refuses a condition on, with an error`)
+console.log(`  ${String(droppedFields.length).padStart(5)}  difference(s)`)
+for (const line of droppedFields.slice(0, 40)) console.log(`         ${line}`)
+
 console.log(`\n${sn.requestCount + direct} requests, all GET: ${sn.requestCount} by the server, ${direct} directly.`)
-process.exit(differences.length || wrong.length || altered.length || miscounted.length ? 1 : 0)
+process.exit(differences.length || wrong.length || altered.length || miscounted.length || droppedFields.length ? 1 : 0)
 
 // ---------------------------------------------------------------- closed tables
 

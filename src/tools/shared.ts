@@ -733,6 +733,23 @@ export interface Guard {
  * "groupBy" is the field an Aggregate call counts by. Like a field in a condition,
  * it changes the answer if the instance ignores it.
  */
+/**
+ * Refuses a field of a database view that the view is to be filtered, sorted or counted by, unless the instance
+ * proves that it applies a condition on it. Measured: a view drops a condition on a field it does not take from a
+ * joined table, and on some of the fields it does take (one of eight listed fields of one joined table), and
+ * answers with every row. Its definition does not say which.
+ */
+export async function requireProofOnView(ctx: Context, view: string, paths: string[]): Promise<void> {
+  for (const field of new Set(paths.map((path) => path.split('.')[0]))) {
+    if (await ctx.dict.viewCarries(view, field)) continue
+    throw validation(
+      `"${field}" is a field of the database view "${view}", but the instance did not prove that it applies a condition on it: asked for rows where it is empty and filled at once, it did not answer with none. ` +
+        'Measured: a view drops a condition on some of its fields and answers unfiltered, so nothing was sent.',
+      view,
+    )
+  }
+}
+
 export async function guardFields(ctx: Context, table: string, query: string, fields: string[] = [], groupBy?: string): Promise<Guard> {
   if (!ctx.sn.allows(table)) {
     throw new ServiceNowError(`Table "${table}" is closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY). Nothing was sent.`, 'blocked', table)
@@ -795,6 +812,10 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   await refuseChoiceLabels(ctx, table, parsed, check, warnings)
   refuseValuesOfTheWrongKind(table, parsed, check.resolved)
   await refuseNamesInPlaceOfIds(ctx, table, parsed, check.resolved, warnings)
+
+  // What a view is filtered or sorted by is asked of the instance first, after everything that refuses a query
+  // without a request. A field to count by is asked about where the count is made, for the same reason.
+  if (shape.kind === 'view') await requireProofOnView(ctx, table, parsed.fields.filter((path) => !check.resolved.get(path.split('.')[0])?.outsideList))
 
   if (check.status === 'checked') {
     const fieldCheck = paths.length ? 'all field names verified against sys_dictionary' : 'not needed: the call names no fields'

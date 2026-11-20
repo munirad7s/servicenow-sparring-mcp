@@ -401,9 +401,22 @@ test('a view that lists the fields it takes from a table has no other field of t
   assert.deepEqual(names.filter((name: string) => name.startsWith('usr_')), ['usr_email', 'usr_name', 'usr_sys_id', 'usr_user_password'])
   assert.match(schema.warnings.join(' '), /This view lists the fields it takes from incident\. 7 other field\(s\) of that table are left out here: ServiceNow drops a condition on such a field/)
 
-  // A field on the list, and a field of a table without a list, go out without a question.
-  await described.answer('sn_query', { table: 'incident_caller', query: 'inc_number=INC1^usr_nameLIKEa', fields: ['inc_number'] })
-  assert.deepEqual(described.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), ['inc_number=INC1^usr_nameLIKEa'])
+  // A field that is only returned goes out without a question. A field the view is filtered by is asked about
+  // first, also one on the list and one of a table without a list: measured, the instance dropped the condition
+  // on one of eight listed fields of a joined table. Asked once, while the view has rows.
+  await described.answer('sn_query', { table: 'incident_caller', fields: ['inc_number', 'usr_name'] })
+  assert.deepEqual(described.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [''])
+  for (let run = 0; run < 2; run++) await described.answer('sn_query', { table: 'incident_caller', query: 'inc_number=INC1^usr_nameLIKEa', fields: ['inc_number'] })
+  assert.deepEqual(described.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query).slice(1), [proof('inc_number'), '', proof('usr_name'), '', 'inc_number=INC1^usr_nameLIKEa', 'inc_number=INC1^usr_nameLIKEa'])
+
+  // A field on the list, and the instance drops the condition all the same: refused, with what was asked.
+  for (const args of [{ query: 'inc_state=1' }, { query: 'ORDERBYDESCinc_state' }, { groupBy: 'inc_state' }, { query: 'usr_nameLIKEa^inc_state=1' }]) {
+    const lost = await connect(world(listed, dropped('inc_state'), rows))
+    const refused = await lost.call('sn_query', { table: 'incident_caller', ...args })
+    assert.deepEqual({ isError: refused.isError, error: refused.data.error }, { isError: true, error: 'validation' }, JSON.stringify(args))
+    assert.match(refused.data.message, /"inc_state" is a field of the database view "incident_caller", but the instance did not prove that it applies a condition on it/, JSON.stringify(args))
+    assert.ok(!lost.calls.some((entry) => entry.table === 'incident_caller' && /inc_state=1|ORDERBYDESCinc_state/.test(entry.query)), JSON.stringify(args))
+  }
 
   // A field outside the list, and the instance drops the condition: refused, in a condition, a sort, a field to
   // count by and a field to return alike. Nothing but the question went to the view.

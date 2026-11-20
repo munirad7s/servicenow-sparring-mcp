@@ -64,8 +64,10 @@ matches nothing. Both look like an answer. Five rules keep the evidence from lyi
    fields. Where the dictionary cannot be used, the names are checked against a row of the table itself. Where
    neither works and the table is not empty, a filtered query is not sent. A database view is its own case: it
    can list the fields it takes from a table it joins, and the instance drops a condition on any other field of
-   that table (measured: 11,759 of 11,759 rows for a value nobody has). The lists are read, and a field outside
-   one is used only where the instance proves that it applies a condition on it.
+   that table (measured: 11,759 of 11,759 rows for a value nobody has), and on some that it lists. Its
+   definition does not say which, so before a view is filtered, sorted or counted by a field, the instance is
+   asked for the rows where that field is empty and filled at once. Only an answer with none proves that it
+   applies a condition on the field; without it the query is refused.
 2. **A condition the instance would drop or misread is refused.** A dot-walk through a list field, a date
    condition with a missing part, an operator written the wrong way, a `LIKE` without a value. A date in a form it
    cannot read, where `>` then matches every row. `active=yes`, which returns the inactive rows.
@@ -585,7 +587,9 @@ What was tested, and what was not:
   every sorted query, and the same read brings a thousand.
 - Database views with a field list, tried on 30 of them: of 31 conditions on a field outside the list that no row
   carries, the instance dropped 15 and refused 16 with 403 when asked directly; the server refused all 31 before
-  a request went out. Of 54 system fields a row carried beyond its list, 52 passed the proof and were used.
+  a request went out. Of 54 system fields a row carried beyond its list, 52 passed the proof and were used. Of
+  123 fields that the lists of 12 views name, the instance applied a condition on 122, and the server sent it;
+  it dropped the condition on one, and the server refused that one. `npm run compare` repeats the last trial.
 - On another release, run `npm run doctor`, `npm run smoke` and `npm run compare` first.
 - Signing in with a token is covered by unit tests only.
 - CI runs the unit tests on Linux, Windows and macOS.

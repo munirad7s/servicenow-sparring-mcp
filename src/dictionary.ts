@@ -820,15 +820,17 @@ export class Dictionary {
   private readonly carried = new Map<string, Entry<boolean>>()
 
   /**
-   * true if the instance applies a condition on this field of a view, for a field the view does not list.
+   * true if the instance applies a condition on this field of a view.
    *
-   * Measured on 40 views with a field list: a field on the list is applied; a field outside it is applied where a
-   * row of the view carries it all the same (sys_id, sys_class_name and the two domain fields, not always the same
-   * ones) and dropped where no row does, or refused with 403. A condition that is dropped matches every row, so the
+   * Measured on 40 views with a field list: a field outside the list is applied where a row of the view carries it
+   * all the same (sys_id, sys_class_name and the two domain fields, not always the same ones) and dropped where no
+   * row does, or refused with 403. A field on the list is applied, but not every one: of eight listed fields of one
+   * joined table, the instance dropped the condition on one. So the definition of a view does not say which of its
+   * fields can be filtered by, and the instance is asked. A condition that is dropped matches every row, so the
    * question "empty and filled at once" then matches every row too, where it should match none. Without a row in
    * the view the question proves nothing, and the answer is not remembered.
    */
-  private async viewCarries(view: string, field: string): Promise<boolean> {
+  async viewCarries(view: string, field: string): Promise<boolean> {
     const key = `${view}.${field}`
     const known = this.carried.get(key)
     if (known && Date.now() - known.at < this.ttlMs) return known.value

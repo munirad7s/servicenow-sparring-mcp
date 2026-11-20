@@ -7,17 +7,20 @@ answer; such changes are listed under "Changed".
 
 ### Fixed
 
-- **On a database view, a condition on a field the view does not take was sent, and the answer was unfiltered.**
-  A view can list the fields it takes from a table it joins; 103 of the 558 views of the test instance do. The
-  server took every field of a joined table for a field of the view. Measured on 40 such views: the instance
-  drops a condition on a field outside the list and answers with every row, 11,759 of 11,759 for a value nobody
-  has, or refuses it with 403. A sort by such a field does nothing. That is the answer this server exists to
-  prevent. The lists are read now (`sys_db_view_table_field`). A field outside a list is used only where the
-  instance proves that it applies a condition on it, by matching nothing for "empty and filled at once": a row
-  of a view carries a few system fields beyond its list, the sys_id of a joined table for one, and those pass.
-  Everything else is refused before a request goes out, as a condition, a sort, a field to count by or a field to
-  return. `sn_schema` leaves the fields outside a list out and says how many. Where the lists cannot be read, it
-  lists every field with a warning, and `sn_query` asks for the proof for each one it uses.
+- **On a database view, a condition the instance drops was sent, and the answer was unfiltered.** A view can
+  list the fields it takes from a table it joins; 103 of the 558 views of the test instance do. The server took
+  every field of a joined table for a field of the view. Measured on 40 such views: the instance drops a condition
+  on a field outside the list and answers with every row, 11,759 of 11,759 for a value nobody has, or refuses it
+  with 403. A sort by such a field does nothing. It also dropped the condition on one of eight fields that a list
+  did name. That is the answer this server exists to prevent, and the definition of a view does not say which
+  fields are affected. So the instance is asked: before a view is filtered, sorted or counted by a field, the
+  server asks for the rows where that field is empty and filled at once. An instance that applies the condition
+  answers with none; one that drops it answers with rows, and the query is refused before it goes out. The answer
+  is kept for ten minutes, and only while the view has rows. The lists are read as well
+  (`sys_db_view_table_field`): a field outside one is no field of the view, unless the instance passes that
+  question for it, as it does for a few system fields a row carries beyond its list. `sn_schema` leaves the
+  fields outside a list out and says how many; where the lists cannot be read, it lists every field with a
+  warning. The first query that filters a view by a field costs two more requests per field.
 - **A list read page by page brought some rows twice and missed others.** Measured: where rows are equal in what
   a query sorts by, the instance gives them another place from one page to the next. `sn_delta` sorts captured
   changes by the time of their last change, and most of them share it with a neighbour (244 of 299 in a row): ten
