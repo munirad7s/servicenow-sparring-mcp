@@ -3,9 +3,9 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
-## Unreleased
+## 0.4.4 (2026-11-21)
 
-Four reviews, and this time before the release that carries the answers to them: one of the fixes of 0.4.3,
+Five reviews, and this time before the release that carries the answers to them: one of the fixes of 0.4.3,
 and then one of each round of answers. The first rated 10 of 13 as holding for the case they were written for
 and not for another, the second 6 of 8, the third 3 of 6, with the same pattern as before: a rule that stood
 where the fault was found and not where every path runs through. The third was asked to say for each finding
@@ -123,7 +123,8 @@ documents that said less than the code does.
 - `sn_dependencies` goes by a property it read up to thirty seconds ago. In that half minute after an
   administrator turns it on, an empty category can be called checked where a field of its condition does not
   exist on the instance. The 60 fields that the functions filter by were all there on the test instance.
-- A secret of 32 such characters that somebody puts into an element called `document_key` passes.
+- A secret written as 32 digits and small letters a to f passes where somebody puts it into an element called
+  `document_key`.
 - The proof that a table applies a condition on the class of a row still counts the rows that have a class.
   Measured on ten tables that is half a second for 1.2 million rows and 4.5 for 3.5 million, once in ten
   minutes for each table, where asking for the one row alone took 0.1 and 1.0.
