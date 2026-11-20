@@ -121,7 +121,8 @@ reference. A child table of a closed table is closed as well, at any depth, and 
 is stored in and the archive of a table. A reference whose record can be a row of a closed table can be compared
 with a sys_id, but not with text and not sorted by, and a text search is refused on a table that has one. The name
 and the payload of a captured change are withheld where its record is in a closed table. What a field shows beside
-its stored value is passed on only for kinds of fields that show nothing of other records. Not covered: plain text fields that carry something from a closed table, such as the user name in
+its stored value is passed on only for kinds of fields that show nothing of other records. A rejected login, or
+the limit of 500 requests for one call, ends the call with that error. Not covered: plain text fields that carry something from a closed table, such as the user name in
 sys_created_by, and tables that record the content of others (sys_audit, sys_history_line, sys_journal_field). A
 table closed that way is reported as an error of kind \`blocked\`.
 

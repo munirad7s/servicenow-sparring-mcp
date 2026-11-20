@@ -120,9 +120,11 @@ provider, the data leaves your network. Five things limit what can go that way:
 - **Secrets are withheld.** Fields of a password type or an encrypted type, and system properties of a password
   type, come back as `[withheld: this field holds a secret]`. The Table API would hand them out as stored. The
   server knows the type of a field from the dictionary. Where it cannot read the type, it withholds a field whose
-  name suggests a secret (password, token, secret, key), and the answer says that types were missing. The value of
-  a system property that is reached through a reference or a database view comes without its type, so it is
-  withheld there whatever it holds: read it from `sys_properties`.
+  name suggests a secret (password, token, secret, api_key; a field called just "key" is not taken for one), and
+  the answer says that types were missing. The value of a system property that is reached through a reference or
+  a database view comes without its type, so it is withheld there whatever it holds: read it from
+  `sys_properties`. On a database view whose definition the account may not read, a field called `value`, or
+  ending in `_value`, counts as such a value, and the answer says that this is why it was withheld.
 - **A secret cannot be found out by trying.** "Starts with a", "starts with b": the number of matches would give a
   value away piece by piece, and so would the order of rows sorted by it. A field that holds a secret can be asked
   whether it is filled, and nothing else. A query that compares or sorts by the value of system properties leaves
@@ -136,8 +138,10 @@ provider, the data leaves your network. Five things limit what can go that way:
   with that value taken out, and the answer says how many values were withheld.
 - **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
   away from the server. `SERVICENOW_TABLE_ALLOW` names the only tables the server may ask for; that list has to
-  include the tables the server reads for its own checks (`npm run doctor` lists them, `sys_*` covers most). A
-  name can end in `*`. One set of rules decides for every request, whichever function sends it:
+  include the tables the server reads for its own checks (`npm run doctor` lists them, `sys_*` covers most). The
+  functions also walk references into `sys_package`, `sys_upgrade_history_log`, `sys_ui_section`, `sys_ui_list`,
+  `sys_user`, `sys_user_role` and `domain`, which the doctor does not list on lines of their own. A name can end
+  in `*`. One set of rules decides for every request, whichever function sends it:
 
   - A closed table is not asked for, and it is not reached through a dot-walk or a database view. `sn_schema`
     and `sn_dependencies` do not describe it either.
@@ -149,17 +153,23 @@ provider, the data leaves your network. Five things limit what can go that way:
     list is closed all the same if a table between it and the one you query is not on it.
   - A part of a rotated table, and the archive of a table, are closed with the table whose rows they hold.
     Measured: `syslog0003` extends nothing, is read like any table, and answered with 655,964 rows of `syslog`
-    and of its child tables; an archive table, `ar_<table>`, extends nothing either. Where the table is open and
-    has a closed table below it, its parts and its archive are closed all the same: ask the table itself, which
-    leaves those rows out.
+    and of its child tables; an archive table, `ar_<table>`, extends nothing either. Which tables are parts of
+    which, the instance lists in `sys_table_rotation_schedule`, and the server goes by that list: measured, 319
+    of 327 parts are named after their table with four digits, and 8 with one. Where the list cannot be read, a
+    table whose name ends in digits counts as a part of the table without them. Where the table is open and has
+    a closed table below it, its parts and its archive are closed all the same: ask the table itself, which
+    leaves those rows out. The archive of a table the deny list names is closed also where the instance no
+    longer has the table.
   - What the instance lists neither as a table nor as a database view counts as closed, and so does a database
     view that joins another view, or that comes back without a table it joins: nothing says whose rows it holds.
   - A parent table answers without the rows of its closed child tables. The same holds where a query walks a
     reference into such a parent, or reads it through a database view. Those rows are left out by a condition on
     the class of a row, and an instance that drops that condition would answer with them. So it is first asked
-    for rows whose class is two things at once: empty and filled, one of two names, and, where a list has a
-    pattern, beginning with two. Where one of these matches anything, nothing is read. A table without rows
-    proves nothing this way, so its answer holds for that one request and is not remembered.
+    for rows whose class is two things at once: empty and filled, one of two names, where a list has a pattern
+    beginning with two, and, where a row shows its class, of that class and not of it. Where one of these matches
+    anything, the request is not sent. These questions are requests to the table itself: they ask for a sys_id
+    and, at last, for the class of one row, and nothing of the answers is passed on. A table without rows proves
+    nothing this way, so its answer holds for that one request and is not remembered.
   - The name behind a reference is left out where the record can be a row of a closed table: the reference points
     into one, or into a table that has one below it, or it cannot be told where it points. This goes for single
     references, lists and the labels of counted groups. Such a reference can be compared with a sys_id, but not
@@ -174,16 +184,21 @@ provider, the data leaves your network. Five things limit what can go that way:
     archived and linked records, for what another instance sent for comparison, for what one scope may use of
     another, and for the records people picked in reference fields. An update name is judged in small letters,
     as the instance compares it, and a table the deny list names counts whether or not the instance still has
-    it. A linked application file is a copy of a record of another table: read from its own table the row says
-    which, read as a row of `sys_metadata` it does not, so that table answers without those rows.
+    it. Mostly a name is `<table>_<sys_id>`, but what stands before a sys_id is taken for the table only where
+    the instance has a table of that name: measured, `sys_ui_form_sections_<sys_id>` is a record of
+    `sys_ui_form`. A linked application file is a copy of a record of another table: read from its own table the
+    row says which, read as a row of `sys_metadata` it does not, so that table answers without those rows. A
+    text search is refused on a table that holds such names, and on one that points to it.
   - The text of comments and work notes is rows of `sys_journal_field`: it is left out where that table is closed.
-  - The server's own look-ups follow the same rules. Four tables are read without them, because the rules are
-    decided from them: `sys_db_object`, `sys_db_view`, `sys_db_view_table` and `sys_dictionary`. Do not close
-    those; a list that closes `sys_db_object` or `sys_dictionary` through a parent table closes everything. For
-    `SERVICENOW_TABLE_ALLOW` that means it has to name `sys_metadata`, which the two extend: `sys_*` does.
+  - The server's own look-ups follow the same rules. Five tables are read without them, because the rules are
+    decided from them: `sys_db_object`, `sys_db_view`, `sys_db_view_table`, `sys_dictionary` and, for the parts
+    of rotated tables, `sys_table_rotation_schedule`. Do not close the first four; a list that closes
+    `sys_db_object` or `sys_dictionary` through a parent table closes everything. For `SERVICENOW_TABLE_ALLOW`
+    that means it has to name `sys_metadata`, which the two extend: `sys_*` does. A list that closes the fifth
+    makes the server go by the names of tables instead.
   - Where the server cannot establish which tables a request reads from, it does not send it.
 
-  A closed table is reported as "could not be checked".
+  A closed table is reported as "could not be checked", as an error of kind `blocked`.
 
   What is closed is the rows of a table and the names of its records. Closing a table does not cover:
 
@@ -228,13 +243,16 @@ many. The npm scripts do not write it.
   function sends them.
 - With tables closed on the machine, the first calls cost more: the server has to establish which tables are
   closed, what a table is a child or a parent of, and that the instance applies the conditions it relies on.
-  Measured on a fresh server: 14 requests to list the 1,349 tables below a closed one, 15 for the first query on
+  Measured on a fresh server: 15 requests to list the 1,349 tables below a closed one, 18 for the first query on
   the parent of a closed table, then 1 for the next and 2 for the first on another table. With a long list of the
-  only tables that may be read, a first `sn_instance` took 169.
+  only tables that may be read, a first `sn_instance` took 172.
 - One call sends at most 500 requests and ends with an error after that. A call needs that many only where it
   names hundreds of things that each have to be looked up. A request whose address would be longer than 8,000
   characters is not sent: measured, an instance took 8,218 and answered HTTP 414 to 8,223, and a caret, a comma
   or an equals sign takes three of them.
+- A login that is rejected in the middle of a call, or an instance that can no longer be reached, ends the call
+  with that error, whichever look-up it happened in. One request that runs out of time does not: where the
+  answer does not depend on it, the answer says what could not be read.
 - What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is
   missing from an entry older than 30 seconds is looked up once more, so a field created during a session is
   found. `sn_schema` reads the dictionary anew for every call, for a database view also that of the tables it
@@ -430,7 +448,8 @@ What follows from that:
 - **`out_of_box_as_captured` means "no captured change", not "unchanged".** A record can differ from the vendor
   version without any captured change: a property set by a script, a role changed by an installer. Only an upgrade
   notices, by comparing content, and this server cannot compare content. Where no upgrade has looked at a record
-  yet, such a change is invisible here.
+  yet, such a change is invisible here. Where the account may not read the entries of upgrades
+  (`upgrade_history_task`), the verdict stands on the captured changes alone, and the answer says so.
 - **"Customized" is the platform's word, not a statement about people.** On this instance most of the customized
   records were changed by installations, upgrades and jobs (59 of 70 in the sample), and 2,783 of all 6,631
   captured changes have no person on them at all. `capturedBy` tells them apart, `sn_delta` counts them, and its `peopleOnly`
@@ -498,9 +517,10 @@ What was tested, and what was not:
   `npm run smoke` repeats the first of them, and a second with business rules closed: the names of 37 captured
   changes to business rules were withheld and those of 21 to script includes passed on. More trials: with the
   table closed that stands eight levels above the deepest tables of the instance, all 1,349 tables below it were
-  found in 14 requests; a database view of 44 rows, 7 of them of a closed child table, answered with 37; with
-  `syslog` closed, its parts and its archive were refused; with one table closed that application files link
-  to, 17 of 92 linked files came back without name and payload. That is a trial on one instance, not a proof:
+  found in 15 requests; a database view of 44 rows, 7 of them of a closed child table, answered with 37; with
+  `syslog` closed, its parts were refused, and so was the one-digit part of another rotated table when that was
+  closed; with form layouts closed, the names of their captured changes were withheld; with one table closed
+  that application files link to, 17 of 92 linked files came back without name and payload. That is a trial on one instance, not a proof:
   the rules are in `src/closed.ts`, and the unit tests hold them. What an account sees that may not read or
   filter by what a table extends was not tried, because the test account is an administrator: the server asks
   for proof of both and closes everything without it. Those proofs were only ever seen to pass.

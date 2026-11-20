@@ -5,29 +5,38 @@ answer; such changes are listed under "Changed".
 
 ## Unreleased
 
-Found by three reviews of 0.3.4 and by measuring on a live instance what they claimed about the platform.
+Found by three reviews of 0.3.4, by a fourth round on the fixes, and by measuring on a live instance what they
+claimed about the platform. The fourth round found three mistakes in fixes of the same day, before a release.
 
 ### Security
 
 - **A closed table could be read through the parts it is stored in.** Measured: a rotated table is spread over
-  parts named after it with four digits. `syslog0003` extends nothing, is read like any table, and answered with
-  655,964 rows of `syslog` and of its child tables. An archive table, `ar_<table>`, extends nothing either. Both
-  are closed now with the table whose rows they hold, and where that table is open and has a closed table below
-  it, they are closed all the same.
+  parts. `syslog0003` extends nothing, is read like any table, and answered with 655,964 rows of `syslog` and of
+  its child tables. An archive table, `ar_<table>`, extends nothing either. Both are closed now with the table
+  whose rows they hold, and where that table is open and has a closed table below it, they are closed all the
+  same. Which tables are parts, the instance lists in `sys_table_rotation_schedule`, and that list decides:
+  measured, 319 of 327 parts are named after their table with four digits and 8 with one. Where the list cannot
+  be read, a name that ends in digits counts. An archive or a part of a table that carries payloads and names
+  (`ar_sys_update_xml`) is read like that table.
 - **An update name in capitals got past the check.** Measured: the instance finds `sys_script_<sys_id>` under
   `SYS_SCRIPT_<sys_id>`. `sn_origin` then answered with the readable name and the change history of a record of
-  a closed table. A name is judged in small letters now.
+  a closed table. A name is judged in small letters now. A name that begins with nothing that can be a table
+  counts as one that cannot be told.
 - **The list of child tables could be short without a sign.** Measured: a condition the instance cannot use is
   dropped, and where it stands behind another in a chain of `^OR` it then matches nothing. For an account that
   may read what a table extends and may not filter by it, the tables named on a list would have come back and
-  none of their child tables. Each level of parents is now asked alone for a table that is two things at once,
-  which has to match nothing, before a list is trusted. Several such questions in one query prove nothing:
-  measured, a part of a query joined by `^NQ` whose conditions are dropped adds no rows.
+  none of their child tables. The name of a table and each level of its parents are now asked alone for a table
+  that is two things at once, which has to match nothing, before a list is trusted, and the lists ask with the
+  condition that was proven. Several such questions in one query prove nothing: measured, a part of a query
+  joined by `^NQ` whose conditions are dropped adds no rows. A name read from the table of tables has to be the
+  name of a table before it goes into a query: one that carried a condition would have rewritten the condition
+  that leaves the rows of closed tables out.
 - The proof that the instance applies a condition on the class of a row asked only whether the class is empty and
-  filled at once. It now asks the same for "is one of" and, where a list has a pattern, for "starts with": an
-  instance can allow one kind of condition and not the other. A table without rows answered every such question
-  with nothing, and that answer was remembered for the rows that came later. It holds for one request now, and a
-  proof is kept for ten minutes, not for good.
+  filled at once. It now asks the same for "is one of", where a list has a pattern for "starts with", and, where
+  a row shows its class, for "is not one of", which is the condition that leaves the rows out: an instance can
+  allow one kind of condition and not the other. A table without rows answered every such question with nothing,
+  and that answer was remembered for the rows that came later. It holds for one request now, and a proof is kept
+  for ten minutes, not for good.
 - **A linked application file gave away the record it links to.** Measured: such a file is named after that
   record, through a field it inherits, and carries it as its payload. The check for names went by the table that
   defines a field and missed it. Read from its own table, the name is now held against the table the row names;
@@ -35,12 +44,15 @@ Found by three reviews of 0.3.4 and by measuring on a live instance what they cl
   while tables are closed, and their captured changes count as those of a closed table.
 - **A payload hid the table of a record behind the way it was written:** a `>` inside an attribute in front of
   the one that names the table, an element that was never ended, a second wrapper, a name in capitals or with a
-  prefix, a record inside a CDATA section without an action on it, markup written with entities. A payload that
-  names more than forty tables is withheld without looking at each.
+  prefix, a document inside a CDATA section without an action on its record, markup written with entities, by
+  name or by number. A payload that names more than forty tables is withheld without looking at each, and so is
+  the captured change of a linked file that does not say what it copies.
 - **The secret scrubber missed a value** behind an attribute that holds `>`, in a value split over two CDATA
-  sections, behind an escaped `/` or `=` in JSON inside a JSON string, and in a system property whose record
-  carried a second element called "type". Checked on 1,292 real payloads of an instance, 2.3 MB: the old and the
-  new reading take out the same 358 values and name the same tables.
+  sections, in an element with a prefix (`wsse:Password`), behind a closing tag with a blank in it, in markup
+  written with entities, behind an escaped `/` or `=` or a line break in JSON inside a JSON string, and in a
+  system property whose record carried a second element called "type" or the text `</sys_properties>` inside a
+  CDATA section. Checked on 1,292 real payloads of an instance, 2.3 MB: the old and the new reading take out the
+  same 359 values, and the new one finds one more table, a record carried inside another.
 - A parent chain that one request could not read to its end was taken for complete where the next request came
   back empty: a table nine levels below a table that is not on the list of readable ones passed for open.
 - A database view that came back without a table it joins passed every check that goes by those tables. A view
@@ -52,25 +64,30 @@ Found by three reviews of 0.3.4 and by measuring on a live instance what they cl
   they store, among them a condition, which shows the names behind the sys_ids it holds, and an attachment
   field, which shows the name of its file.
 - A field of a database view is judged by the table it comes from also where the dictionary of that table cannot
-  be read, and by its name where the definition of the view cannot be read either. Before, the value of a system
+  be read, and by its name where the definition of the view cannot be read either: there a field called `value`
+  counts as the value of a system property, and the answer says that this is why. Before, the value of a system
   property, a payload or the name of a record of another table passed there unrecognised.
 - More tables whose rows carry names of records of other tables: what another instance sent for comparison, what
   one scope may use of another, and the records people picked in reference fields.
 - With a list of the only tables that may be read, the server went on reading `sys_db_object` and
   `sys_dictionary` where the list closed them through their parent. That closes everything now, as the README
   said, and the message names the table that is missing from the list.
-- A text search is refused on a table below the table of system properties.
+- A text search is refused on a table below the table of system properties, and, while tables are closed, on a
+  table that holds the names of records of other tables or points to one. A text search refused because of a
+  closed table is reported as that, `blocked`, where it was reported as a mistake in the input.
 
 ### Fixed
 
 - **A login rejected in the middle of a call** made `sn_plugins` say that a table is closed on this machine, and
-  `sn_dependencies` answer with every category unchecked. Both pass it on now, and so do the look-ups of
-  `sn_origin` that still swallowed it. A setting of the instance that could not be read because of a time limit
-  was remembered as "unknown" for ten minutes.
+  `sn_dependencies` answer with every category unchecked. A rejected login, an instance that can no longer be
+  reached and the limit of requests now end the call they happen in, whichever look-up caught them: the client
+  notes the failure, and it is the answer of the call. A setting of the instance that could not be read because
+  of a time limit was remembered as "unknown" for ten minutes.
 - `sn_origin` said "not found" for a record that a table had left out with the rows of its closed child tables,
   and "out of the box" where the instance gave no total for the entries of upgrades, so that a newer entry could
   be hidden. Whether rows were left out is read from the query that was sent: a name that says which table its
-  record is of still gets "not found".
+  record is of still gets "not found". Where the entries of upgrades cannot be read at all, the verdict stands
+  as before, and the answer now says that a change nobody captured was not looked for.
 - **A call refused because of a closed table left no line in the audit log** where it was refused before any
   request was made, which is most of them. It has one now, with what was asked.
 - **One call could send 1,460 requests** by naming 730 tables that do not exist. A call ends after 500 now. The
@@ -80,20 +97,28 @@ Found by three reviews of 0.3.4 and by measuring on a live instance what they cl
   although their table was on the list: only the four longest beginnings of a name were looked up. A name whose
   beginning cannot be a table ended the call with an error. The tables of a page of names are asked for
   together now: measured, `sn_delta` with 200 rows stays at 32 requests.
-- A name that ends in a sys_id says which table its record is of. With business rules closed, the names of
-  script includes were withheld as well, because `sys_script_include_…` also begins with `sys_script`.
+- A name that ends in a sys_id mostly says which table its record is of. With business rules closed, the names
+  of script includes were withheld as well, because `sys_script_include_…` also begins with `sys_script`. What
+  stands before the sys_id is now taken for the table where the instance has a table of that name. Measured:
+  `sys_ui_form_sections_<sys_id>` is a record of `sys_ui_form`, and no table is called `sys_ui_form_sections`.
 - **A request longer than the instance takes is not sent.** Measured: an address of 8,218 characters was taken
   and one of 8,223 answered with HTTP 414, and a caret, a comma or an equals sign takes three of them. The limits
   counted the characters of the query, so a query of 3,000 characters could fail that way.
-- Three more inputs cost their length squared: many elements that share one end with blanks behind it, wrappers
-  that never end, and an update name of thousands of words.
+- Five more inputs cost their length squared: many elements that share one end with blanks behind it, wrappers
+  that never end, an update name of thousands of words, a run of CDATA sections with many elements in front of
+  it (3.5 seconds for 121 KB), and closing tags that end nothing (7.4 seconds for 109 KB). Eighteen shapes of
+  hostile text of about a megabyte each now take under half a second each.
 - Rows nested thousands of levels deep ended the call with an error of the runtime. They are an answer that
   cannot be used now.
 - The audit writer holds at most ten thousand lines that wait to be written, and says how many it dropped.
 - `NSAMEAS` leaves out the rows where the second field is empty as well, and the answer says so. Measured: 48
   incidents had a caller and nobody who resolved them, and the condition matched the 28 that had two people.
 - `sn_schema` judges whether a table is closed by what it extends and joins now, not by what was read up to ten
-  minutes ago.
+  minutes ago. For a field of a database view it named the joined table as the one that defines the field, so an
+  update name built from it was wrong for a field the joined table inherits: it names both now, and says that a
+  view applies neither dictionary overrides nor the labels of child tables.
+- `NSAMEAS` is looked at field by field: asking for the empty rows of one of the two fields leaves the warning
+  about the other.
 - **Nothing held the number of requests that are with the instance at a time.** The README said eight, and the
   functions kept to it where they knew what they were asking for. Measured with a list of the only tables that
   may be read: `sn_delta` with 200 rows had 13 requests with the instance at once, because it looks up the table
@@ -117,8 +142,11 @@ Found by three reviews of 0.3.4 and by measuring on a live instance what they cl
 ### Changed
 
 - With tables closed on the machine, the first calls cost more requests, because more is proven before it is
-  relied on. Measured on a fresh server: 14 requests to list the 1,349 tables below a closed one, where it was 5,
-  and 15 for the first query on the parent of a closed table.
+  relied on. Measured on a fresh server: 15 requests to list the 1,349 tables below a closed one, where it was 5,
+  and 18 for the first query on the parent of a closed table.
+- A text search refused because of a closed table has the error kind `blocked`, not `validation`.
+- In `sn_schema`, `definedOn` of a field of a database view is the table that defines the field. The table the
+  view joins is `joinedFrom`.
 
 ## 0.3.4 (2026-11-20)
 

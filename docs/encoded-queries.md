@@ -184,13 +184,19 @@ Also measured:
   returned 1. And a part of a query joined by `^NQ` whose conditions are all dropped adds no rows:
   `nosuchISEMPTY^nosuchISNOTEMPTY^NQname=sys_db_object` returned 1. So a question that has to match nothing
   proves that a condition is applied only where it stands alone in its query, and the server asks it that way.
-- A rotated table is stored in parts named after it with four digits. Of 357 parts on one instance, every one is
-  named that way or is the table itself. `syslog0003` extends nothing, is read through the Table API like any
-  table, and held 655,964 rows whose class is `syslog` or one of its child tables. The child tables have parts of
-  their own, which extend the parts of the parent. An archive table, `ar_<table>`, extends nothing either. The
-  server closes all of them with the table whose rows they hold.
+- A rotated table is stored in parts. `sys_table_rotation_schedule` lists them: 357 entries for 49 tables on one
+  instance, of which 319 are named after the table with four digits (`syslog0003`), 8 with one digit
+  (`sys_replication_queue2`), and 30 name the table itself. `syslog0003` extends nothing, is read through the
+  Table API like any table, and held 655,964 rows whose class is `syslog` or one of its child tables. The child
+  tables have parts of their own, which extend the parts of the parent. An archive table, `ar_<table>`, extends
+  nothing either. The server closes all of them with the table whose rows they hold, and goes by the list, not by
+  the name, where it can read the list.
 - An update name is compared without regard to case as well: `name=SYS_SCRIPT_<sys_id>` found the captured change
   of `sys_script_<sys_id>`, and the same in `sys_update_version` and `sys_metadata`.
+- What stands before the sys_id at the end of an update name is mostly the table of the record, but not always:
+  `sys_ui_form_sections_<sys_id>` is a record of `sys_ui_form`, and no table is called `sys_ui_form_sections`,
+  while `sys_ui_list_control_<sys_id>` and `sys_dictionary_override_<sys_id>` are records of tables of exactly
+  those names. The server asks the instance whether such a table exists before it takes the name that way.
 - A linked application file (`sys_metadata_link`) is named after the record it links to: its `sys_name`, a field
   it inherits from `sys_metadata`, is the display name of that record, and its payload is the whole record in a
   CDATA section. Of 92 on one instance, 16 linked to records of one table and carried their names.
