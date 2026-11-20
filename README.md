@@ -158,7 +158,7 @@ it.
 
 ## Requests, caching and pauses
 
-- One `sn_query` is one request, plus about seven the first time a table is used: to check its field names, and
+- One `sn_query` is one request, plus five to seven the first time a table is used: to check its field names, and
   to look for rules that filter, archive or rotate it. The other functions cost more: `sn_origin` 4 to 9,
   `sn_dependencies` 25 to 30 (about 15 for one field), `sn_instance` about 50. Every answer carries its count in
   `requests`. At most six requests of one function are in flight at a time.
