@@ -6,12 +6,12 @@ answer; such changes are listed under "Changed".
 ## Unreleased
 
 Found by measuring, not by reading: every function was held against the instance asked directly, and each
-difference was followed up. Two of them were answers this server exists to prevent. After that, two reviews: one
-of these changes, and one of the fixes of 0.4.0. Every claim of theirs was measured before anything was changed,
-and several did not hold: an underscore in a value is no wildcard, and the Aggregate API applies a condition on
-the class of a row wherever the Table API does. Those are noted in `docs/encoded-queries.md`. The gravest finding
-came from following up one of them on the instance: with a table closed, the names of its records came back two
-tables away.
+difference was followed up. Two of them were answers this server exists to prevent. After that, three reviews:
+one of these changes, one of the fixes of 0.4.0, and one of the fixes that followed. Every claim of theirs was
+measured before anything was changed, and several did not hold: an underscore in a value is no wildcard, and the
+Aggregate API applies a condition on the class of a row wherever the Table API does. Those are noted in
+`docs/encoded-queries.md`. The gravest finding came from following up one of them on the instance: with a table
+closed, the names of its records came back two tables away.
 
 ### Security
 
