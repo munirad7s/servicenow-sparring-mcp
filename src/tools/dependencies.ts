@@ -171,6 +171,9 @@ const categorySchema = z.object({
 type Item = z.infer<typeof itemSchema>
 type CategoryResult = z.infer<typeof categorySchema>
 
+/** How many levels below a table its child tables are counted. */
+const DESCENDANT_LEVELS = 9
+
 export function registerDependenciesTool(server: McpServer, ctx: Context) {
   const { sn, dict } = ctx
 
@@ -309,7 +312,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
         categories: z.record(z.string(), categorySchema),
         childTables: z.object({
           direct: z.number().nullable().describe('Tables that extend this table directly.'),
-          descendants: z.number().nullable().describe('Tables that extend it over up to five levels. Configuration on the table reaches all of them.'),
+          descendants: z.number().nullable().describe('Tables that extend it, down to nine levels below. Configuration on the table reaches all of them. A warning says if there are tables at the ninth level, below which nothing was counted.'),
           names: z.array(z.string()).describe('Direct child tables, at most 50.'),
           truncated: z.boolean(),
         }),
@@ -351,12 +354,15 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
           throw validation(`${foreign.join(', ')} ${foreign.length === 1 ? 'is' : 'are'} not available ${field ? 'for a field' : 'without "field"'}. Available: ${available.map((category) => category.key).join(', ')}.`, table)
         }
         const wanted = available.filter((category) => !categories?.length || categories.includes(category.key))
-        const levels = Array.from({ length: 5 }, (_, depth) => `${'super_class.'.repeat(depth + 1)}name=${table}`)
+        // Nine levels are as far as one condition walks. Measured on one instance: of the 1,348 tables below "cmdb",
+        // 95 are more than five levels down, and none more than eight.
+        const levels = Array.from({ length: DESCENDANT_LEVELS }, (_, depth) => `${'super_class.'.repeat(depth + 1)}name=${table}`)
 
-        const [read, children, descendants] = await Promise.all([
+        const [read, children, descendants, deepest] = await Promise.all([
           mapLimit(wanted, 4, async (category) => [category, await readCategory(category, table, chain, field, limit, activeOnly)] as const),
           sn.query<Row>({ table: 'sys_db_object', query: `super_class.name=${table}^ORDERBYname`, fields: ['name'], limit: 50 }).catch(() => null),
           sn.query<Row>({ table: 'sys_db_object', query: levels.join('^OR'), fields: ['sys_id'], limit: 1 }).catch(() => null),
+          sn.query<Row>({ table: 'sys_db_object', query: levels[DESCENDANT_LEVELS - 1], fields: ['sys_id'], limit: 1 }).catch(() => null),
         ])
 
         const nameOf = (category: Category, row: Row) => (category.updateName ? category.updateName(row) : rawOf(row.sys_update_name))
@@ -376,6 +382,9 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
         const hiding = read.filter(([, { result }]) => result.status === 'checked' && result.reason).map(([category]) => category.key)
         if (hiding.length) warnings.push(`Rows are hidden from this account in: ${hiding.join(', ')}.`)
         if (!children) warnings.push('Child tables could not be read.')
+        if (descendants && (deepest?.total ?? deepest?.records.length)) {
+          warnings.push(`Tables extend "${table}" ${DESCENDANT_LEVELS} levels below it, which is as deep as was counted: there can be more below those, and "descendants" does not count them.`)
+        }
         if (info.kind === 'remote_table') warnings.push('This is a remote table: reading its records runs a script on the instance.')
 
         return ok({

@@ -13,6 +13,9 @@ answer; such changes are listed under "Changed".
   of every row it returns at the same moment. With more kinds of records among the rows it would be more, and an
   instance answers a burst with "too many requests". The limit is in the client now, for every request of every
   function: the same call stays at eight and takes no longer.
+- `sn_dependencies` counted the tables below a table five levels deep. Measured: of the 1,348 tables below `cmdb`
+  on one instance, 95 are deeper, and the answer said 1,253. It counts nine levels now, as far as one condition
+  walks, and says so where a table sits at the ninth, below which nothing is counted.
 - Four more rules without a test, found by a fifth run of single-line changes over 30 lines of the configuration,
   the paging and the error texts: the first row of an answer is always shown, however large (reading on would
   otherwise never get past it); a refusal by the instance counts as a login that worked; the roles of the account

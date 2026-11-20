@@ -3134,7 +3134,10 @@ test('sn_upgrade_skips says what it could not establish', async () => {
 const rule = (id: string, collection: string, extra: Data = {}) => ({ sys_id: id, sys_name: `Rule on ${collection}`, sys_update_name: `sys_script_${id}`, collection, active: 'true', when: 'before', ...extra })
 
 test('sn_dependencies lists what is attached, with the query behind every category', async () => {
+  // Nine levels below a table is as deep as its child tables are counted.
+  const NINTH = `${'super_class.'.repeat(9)}name=incident`
   const { answer, sentTo } = await connect([
+    { table: 'sys_db_object', exact: NINTH, rows: [] },
     { table: 'sys_db_object', query: 'super_class.name=incident^ORsuper_class', rows: [{ sys_id: 'x' }], total: 3 },
     { table: 'sys_db_object', query: 'super_class.name=incident', rows: [{ name: 'incident_child' }] },
     ...dictionaryRoutes,
@@ -3156,6 +3159,17 @@ test('sn_dependencies lists what is attached, with the query behind every catego
   assert.equal(data.categories.clientScripts.query, 'table=incident^active=true^NQtableINtask^applies_extended=true^active=true')
   assert.deepEqual(data.categories.accessControls.items[0], { name: 'incident.number', sysId: 'acl1', definedOn: 'incident', active: true, customerUpdate: false, details: { operation: 'read', type: 'record', decision_type: 'Allow If' } })
   assert.deepEqual(data.childTables, { direct: 1, descendants: 3, names: ['incident_child'], truncated: false })
+  // Counted through every level: measured, 95 of the 1,348 tables below one table were more than five levels down.
+  assert.ok(sentTo('sys_db_object').some((sent) => sent.query.endsWith(`^OR${NINTH}`)))
+  assert.doesNotMatch(data.warnings.join(' '), /levels below it/)
+  // Where a table sits at the ninth level, there can be more below it, and the count says so.
+  const deep = await connect([
+    { table: 'sys_db_object', exact: NINTH, rows: [{ sys_id: 'y' }] },
+    { table: 'sys_db_object', query: 'super_class.name=incident^ORsuper_class', rows: [{ sys_id: 'x' }], total: 3 },
+    { table: 'sys_db_object', query: 'super_class.name=incident', rows: [{ name: 'incident_child' }] },
+    ...dictionaryRoutes,
+  ])
+  assert.match((await deep.answer('sn_dependencies', { table: 'incident', categories: ['businessRules'] })).warnings.join(' '), /Tables extend "incident" 9 levels below it.*"descendants" does not count them/)
   assert.ok(data.notCovered.length > 0)
   assert.equal(sentTo('sys_update_xml', 'stats').length, 2, 'one grouped lookup for all items, one for who is on the captured ones')
   assert.equal(sentTo('sys_update_xml', 'stats')[0].query, 'nameINsys_script_a1,sys_script_a2,sys_script_client_c1,sys_security_acl_acl1')
