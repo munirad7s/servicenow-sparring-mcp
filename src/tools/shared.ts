@@ -554,12 +554,13 @@ const RECORD_NAMES = new Map<string, Record<string, NameKey>>([
  * For a field that holds the name of a record of another table: the path of the field that says which record, and
  * what that field holds. "owner" is the table a dot-walked path ends on, where that is known.
  */
-export function recordNameKey(table: string, path: string, column?: Column, owner?: string): (NameKey & { path: string }) | null {
+export function recordNameKey(table: string, path: string, column?: Column, owner?: string, chain?: string[]): (NameKey & { path: string }) | null {
   const field = column ? (column.sourceField ?? column.name) : (path.split('.').at(-1) ?? path)
-  // The table the field is read on, and the table that defines it: a child table inherits fields, and a view
-  // takes its fields from the tables it joins.
+  // The table the field is read on with its parents, and the table that defines it: a child table inherits
+  // fields and what holds for its parents, and a view takes its fields from the tables it joins, which have
+  // parents of their own.
   const plain = path === field && !column?.sourceField
-  const tables = [...(column ? [column.definedOn] : []), ...(plain ? [table] : owner ? [owner] : [])]
+  const tables = [...(column ? [column.definedOn, ...(column.sourceDefinedOn ? [column.sourceDefinedOn] : []), ...(column.sourceChain ?? [])] : []), ...(plain ? (chain ?? [table]) : owner ? [owner] : [])]
   // Reached through a reference without a dictionary entry at hand: the names used for an update name decide.
   // By its own entries only: a field can be named like something every object has.
   const entry = (fields: Record<string, NameKey> | undefined) => (fields && Object.hasOwn(fields, field) ? fields[field] : undefined)
@@ -809,8 +810,12 @@ export interface PropertyValues {
   has(field: string): boolean
   /** Whether the table hands out such values at all, or may. */
   any: boolean
-  /** true where that is told by the name of a field alone, because what the table is could not be read. */
-  guessed?: boolean
+  /**
+   * Set where that is told by the name of a field alone: "no_table" where the instance lists no table of that name
+   * and the account may not read what it joins as a view, "unread" where what the table is, or what a table it
+   * joins extends, could not be read at all.
+   */
+  guessed?: 'no_table' | 'unread'
 }
 
 /**
@@ -822,7 +827,11 @@ export interface PropertyValues {
 export async function propertyValueFields(ctx: Context, table: string): Promise<PropertyValues> {
   if (holdsProperties(table)) return { has: (field) => field === 'value', any: true }
   const shape = await shapeOf(ctx, table)
-  if (shape.kind === 'hidden_view') return { has: (field) => NAMED_LIKE_A_VALUE.test(field), any: true, guessed: true }
+  // The instance lists no table of that name, and what it joins as a view cannot be read: a view of system
+  // properties is not ruled out. An account that cannot read the table of tables at all knows that of no name:
+  // there a field called "value" is read as it is, or the text of every journal entry would be withheld. A table
+  // below sys_properties is then not known as one (measured: an instance of 10,806 tables has none).
+  if (shape.kind === 'hidden_view') return { has: (field) => NAMED_LIKE_A_VALUE.test(field), any: true, guessed: 'no_table' }
   const info = shape.info
   // A table below the table of system properties hands out the value under its own name.
   if (info?.chain.some(holdsProperties)) return { has: (field) => field === 'value', any: true }
@@ -838,7 +847,7 @@ export async function propertyValueFields(ctx: Context, table: string): Promise<
       guessed = true
     }
   }
-  return { has: (field) => names.has(field), any: names.size > 0, ...(guessed ? { guessed } : {}) }
+  return { has: (field) => names.has(field), any: names.size > 0, ...(guessed ? { guessed: 'unread' as const } : {}) }
 }
 
 export interface Shape {
@@ -1094,7 +1103,8 @@ async function keepSecretsOutOfReach(
 
   const compared = new Set([...parsed.otherFields, ...parsed.conditions.filter((condition) => !asksIfFilled(condition)).map(({ field }) => field)])
   if (ctx.sn.restricted) {
-    const named = [...compared].find((field) => recordNameKey(table, field, resolved.get(field), owners.get(field)?.table))
+    const chain = (await shapeOf(ctx, table)).info?.chain
+    const named = [...compared].find((field) => recordNameKey(table, field, resolved.get(field), owners.get(field)?.table, chain))
     if (named) {
       throw new ServiceNowError(
         `"${named}" holds the readable names of records of other tables, and tables are closed on this machine. It can be read, without the names of records in closed tables, ` +
@@ -1124,7 +1134,8 @@ async function keepSecretsOutOfReach(
       // Refused because of a closed table, so it is reported, and written to the audit log, as that.
       const closed = (why: string) => new ServiceNowError(`A text search looks into the fields of "${table}" without naming them, and ${why}. Tables are closed on this machine. Filter on named fields instead. Nothing was sent.`, 'blocked', table)
       // Some tables carry the names of records of other tables in a field of their own, and a search reads it.
-      const own = all.find((column) => recordNameKey(table, column.name, column))
+      const ownChain = (await shapeOf(ctx, table)).info?.chain
+      const own = all.find((column) => recordNameKey(table, column.name, column, undefined, ownChain))
       if (own) throw closed(`"${own.name}" holds the readable names of records of other tables, which a search would find out by trying`)
       // The name of a record behind a reference is found by the search as well, and such a table can be behind one.
       const named = all.find((column) => column.reference && forTable(RECORD_NAMES, column.reference))
@@ -1164,7 +1175,9 @@ async function keepSecretsOutOfReach(
     else if (valueFields.has(field) || mayBePropertyValue(column, field)) {
       throw validation(
         (valueFields.guessed && !isPropertyValue(column)
-          ? `"${field}" can be the value of a system property: the instance lists "${table}" as no table, and which tables it joins as a database view this account may not read. Some properties hold secrets. `
+          ? valueFields.guessed === 'no_table'
+            ? `"${field}" can be the value of a system property: the instance lists "${table}" as no table, and which tables it joins as a database view this account may not read. Some properties hold secrets. `
+            : `"${field}" can be the value of a system property: what "${table}" is, or what it is built on, could not be read, so a table below sys_properties or a view of it is not ruled out. Some properties hold secrets. `
           : `"${field}" is the value of a system property, and some properties hold secrets. `) +
           'Through a database view or a reference it cannot be compared or sorted by, because the properties that hold secrets cannot be left out there. Query sys_properties itself. Nothing was sent.',
         table,

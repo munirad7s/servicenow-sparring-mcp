@@ -5,6 +5,28 @@ answer; such changes are listed under "Changed".
 
 ## Unreleased
 
+### Security
+
+- **A rule for a table did not hold for a table below it, or for a view over one.** What keeps back the name of a
+  record of a closed table in a captured change, a version or a deleted file was looked up by the table a field is
+  read on. A table that extends one of those, and a database view that joins such a table, were read without it.
+  The rules are looked up along the parents now, and the tables below a table of copies are left out of a read
+  through a table above. Measured on the test instance: none of the eight tables with such a rule has a table
+  below it, so this closes a door no real answer went through.
+- **A document id that a table shows as its name was taken for a reference to one table.** A document id points to
+  a record of any table. 238 of 1,721 dictionary entries of that type name a table all the same, and the server
+  read that as "shows a record of that table": with that table open, the name came through. A document id counts
+  as pointing anywhere now. An entry that comes without its type is no longer read as a plain field either; what
+  such a table shows counts as untold.
+- **A part of a rotated table that the list does not know yet.** Such a part was told by cutting the digits off
+  its name. The name is held against the names of the rotated tables now, and the rotations themselves are read
+  as well: 3 of 49 on the test instance have no part yet, so their first part would have been a table nobody knew
+  as one.
+- A row of the table of tables that came without a parent field it was asked for counted as a table without that
+  parent. It counts as unread now, as a row without the table name always did.
+- A view that joins a table whose place could not be read: its fields named like the value of a system property
+  are withheld by name, as they already were for a view the instance does not list.
+
 ### Changed
 
 - With tables closed, a first read with display values costs fewer requests. 0.4.1 asked about each table

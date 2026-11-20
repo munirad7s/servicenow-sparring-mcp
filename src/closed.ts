@@ -164,12 +164,12 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     // A part of a rotated table, or the archive of a table, holds the rows of that table and of its child tables.
     // Which tables are parts of a rotated one, the instance says in a list. Where that list cannot be read, or
     // is closed on this machine, the name of a table has to do.
-    const parts = sn.allows('sys_table_rotation_schedule') && sn.allows('sys_table_rotation') ? await dict.rotatedParts() : null
+    const listed = sn.allows('sys_table_rotation_schedule') && sn.allows('sys_table_rotation') ? await dict.rotatedParts() : null
     // The list is remembered for a while, and a part that the instance creates in between is not on it. So a name
-    // that reads like a part of a table the list knows as rotated counts as one, on the list or not.
-    const rotated = new Set(parts?.values())
-    const likeAPart = (name: string) => partOfByName(name).filter((base) => base !== undefined && rotated.has(base))
-    const basesOf = (name: string) => tableNames([archiveOf(name), ...(parts ? [parts.get(name), ...likeAPart(name)] : partOfByName(name))], name)
+    // that is the name of a rotated table with digits behind it counts as a part of it, on the list or not. Read
+    // from the names of the rotated tables, not cut off the name: the name of a rotated table can end in a digit.
+    const likeAPart = (name: string) => [...(listed?.rotated ?? [])].filter((base) => name.length > base.length && name.startsWith(base) && /^\d+$/.test(name.slice(base.length)))
+    const basesOf = (name: string) => tableNames([archiveOf(name), ...(listed ? [listed.parts.get(name), ...likeAPart(name)] : partOfByName(name))], name)
     for (const [name, base] of info.chain.flatMap((name) => basesOf(name).map((base) => [name, base]))) {
       // A table the deny list names counts whether or not the instance still has it: its archive can outlive it.
       if (sn.denies(base)) return `"${name}" holds rows of ${base} (a part of a rotated table, or its archive), and "${base}" is closed on this machine`
@@ -269,7 +269,14 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     // Where the tables below cannot be listed, only the classes on the list are let through: that is all that can
     // be said, and a class on the list with a closed parent in between cannot be told. So nothing is sent.
     if (!listed) throw blocked(`Tables are closed on this machine, and the tables below "${table}" could not be listed, so it cannot be told which of its rows belong to a closed one.`, table)
-    const closed = [...new Set([...(await deniedBelow(table)), ...listed.byParent, ...(COPIES_BELOW.get(table) ?? [])])].sort()
+    // A table below a table of copies holds copies as well.
+    const copies: string[] = []
+    for (const copy of COPIES_BELOW.get(table) ?? []) {
+      const below = await dict.childTables(copy)
+      if (!below) throw blocked(`Tables are closed on this machine, and the tables below "${copy}" could not be listed, so it cannot be told which rows of "${table}" carry the name of a record of another table.`, table)
+      copies.push(copy, ...below.keys())
+    }
+    const closed = [...new Set([...(await deniedBelow(table)), ...listed.byParent, ...copies])].sort()
     if (closed.length) parts.push(`${field}NOT IN${closed.join(',')}^OR${field}ISEMPTY`)
     if (listed.unlisted) parts.push(sn.openClasses(field)!)
     return parts.length ? parts.join('^') : null

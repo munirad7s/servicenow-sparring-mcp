@@ -31,6 +31,8 @@ export interface Column {
    * "definedOn" is the table the view joins, which is what decides what the field holds.
    */
   sourceDefinedOn?: string
+  /** For a field of a database view: the table the view joins and its parents, nearest first. */
+  sourceChain?: string[]
   /**
    * For a field of a database view: true where the view lists the fields it takes from the joined table and this
    * is not one of them, or where that list could not be read. Measured: the instance drops a condition on such a
@@ -152,6 +154,14 @@ const MAX_KNOWN_NAMES = 5_000
 const NAMED_AS_DISPLAY = ['name', 'u_name', 'number', 'u_number']
 /** Kinds of fields that show the name of another record. */
 const POINTS_ELSEWHERE = new Set(['reference', 'glide_list', 'document_id'])
+/**
+ * The table a display field points into. A document id points to a record of any table, whatever its dictionary
+ * entry names: measured, 238 of 1,721 such entries name a table all the same.
+ */
+const shownThrough = (row: Record<string, string>): { field: string; reference: string | null } => ({
+  field: String(row.element),
+  reference: row.internal_type !== 'document_id' && isTableName(row.reference) ? row.reference : null,
+})
 
 /**
  * The parents of a row of sys_db_object as they were asked for, nearest first. null if the row cannot be used: it
@@ -164,6 +174,8 @@ function parentsOf(row: Record<string, unknown>): string[] | null {
   const parents: string[] = []
   let ended = false
   for (const field of PARENT_FIELDS) {
+    // Asked for and not in the row: that is no "has no parent there", and a chain cut short would pass for whole.
+    if (!(field in row)) return null
     const parent = row[field]
     const filled = typeof parent === 'string' && parent !== ''
     if (filled && (ended || !isTableName(parent))) return null
@@ -206,7 +218,7 @@ export class Dictionary {
   private readonly closedSets = new Map<string, Entry<Map<string, string[]>>>()
   private readonly parentChecks = new Map<string, Entry<boolean>>()
   private readonly knownNames = new Map<string, { table: boolean; at: number }>()
-  private readonly partLists = new Map<string, Entry<Map<string, string> | null>>()
+  private readonly partLists = new Map<string, Entry<{ parts: Map<string, string>; rotated: Set<string> } | null>>()
   private readonly shownSets = new Map<string, Entry<Array<{ field: string; reference: string | null }> | null>>()
 
   /**
@@ -644,18 +656,25 @@ export class Dictionary {
    * named after the table with four digits, 8 with one digit, and 30 name the table itself. null where the list
    * cannot be read completely: the caller then has to go by the name of a table.
    */
-  rotatedParts(): Promise<Map<string, string> | null> {
+  rotatedParts(): Promise<{ parts: Map<string, string>; rotated: Set<string> } | null> {
     return this.cached(this.partLists, 'parts', async () => {
       const read = await this.sn.all<Record<string, string>>({ table: 'sys_table_rotation_schedule', fields: ['table_name', 'name.name'] }, 5_000).catch(unlessNoConnection(null))
       if (!read || !read.complete || (read.total !== null && read.records.length < read.total)) return null
       const parts = new Map<string, string>()
+      // Every table the list knows as rotated, also one whose only entry names the table itself.
+      const rotated = new Set<string>()
       for (const row of read.records) {
         // An entry without one of the two names is one this account is not shown in full: then the list says
         // nothing about the part it stands for.
         if (!isTableName(row.table_name) || !isTableName(row['name.name'])) return null
+        rotated.add(row['name.name'])
         if (row.table_name !== row['name.name']) parts.set(row.table_name, row['name.name'])
       }
-      return parts
+      // A rotation that has no part yet is not on that list (measured: 3 of 49). Its first part would be a table
+      // nobody knows as one, so the rotations themselves are read as well. Where they cannot be, the list has to do.
+      const defined = await this.sn.all<Record<string, string>>({ table: 'sys_table_rotation', fields: ['name'] }, 5_000).catch(unlessNoConnection(null))
+      for (const row of defined?.records ?? []) if (isTableName(row.name)) rotated.add(row.name)
+      return { parts, rotated }
     })
   }
 
@@ -681,7 +700,9 @@ export class Dictionary {
       if (!entries.complete || (entries.total !== null && entries.records.length < entries.total)) return null
       const moved = await this.gated.query<Record<string, string>>({ table: 'sys_dictionary_override', query: `nameIN${chain}^display_override=true`, fields: ['sys_id'], limit: 1 }).catch(unlessNoConnection(null))
       if (!moved || moved.total !== 0 || moved.records.length) return null
-      return entries.records.filter((row) => POINTS_ELSEWHERE.has(row.internal_type)).map((row) => ({ field: String(row.element), reference: isTableName(row.reference) ? row.reference : null }))
+      // An entry that came without its type: what such a field shows cannot be told.
+      if (entries.records.some((row) => !row.internal_type)) return null
+      return entries.records.filter((row) => POINTS_ELSEWHERE.has(row.internal_type)).map(shownThrough)
     })
   }
 
@@ -711,9 +732,9 @@ export class Dictionary {
       if (!overrides.complete || overrides.total === null || overrides.records.length < overrides.total) return
       for (const row of overrides.records) moved.add(String(row.name))
       for (const row of entries.records) {
-        // A row that does not say which table it is of cannot be placed.
-        if (!group.includes(row.name)) return
-        if (POINTS_ELSEWHERE.has(row.internal_type)) marked.set(row.name, [...(marked.get(row.name) ?? []), { field: String(row.element), reference: isTableName(row.reference) ? row.reference : null }])
+        // A row that does not say which table it is of, or what kind of field it is, cannot be used.
+        if (!group.includes(row.name) || !row.internal_type) return
+        if (POINTS_ELSEWHERE.has(row.internal_type)) marked.set(row.name, [...(marked.get(row.name) ?? []), shownThrough(row)])
       }
     }
     for (const info of infos) {
@@ -1030,10 +1051,12 @@ export class Dictionary {
         const joined = await this.table(member.table)
         const set = joined && joined.kind !== 'database_view' ? await this.columnSet(member.table, maxAgeMs) : null
         if (!set || set.partial) partial = true
+        // Looked up in a set: a list of thousands of fields against thousands of columns was a comparison for each pair.
+        const taken = member.fields ? new Set(member.fields) : member.fields
         for (const column of set?.columns.values() ?? []) {
-          const outside = member.fields === null || (member.fields !== undefined && !member.fields.includes(column.name))
-          const mark = outside ? { outsideList: true, ...(member.fields === null ? { listUnread: true } : {}) } : {}
-          columns.set(`${member.prefix}_${column.name}`, { ...column, name: `${member.prefix}_${column.name}`, definedOn: member.table, sourceField: column.name, sourceDefinedOn: column.definedOn, ...mark })
+          const outside = taken === null || (taken !== undefined && !taken.has(column.name))
+          const mark = outside ? { outsideList: true, ...(taken === null ? { listUnread: true } : {}) } : {}
+          columns.set(`${member.prefix}_${column.name}`, { ...column, name: `${member.prefix}_${column.name}`, definedOn: member.table, sourceField: column.name, sourceDefinedOn: column.definedOn, sourceChain: joined?.chain ?? [member.table], ...mark })
         }
       }
       return { columns, partial }

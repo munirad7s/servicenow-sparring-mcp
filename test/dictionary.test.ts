@@ -568,6 +568,8 @@ test('what the name look-up says about a table it finds is kept, where the row s
         row('sys_script', 'sys_metadata'),
         // Came without the fields asked for: it says less than it seems to.
         { name: 'u_bare' },
+        // Its parents were asked for and are not in the row: that is no "has no parent".
+        { name: 'u_cut', label: 'Cut', scriptable_table: 'false' },
         // Eight parents: one request sees no further, so the chain may go on.
         row('u_deep', ...deep),
         // A parent that comes twice is no chain.
@@ -575,9 +577,10 @@ test('what the name look-up says about a table it finds is kept, where the row s
       ],
     },
     { table: 'sys_db_object', query: 'name=u_bare', rows: [row('u_bare', 'task')] },
+    { table: 'sys_db_object', query: 'name=u_cut', rows: [row('u_cut', 'u_secret')] },
   ])
   const dict = new Dictionary(sn)
-  assert.deepEqual([...(await dict.knownTables(['sys_script', 'u_bare', 'u_deep', 'u_ring', 'u_none']))].sort(), ['sys_script', 'u_bare', 'u_deep', 'u_ring'])
+  assert.deepEqual([...(await dict.knownTables(['sys_script', 'u_bare', 'u_cut', 'u_deep', 'u_ring', 'u_none']))].sort(), ['sys_script', 'u_bare', 'u_cut', 'u_deep', 'u_ring'])
   assert.equal(calls.length, 1)
   // Kept: what the table extends is known without another request.
   assert.deepEqual((await dict.table('sys_script'))?.chain, ['sys_script', 'sys_metadata'])
@@ -585,6 +588,8 @@ test('what the name look-up says about a table it finds is kept, where the row s
   // Not kept: the table is asked for by itself.
   assert.deepEqual((await dict.table('u_bare'))?.chain, ['u_bare', 'task'])
   assert.equal(calls.length, 2)
+  assert.deepEqual((await dict.table('u_cut'))?.chain, ['u_cut', 'u_secret'])
+  assert.equal(calls.length, 3)
   for (const name of ['u_deep', 'u_ring']) {
     const sentBefore: number = calls.length
     await dict.table(name).catch(() => null)

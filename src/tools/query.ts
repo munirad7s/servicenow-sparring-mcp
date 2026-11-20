@@ -72,7 +72,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
       if (value && typeof value === 'object' && !Array.isArray(value)) return Object.fromEntries(Object.entries(value).map(([part, text]) => [part, scrub(text)])) as T
       return value
     }
-    const propertyValues = table === 'sys_properties' ? { has: () => false, guessed: false } : await propertyValueFields(ctx, table)
+    const propertyValues = table === 'sys_properties' ? { has: () => false, guessed: undefined } : await propertyValueFields(ctx, table)
     const restricted = ctx.sn.restricted
     // What the name stands for: a table, a view with the tables it joins, or a view whose definition this account
     // may not read. A field without a dictionary entry at hand is then judged by the definition of the view, or
@@ -96,7 +96,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
 
     // Which tables the update names of this page begin with is asked for the page as a whole.
     const beside = (row: Row) => Object.keys(row).flatMap((key) => {
-      const nameOf = recordNameKey(table, key, describe(key), owners.get(key)?.table)
+      const nameOf = recordNameKey(table, key, describe(key), owners.get(key)?.table, shape.info?.chain)
       return nameOf?.holds === 'update_name' && nameOf.path in row ? [rawOf(row[nameOf.path])] : []
     })
     const named = restricted ? await knowRecordTables(ctx, rows.flatMap(beside)) : undefined
@@ -114,7 +114,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         const carries = recordPayload(table, key, column) ?? (guessed(key, NAMED_LIKE_A_PAYLOAD) ? (key.endsWith('_diff') ? 'diff' : 'payload') : null)
         // Named like the name of a record of another table, on something that could not be read: not told which.
         const unknownName = guessed(key, /(?:^|_)(?:target_name|record_name)$/) ? ({ key: '', path: '', holds: 'untold' } as const) : null
-        const nameOf = restricted ? (recordNameKey(table, key, column, owners.get(key)?.table) ?? unknownName) : null
+        const nameOf = restricted ? (recordNameKey(table, key, column, owners.get(key)?.table, shape.info?.chain) ?? unknownName) : null
 
         if (carries && filled(value)) {
           if (carries === 'diff') {
@@ -165,7 +165,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     if (byName.size) warnings.push(`Withheld because the type of the field could not be read and its name suggests a secret: ${list(byName)}.`)
     if (byGuess.size) {
       warnings.push(
-        `Withheld because it could not be read which tables this database view joins, and a field of this name can be the value of a system property, some of which hold secrets: ${list(byGuess)}.`,
+        `Withheld because it could not be read what "${table}" is or what it is built on, and a field of this name can be the value of a system property, some of which hold secrets: ${list(byGuess)}.`,
       )
     }
     if (!complete) {
@@ -273,7 +273,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     if (JOURNAL_TYPES.has(column?.type ?? '')) {
       throw validation(`"${groupBy}" is a journal field. Its entries are stored in sys_journal_field, and the field itself holds nothing to count by. Count there instead: element=${column?.sourceField ?? groupBy.split('.').at(-1)}, grouped by element_id.`, table)
     }
-    if (ctx.sn.restricted && recordNameKey(table, groupBy, column, guard.owners.get(groupBy)?.table)) {
+    if (ctx.sn.restricted && recordNameKey(table, groupBy, column, guard.owners.get(groupBy)?.table, (await shapeOf(ctx, table)).info?.chain)) {
       throw new ServiceNowError(`"${groupBy}" holds the readable names of records of other tables, and tables are closed on this machine: its values are not listed as groups. Nothing was sent.`, 'blocked', table)
     }
 
@@ -392,8 +392,9 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
 
         // The type of a system property decides whether its value is a secret, and without a type its name does: both are
         // read along. So is the update name beside the readable name of a record, which says whether its table is closed.
+        const chain = ctx.sn.restricted ? (await shapeOf(ctx, table)).info?.chain : undefined
         const beside = ctx.sn.restricted
-          ? (fields ?? []).map((field) => recordNameKey(table, field, guard.resolved.get(field), guard.owners.get(field)?.table)?.path).filter((key): key is string => Boolean(key))
+          ? (fields ?? []).map((field) => recordNameKey(table, field, guard.resolved.get(field), guard.owners.get(field)?.table, chain)?.path).filter((key): key is string => Boolean(key))
           : []
         const readAlong = [...new Set([...(table === 'sys_properties' && fields?.includes('value') ? ['type', 'name'] : []), ...beside])].filter((field) => !fields?.includes(field))
         const stableBy = guard.parsed.sorts.length ? await rowKeys(table, warnings) : undefined

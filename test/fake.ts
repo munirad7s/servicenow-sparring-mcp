@@ -258,7 +258,7 @@ export const dictionaryRoutes: Route[] = [
   { table: 'sys_db_object', query: 'name=sys_user', rows: [tableRow('sys_user', 'User')] },
   // The tables the server looks things up in for its own checks. While tables are closed on the machine, a table
   // the instance does not list is not asked for, so the stand-in lists them as an instance does.
-  ...['sys_script', 'sys_archive', 'sys_table_rotation', 'sys_properties', 'sys_choice', 'sys_documentation', 'sys_dictionary_override'].flatMap((name): Route[] => [
+  ...['sys_script', 'sys_archive', 'sys_table_rotation', 'sys_properties', 'sys_choice', 'sys_documentation', 'sys_dictionary_override', 'sys_metadata_delete', 'sys_metadata_link'].flatMap((name): Route[] => [
     { table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] },
     // Asked which tables are below it, each answers with itself and no child table.
     { table: 'sys_db_object', query: `^ORname=${name}`, rows: [tableRow(name, name)] },

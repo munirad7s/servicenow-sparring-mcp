@@ -1341,6 +1341,40 @@ test('which tables are parts of a rotated one is read from the list of the insta
   assert.equal(walled.sentTo('sys_table_rotation_schedule').length, 0)
 })
 
+test('a part that is not on the list yet is told by the names of the rotated tables', async () => {
+  const one = (name: string): Route => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] })
+  const names = ['u_queue2', 'u_queue20001', 'u_queue20002', 'u_queue22', 'u_queue3', 'u_log', 'u_log0000', 'u_log_notes', 'u_queue', 'u_queue9']
+  const world = (schedule: Data[], rotations: Data[] = []): Route[] => [
+    closedTables(tableRow('u_queue2', 'Private queue'), tableRow('u_log', 'Log')),
+    { table: 'sys_table_rotation_schedule', rows: schedule },
+    { table: 'sys_table_rotation', rows: rotations },
+    ...names.map(one),
+    ...names.map((name): Route => ({ table: 'sys_dictionary', query: `nameIN${name}^`, rows: [column(name, 'sys_id', 'GUID')] })),
+    ...names.map((name): Route => ({ table: name, rows: [{ sys_id: '1' }] })),
+    ...dictionaryRoutes,
+  ]
+  const closed = { tables: { allow: [], deny: ['u_queue2', 'u_log'] } }
+  // The name of the rotated table ends in a digit. Cut off the name of a part, the table would be "u_queue".
+  const digits = await connect(world([{ table_name: 'u_queue2', 'name.name': 'u_queue2' }, { table_name: 'u_queue20001', 'name.name': 'u_queue2' }]), closed)
+  for (const part of ['u_queue20002', 'u_queue22']) {
+    const refused = await digits.call('sn_query', { table: part, fields: ['sys_id'] })
+    assert.equal(refused.data.error, 'blocked', part)
+    assert.match(refused.data.message, new RegExp(`"${part}" holds rows of u_queue2`))
+  }
+  // Another table whose name only begins the same way is a table of its own.
+  assert.equal((await digits.answer('sn_query', { table: 'u_queue3', fields: ['sys_id'] })).returned, 1)
+  assert.equal((await digits.answer('sn_query', { table: 'u_queue9', fields: ['sys_id'] })).returned, 1)
+
+  // A rotated table whose only entry on the list names the table itself, and one that has no entry yet and is
+  // known from the rotations alone (measured: 3 of 49): the first part of each is a part.
+  const first = await connect(world([{ table_name: 'u_queue2', 'name.name': 'u_queue2' }], [{ name: 'u_log' }]), closed)
+  assert.equal((await first.call('sn_query', { table: 'u_queue20001', fields: ['sys_id'] })).data.error, 'blocked')
+  assert.equal((await first.call('sn_query', { table: 'u_log0000', fields: ['sys_id'] })).data.error, 'blocked')
+  assert.equal((await first.answer('sn_query', { table: 'u_queue3', fields: ['sys_id'] })).returned, 1)
+  // Only digits behind the name make a part: a table that begins with the name of a rotated one is a table of its own.
+  assert.equal((await first.answer('sn_query', { table: 'u_log_notes', fields: ['sys_id'] })).returned, 1)
+})
+
 test('the archive of a table the deny list names is closed, also where the instance no longer has the table', async () => {
   const routes: Route[] = [
     closedTables(),
@@ -2132,6 +2166,111 @@ test('what the tables behind the references of a row show as their names is read
   const [withVeiled] = (await veiled.answer('sn_query', wanted)).records
   assert.equal(withVeiled.u_tc, ID)
   assert.deepEqual(withVeiled.u_ta, { value: ID, display: 'Name in u_ta' })
+})
+
+/** One open table with a reference into another: what the second shows as its name decides whether the name comes back. */
+async function referenceDisplayCase(target: string, targetColumns: Data[], options: { parents?: string[]; extra?: Route[]; closed?: string; shown?: string } = {}) {
+  const { parents = [], extra = [], closed = 'sys_user', shown = 'Abel Tuter' } = options
+  const { answer } = await connect(
+    [
+      ...extra,
+      closedTables(tableRow(closed, closed)),
+      { table: 'sys_db_object', exact: 'name=u_holder', rows: [tableRow('u_holder', 'Holder')] },
+      { table: 'sys_db_object', exact: `name=${target}`, rows: [tableRow(target, target, ...parents)] },
+      ...parents.map((name): Route => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] })),
+      { table: 'sys_dictionary', query: 'nameINu_holder', rows: [column('u_holder', 'u_ref', 'reference', target)] },
+      { table: 'sys_dictionary', query: `nameIN${[target, ...parents].join(',')}`, rows: targetColumns },
+      ...dictionaryRoutes,
+      { table: 'u_holder', rows: [{ u_ref: labelled(ID, shown) }] },
+    ],
+    { tables: { allow: [], deny: [closed] } },
+  )
+  return answer('sn_query', { table: 'u_holder', fields: ['u_ref'], displayValue: true })
+}
+
+test('what a table shows as its name is read from every entry that can say so', async () => {
+  const shows = (table: string, field: string, type: string, target: string) => column(table, field, type, target, { display: 'true' })
+  const hidden = [{ u_ref: ID }]
+  // Inherited from a parent table.
+  assert.deepEqual((await referenceDisplayCase('u_child', [shows('u_parent', 'u_owner', 'reference', 'sys_user')], { parents: ['u_parent'] })).records, hidden)
+  // A list of closed records as the name of a row.
+  assert.deepEqual((await referenceDisplayCase('u_people', [shows('u_people', 'u_users', 'glide_list', 'sys_user')])).records, hidden)
+  // Nothing marked: the platform takes a field by its name, and each of those names can be a reference.
+  for (const field of ['name', 'u_name', 'number', 'u_number']) {
+    assert.deepEqual((await referenceDisplayCase('u_fallback', [column('u_fallback', field, 'reference', 'sys_user')])).records, hidden, field)
+  }
+  // A document id names a record of any table, whatever its entry names as its table. Measured: 238 of 1,721 name one.
+  assert.deepEqual((await referenceDisplayCase('u_doc', [shows('u_doc', 'u_document', 'document_id', 'incident')])).records, hidden)
+  // An entry that comes without its type: what such a field shows cannot be told.
+  const untyped = await referenceDisplayCase('u_untyped', [{ ...shows('u_untyped', 'u_owner', 'reference', 'sys_user'), internal_type: '' }])
+  assert.deepEqual(untyped.records, hidden)
+  assert.match(untyped.warnings.join(' '), /what a row of that table shows as its name/)
+  // A reference to an open table, and a text of its own: the name stays.
+  assert.deepEqual((await referenceDisplayCase('u_open', [shows('u_open', 'u_group', 'reference', 'incident')])).records, [{ u_ref: { value: ID, display: 'Abel Tuter' } }])
+  assert.deepEqual((await referenceDisplayCase('u_text', [shows('u_text', 'u_title', 'string', '')])).records, [{ u_ref: { value: ID, display: 'Abel Tuter' } }])
+})
+
+test('a reference into each table that is named after other records comes without the name', async () => {
+  const hidden = [{ u_ref: ID }]
+  const own = (table: string, field: string) => [column(table, field, 'string', '', { display: 'true' })]
+  assert.deepEqual((await referenceDisplayCase('sys_archive_log', own('sys_archive_log', 'display_value'))).records, hidden)
+  assert.deepEqual((await referenceDisplayCase('sys_audit_delete', own('sys_audit_delete', 'display_value'))).records, hidden)
+  assert.deepEqual((await referenceDisplayCase('sys_metadata_delete', own('sys_metadata', 'sys_name'), { parents: ['sys_metadata'] })).records, hidden)
+  assert.deepEqual((await referenceDisplayCase('sys_metadata_link', own('sys_metadata', 'sys_name'), { parents: ['sys_metadata'] })).records, hidden)
+  // What one scope may use of another shows the name of that thing: a script include, where those are closed.
+  assert.deepEqual((await referenceDisplayCase('sys_scope_privilege', own('sys_scope_privilege', 'target_name'), { closed: 'sys_script_include', shown: 'PayrollUtils' })).records, hidden)
+})
+
+test('a rule for a table holds for a view over a table below it, and for the tables below a table of copies', async () => {
+  // A view takes the field of a table that inherits it: the rule belongs to the table that defines the field.
+  const MEMBER = 'a912a8565dd49ca9df78529b71e12081'
+  const view: Route[] = [
+    closedTables(tableRow('sys_user', 'User')),
+    { table: 'sys_db_object', exact: 'name=v_deleted', rows: [] },
+    { table: 'sys_db_view', query: 'name=v_deleted', rows: [{ sys_id: 'e'.repeat(32), name: 'v_deleted', label: 'Deleted' }] },
+    { table: 'sys_db_view_table', query: `view=${'e'.repeat(32)}`, rows: [{ sys_id: MEMBER, table: 'u_deleted', variable_prefix: 'd' }] },
+    { table: 'sys_db_object', exact: 'name=u_deleted', rows: [tableRow('u_deleted', 'Deleted', 'sys_audit_delete')] },
+    { table: 'sys_db_object', exact: 'name=sys_audit_delete', rows: [tableRow('sys_audit_delete', 'Deleted Record')] },
+    { table: 'sys_dictionary', query: 'nameINu_deleted,sys_audit_delete', rows: [column('sys_audit_delete', 'display_value'), column('sys_audit_delete', 'tablename'), column('u_deleted', 'u_note')] },
+    ...dictionaryRoutes,
+    { table: 'v_deleted', rows: [{ d_display_value: 'Abel Tuter', d_tablename: 'sys_user', d_u_note: 'n' }, { d_display_value: 'INC0000001', d_tablename: 'incident', d_u_note: 'm' }] },
+  ]
+  const noUsers = { tables: { allow: [], deny: ['sys_user'] } }
+  const closed = await connect(view, noUsers)
+  const read = await closed.answer('sn_query', { table: 'v_deleted', fields: ['d_display_value', 'd_u_note'] })
+  assert.deepEqual(read.records, [{ d_display_value: '[withheld: the record is in a table closed on this machine]', d_u_note: 'n' }, { d_display_value: 'INC0000001', d_u_note: 'm' }])
+  for (const args of [{ groupBy: 'd_display_value' }, { query: 'd_display_valueSTARTSWITHAbel' }, { query: 'ORDERBYd_display_value' }]) {
+    assert.equal((await closed.call('sn_query', { table: 'v_deleted', ...args })).data.error, 'blocked', JSON.stringify(args))
+  }
+
+  // The table of application files answers without the rows of the tables of copies, and without those of a
+  // table below one of them: its rows carry the names of other records in the same way.
+  const files: Route[] = [
+    closedTables(tableRow('sys_user', 'User')),
+    { table: 'sys_db_object', query: '^ORname=sys_metadata_delete', rows: [tableRow('sys_metadata_delete', 'Deleted file', 'sys_metadata'), tableRow('u_deleted_file', 'Deleted file of ours', 'sys_metadata_delete', 'sys_metadata')] },
+    { table: 'sys_db_object', exact: 'name=sys_metadata', rows: [tableRow('sys_metadata', 'Application File')] },
+    { table: 'sys_dictionary', query: 'nameINsys_metadata', rows: [column('sys_metadata', 'sys_name'), column('sys_metadata', 'sys_class_name', 'sys_class_name')] },
+    ...dictionaryRoutes,
+    { table: 'sys_metadata', rows: [{ sys_name: 'Example rule', sys_class_name: 'sys_script' }] },
+  ]
+  const parent = await connect(files, noUsers)
+  await parent.answer('sn_query', { table: 'sys_metadata', fields: ['sys_name'] })
+  assert.equal(parent.sentTo('sys_metadata')[0].query, 'sys_class_nameNOT INsys_metadata_delete,sys_metadata_link,u_deleted_file^ORsys_class_nameISEMPTY')
+  // Read by itself, a table below a table of copies is judged like that table: by the update name of the record.
+  const child: Route[] = [
+    closedTables(tableRow('sys_user', 'User')),
+    { table: 'sys_db_object', exact: 'name=u_deleted_file', rows: [tableRow('u_deleted_file', 'Deleted file of ours', 'sys_metadata_delete', 'sys_metadata')] },
+    { table: 'sys_dictionary', query: 'nameINu_deleted_file,sys_metadata_delete,sys_metadata', rows: [column('sys_metadata', 'sys_name'), column('sys_metadata', 'sys_update_name')] },
+    ...dictionaryRoutes,
+    { table: 'u_deleted_file', rows: [{ sys_name: 'Abel Tuter', sys_update_name: `sys_user_${ID}` }, { sys_name: 'Example rule', sys_update_name: NAME }] },
+  ]
+  const below = await connect(child, noUsers)
+  assert.deepEqual((await below.answer('sn_query', { table: 'u_deleted_file', fields: ['sys_name'] })).records.map((row: Data) => row.sys_name), ['[withheld: the record is in a table closed on this machine]', 'Example rule'])
+  assert.equal((await below.call('sn_query', { table: 'u_deleted_file', query: 'sys_nameSTARTSWITHAbel' })).data.error, 'blocked')
+
+  // Where the tables below a table of copies cannot be listed, the table above is not read.
+  const unlisted = await connect([{ table: 'sys_db_object', query: '^ORname=sys_metadata_delete', rows: [] }, ...files.filter((route) => route.query !== '^ORname=sys_metadata_delete')], noUsers)
+  assert.equal((await unlisted.call('sn_query', { table: 'sys_metadata', fields: ['sys_name'] })).data.error, 'blocked')
 })
 
 test('a text search is not a way to probe a field that holds a secret', async () => {
@@ -3191,7 +3330,7 @@ test('on something that could not be read as a table or a view, a field is judge
     assert.match(data.message, /holds whole records as text/, JSON.stringify(args))
   }
   // The answer says why the value was withheld: not because it is known to be a secret.
-  assert.match((await answer('sn_query', { table: 'v_props' })).warnings.join(' '), /could not be read which tables this database view joins, and a field of this name can be the value of a system property.*: prop_value\./)
+  assert.match((await answer('sn_query', { table: 'v_props' })).warnings.join(' '), /could not be read what "v_props" is or what it is built on, and a field of this name can be the value of a system property.*: prop_value\./)
   assert.match((await call('sn_query', { table: 'v_props', query: 'prop_valueSTARTSWITHc' })).data.message, /"prop_value" can be the value of a system property/)
 
   // An account that may not read the table of tables at all knows nothing about any name. That is no sign of a
