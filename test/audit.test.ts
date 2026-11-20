@@ -64,3 +64,34 @@ test('a log that cannot be written is reported once and breaks nothing', async (
     rmSync(dir, { recursive: true, force: true })
   }
 })
+
+test('a log that takes no lines does not fill the memory of the server', async () => {
+  // The file stands on something that hangs. Every line that waits is held in memory, so beyond ten thousand the
+  // new ones are dropped, and the log says how many were lost once it takes lines again.
+  const reports: string[] = []
+  const lines: string[] = []
+  let release!: () => void
+  const stuck = new Promise<void>((resolve) => (release = resolve))
+  let first = true
+  const write = auditWriter('/dev/null/audit.jsonl', (message) => reports.push(message), async (_path, line) => {
+    if (first) {
+      first = false
+      await stuck
+    }
+    lines.push(line)
+  })
+  const entry = (index: number) => ({ time: '', tool: null, api: 'table' as const, table: 'incident', query: `priority=${index}`, fields: null, status: 200, sent: 1, rows: 0, total: 0, ms: 0 })
+  for (let index = 0; index < 10_250; index++) write(entry(index))
+  assert.equal(reports.length, 1)
+  assert.match(reports[0], /is not taking lines fast enough/)
+
+  release()
+  await until(() => lines.length >= 10_001)
+  // Where the dropped lines would have stood, one line says how many they were. Then the log goes on.
+  write(entry(99_999))
+  await until(() => lines.length >= 10_002)
+  assert.equal(lines.length, 10_002)
+  assert.equal(JSON.parse(lines[9_999]).query, 'priority=9999')
+  assert.equal(JSON.parse(lines[10_000]).dropped, 250)
+  assert.equal(JSON.parse(lines[10_001]).query, 'priority=99999')
+})

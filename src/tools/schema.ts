@@ -148,7 +148,7 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
           columns,
         })
       } catch (error) {
-        return fail(error, table)
+        return fail(error, table, ctx.sn)
       }
     }),
   )

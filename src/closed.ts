@@ -76,10 +76,30 @@ const holdsRowsOf = (name: string): string | null => /^ar_(.+)$/.exec(name)?.[1]
 export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTables {
   const blocked = (message: string, table: string) => new ServiceNowError(`${message} Nothing was sent.`, 'blocked', table)
   const childOf = (table: string, parent: string) => `"${table}" is a child table of ${parent}, which is closed on this machine: its rows are rows of that table`
+  /**
+   * What a table is and which fields it has is read from sys_db_object and sys_dictionary, without these rules:
+   * they are decided from them. Where a list closes one of the two as a child of another table, nothing can be
+   * established without reading a closed table, so nothing is read. A deny list is held against that where its
+   * tables are listed. With a list of the only tables that may be read, the tables the two extend have to be on
+   * it as well: this says which one is missing.
+   */
+  async function closedFoundation(): Promise<string | null> {
+    if (!sn.openClasses()) return null
+    for (const name of ['sys_db_object', 'sys_dictionary']) {
+      if (!sn.allows(name)) continue
+      const info = await dict.table(name).catch(unlessNoConnection(null))
+      const parent = info?.chain.slice(1).find((above) => !sn.allows(above))
+      if (parent) return `"${name}", which this server reads for every check, is a child table of ${parent}, which is not on SERVICENOW_TABLE_ALLOW: with that list nothing can be established without reading a closed table`
+    }
+    return null
+  }
+
   async function reason(table: string, seen = new Set<string>()): Promise<string | null> {
     if (!sn.restricted || seen.has(table)) return null
     seen.add(table)
     if (!sn.allows(table)) return `"${table}" is closed on this machine`
+    const foundation = await closedFoundation()
+    if (foundation) return foundation
 
     // With a deny list: the tables it closes and everything below them, asked for once.
     const chain = (await dict.closedTables()).get(table)

@@ -818,7 +818,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           caveats: ORIGIN_CAVEATS,
         })
       } catch (error) {
-        return fail(error, 'sys_metadata')
+        return fail(error, 'sys_metadata', sn)
       }
     }),
   )

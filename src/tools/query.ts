@@ -385,7 +385,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         const records = clip(rows, warnings)
         return ok({ ...listing(ctx.sn, page, warnings, records.length), fieldCheck: guard.fieldCheck, records })
       } catch (error) {
-        return fail(error, table)
+        return fail(error, table, ctx.sn, { query, fields: groupBy ? [groupBy] : fields })
       }
     }),
   )

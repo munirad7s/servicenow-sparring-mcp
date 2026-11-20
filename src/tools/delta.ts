@@ -143,7 +143,7 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
         const updates = clip(rows, warnings)
         return ok({ ...listing(sn, page, warnings, updates.length), byType, capturedBySystemAccounts: bySystem, updates, notCaptured: DELTA_GAPS })
       } catch (error) {
-        return fail(error, 'sys_update_xml')
+        return fail(error, 'sys_update_xml', sn)
       }
     }),
   )

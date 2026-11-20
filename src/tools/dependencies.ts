@@ -406,7 +406,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
           notCovered: field ? FIELD_DEPENDENCIES_NOT_COVERED : DEPENDENCIES_NOT_COVERED,
         })
       } catch (error) {
-        return fail(error, table)
+        return fail(error, table, sn)
       }
     }),
   )

@@ -220,7 +220,12 @@ export function ok(payload: Record<string, unknown>): ToolResult {
  * Errors are answers. "This account cannot read that table" is a fact about the
  * instance, and the agent should report it as one instead of guessing around it.
  */
-export function fail(error: unknown, table?: string): ToolResult {
+/**
+ * The answer for a call that failed. Given the client, a call that was refused because of a closed table is
+ * written to the audit log, also where it was refused before any request: "asked" is what the agent passed in.
+ */
+export function fail(error: unknown, table?: string, sn?: ServiceNowClient, asked?: { query?: string; fields?: string[] }): ToolResult {
+  sn?.auditRefusal(error, table, asked)
   const known = error instanceof ServiceNowError ? error : undefined
   const kind = known?.kind ?? 'unknown'
   const about = known?.table ?? (kind === 'validation' || kind === 'config' ? undefined : table)

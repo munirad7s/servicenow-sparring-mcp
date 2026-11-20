@@ -348,7 +348,7 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
           ],
         })
       } catch (error) {
-        return fail(error, 'upgrade_history_task')
+        return fail(error, 'upgrade_history_task', sn)
       }
     }),
   )

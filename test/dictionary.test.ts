@@ -530,3 +530,10 @@ test('which names are tables is asked for many names at once, and remembered', a
   const hidden = new Dictionary(fakeInstance([{ table: 'sys_db_object', query: 'nameIN', rows: [{ name: 'sys_script' }, null] }]).sn)
   await assert.rejects(hidden.knownTables(['sys_script', 'sys_user']), (error: unknown) => error instanceof ServiceNowError && error.kind === 'acl')
 })
+
+test('names that look like an unknown field are searched for the first few only', async () => {
+  // Each search compares with every field of the table: a hundred unknown names on a wide table took seconds.
+  const check = await new Dictionary(fakeInstance(dictionaryRoutes).sn).checkFields('incident', Array.from({ length: 8 }, (_, index) => `numbe${index}`))
+  assert.equal(check.unknown.length, 8)
+  assert.deepEqual(check.unknown.map((item) => item.suggestions.length > 0), [true, true, true, true, true, false, false, false])
+})

@@ -1,5 +1,5 @@
 import type { Auth, InstanceConfig } from './config.js'
-import { quoteInstanceText, ServiceNowError, type ErrorKind } from './errors.js'
+import { endsTheCall, quoteInstanceText, ServiceNowError, unusableAnswer, validation, type ErrorKind } from './errors.js'
 import { assertFieldPath, assertTableName, fieldsInEncodedQuery } from './query.js'
 import { currentCall } from './trace.js'
 import { NAME, VERSION } from './version.js'
@@ -82,6 +82,21 @@ type FetchLike = (url: string, init: RequestInit) => Promise<Response>
 const PAUSE_AFTER_REJECTED_LOGIN_MS = 60_000
 /** Requests with the instance at a time. */
 const MAX_IN_FLIGHT = 8
+/**
+ * As many requests as one tool call may send. Measured on a fresh server: the largest call, sn_instance, sends 50,
+ * and 169 with a long list of the only tables that may be read, where each of its sources is judged first. A call
+ * that needs more than this was built to need them: hundreds of conditions that each have to be looked up, or a
+ * page whose every row names tables that do not exist.
+ */
+const MAX_REQUESTS_PER_CALL = 500
+/**
+ * As long as the path and the parameters of a request may be. Measured: an instance took an address of 8,218
+ * characters and answered HTTP 414 to one of 8,223. A caret or a comma takes three of them.
+ */
+const MAX_REQUEST_LENGTH = 8_000
+/** A cell of a row is a text, or a value with its display value. Anything nested deeper is no row of a table. */
+const MAX_CELL_DEPTH = 4
+const nestedTooDeep = (value: unknown, left: number): boolean => value !== null && typeof value === 'object' && (left === 0 || Object.values(value).some((inner) => nestedTooDeep(inner, left - 1)))
 const PAUSE_WHILE_UNREACHABLE_MS = 15_000
 
 /**
@@ -149,6 +164,11 @@ export class ServiceNowClient {
     const header = headers.get('x-total-count')
     const total = header !== null && /^\d+$/.test(header) ? Number(header) : null
     const records = (body.result as unknown[]).filter((row): row is T => row !== null && typeof row === 'object')
+    // What reads the rows afterwards goes as deep as they go. A row nested thousands of levels would end the call
+    // with an error of the runtime, and not with a sentence about the answer.
+    if (records.some((row) => nestedTooDeep(row, MAX_CELL_DEPTH))) {
+      throw unusableAnswer(`${this.host} answered with rows that are nested deeper than a row of a table is.`, table)
+    }
     if (gate && display) await this.withoutClosedNames(gate, table, records as Row[])
     return { table, query, limit, offset, records, total }
   }
@@ -164,8 +184,24 @@ export class ServiceNowClient {
     } catch (error) {
       const status = error instanceof ServiceNowError ? error.kind : 'unknown'
       this.options.audit?.({ time: new Date(started).toISOString(), tool: currentCall()?.tool ?? null, api, table, query: given, fields, status, sent: 0, rows: null, total: null, ms: Date.now() - started })
+      if (error instanceof Error) this.written.add(error)
       throw error
     }
+  }
+
+  /** Failures that already have their line in the audit log. */
+  private readonly written = new WeakSet<Error>()
+
+  /**
+   * Writes a line to the audit log for a tool call that was refused because of a closed table before any request
+   * was made for it: the table asked for was closed, or the name of a record said so. A person who reads the log
+   * wants to see what was tried, not only what was sent. A refusal that already has its line gets no second one.
+   */
+  auditRefusal(error: unknown, table: string | undefined, asked: { query?: string; fields?: string[] } = {}): void {
+    if (!(error instanceof ServiceNowError) || error.kind !== 'blocked' || this.written.has(error)) return
+    this.written.add(error)
+    const now = new Date().toISOString()
+    this.options.audit?.({ time: now, tool: currentCall()?.tool ?? null, api: 'table', table: table ?? error.table ?? '', query: asked.query ?? '', fields: asked.fields?.length ? asked.fields : null, status: 'blocked', sent: 0, rows: null, total: null, ms: 0 })
   }
 
   /** Takes the display value off every field whose name could be that of a record in a closed table. */
@@ -285,6 +321,7 @@ export class ServiceNowClient {
     } catch (error) {
       // A request that was not sent has no HTTP status of its own.
       log(error instanceof ServiceNowError ? ((count.sent ? error.status : undefined) ?? error.kind) : 'unknown', null, null)
+      if (error instanceof Error) this.written.add(error)
       throw error
     }
   }
@@ -349,11 +386,26 @@ export class ServiceNowClient {
       this.paused = null
     }
 
-    const url = `${this.config.instanceUrl}/api/now/${api}/${table}?${params}`
+    const path = `/api/now/${api}/${table}?${params}`
+    if (path.length > MAX_REQUEST_LENGTH) {
+      throw validation(
+        `This request would be ${path.length} characters long, and an instance takes about ${MAX_REQUEST_LENGTH}: measured, a longer one is answered with HTTP 414. ` +
+          'A caret, a comma and an equals sign each take three characters. Shorten the query, or name fewer fields. Nothing was sent.',
+        table,
+      )
+    }
+    const call = currentCall()
+    if (call && call.requests >= MAX_REQUESTS_PER_CALL) {
+      throw endsTheCall(
+        `This call was stopped after ${MAX_REQUESTS_PER_CALL} requests to the instance. A call needs that many only where it names hundreds of things that each have to be looked up. ` +
+          'Ask for less at a time: fewer conditions, fewer fields, fewer rows.',
+        table,
+      )
+    }
+    const url = `${this.config.instanceUrl}${path}`
     const sent = this.auth
     this.requestCount++
     count.sent++
-    const call = currentCall()
     if (call) call.requests++
 
     let response: Response
@@ -547,6 +599,7 @@ function classify(status: number, text: string): ErrorKind {
   if (status === 404 || /invalid table/i.test(text)) return 'not_found'
   if (status === 403 || /\bACL\b|not authorized|insufficient rights|security constraints/i.test(text)) return 'acl'
   if (status === 429) return 'rate_limited'
-  if (status === 400) return 'bad_request'
+  // 414: the address of the request was longer than what stands in front of the instance takes.
+  if (status === 400 || status === 414) return 'bad_request'
   return 'unknown'
 }

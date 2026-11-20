@@ -34,6 +34,7 @@ export function validation(message: string, table?: string): ServiceNowError {
 export const NO_CONNECTION: ReadonlySet<string> = new Set(['auth', 'network', 'timeout', 'redirect', 'invalid_response', 'rate_limited'])
 
 const ABOUT_ONE_ANSWER = new WeakSet<Error>()
+const ENDS_THE_CALL = new WeakSet<Error>()
 
 /**
  * An answer that came back and cannot be used for what was asked: the definition of one view, the parents of one
@@ -46,11 +47,23 @@ export function unusableAnswer(message: string, table: string): ServiceNowError 
 }
 
 /**
+ * A failure that ends the tool call it happens in, whatever was being looked up: the call asked for more than one
+ * call may. Of the same kind as an answer that is too large, and passed on like a failure of the connection.
+ */
+export function endsTheCall(message: string, table?: string): ServiceNowError {
+  const error = new ServiceNowError(message, 'too_large', table)
+  ENDS_THE_CALL.add(error)
+  return error
+}
+
+/**
  * true if a failure says that the instance could not be used at all: the login was rejected, the host did not
  * answer, the answer was no JSON. Nothing is known about any table then, so the failure is passed on as it is and
- * not turned into "this table is closed" or "the dictionary could not be read".
+ * not turned into "this table is closed" or "the dictionary could not be read". The same goes for a failure that
+ * ends the call: no look-up may swallow it and go on.
  */
 export function noConnection(error: unknown): boolean {
+  if (error instanceof Error && ENDS_THE_CALL.has(error)) return true
   return error instanceof ServiceNowError && NO_CONNECTION.has(error.kind) && !ABOUT_ONE_ANSWER.has(error)
 }
 

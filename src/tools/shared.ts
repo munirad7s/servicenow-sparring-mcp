@@ -505,7 +505,9 @@ const asksIfFilled = ({ operator, value }: Pick<Condition, 'operator' | 'value'>
 const COMPARES_IDS = new Set(['=', '!=', 'IN', 'NOT IN', 'SAMEAS', 'NSAMEAS', ...ASKS_IF_FILLED])
 /**
  * Measured: these leave out the rows where the field is empty. For NSAMEAS: of 82 incidents, 2 had the same person
- * assigned as opened them and 33 had nobody assigned, and "assigned_toNSAMEASopened_by" matched 47.
+ * assigned as opened them and 33 had nobody assigned, and "assigned_toNSAMEASopened_by" matched 47. It leaves out
+ * the rows where the second field is empty as well: 48 incidents had a caller and nobody who resolved them, 28 had
+ * two different people there, and "caller_idNSAMEASresolved_by" matched the 28.
  */
 const SKIPS_EMPTY = new Set(['!=', 'NOT IN', 'NOT LIKE', 'NSAMEAS'])
 /**
@@ -932,9 +934,16 @@ function refuseValuesOfTheWrongKind(table: string, parsed: ParsedQuery, resolved
  * matches nothing, and an empty answer is explained where it is given.
  */
 async function refuseNamesInPlaceOfIds(ctx: Context, table: string, parsed: ParsedQuery, resolved: Map<string, Column>, warnings: string[]): Promise<void> {
+  // A condition that stands in the query four hundred times is looked up once, and so is a value that stands in
+  // many conditions. A table that could not be asked is not asked again.
+  const seen = new Set<string>()
+  const exists = new Map<string, boolean | null>()
+  const unreadable = new Set<string>()
   for (const { field, operator, value } of parsed.conditions) {
     const column = resolved.get(field)
     if (column?.type !== 'reference' || !column.reference || (operator !== '!=' && operator !== 'NOT IN')) continue
+    if (seen.has(`${field} ${operator} ${value}`)) continue
+    seen.add(`${field} ${operator} ${value}`)
     const target = column.reference
     const given = (operator === 'NOT IN' ? value.split(',') : [value]).map((item) => item.trim())
     const odd = [...new Set(given.filter((item) => item !== '' && item !== 'NULL' && !/^[0-9a-f]{32}$/i.test(item)))]
@@ -965,22 +974,39 @@ async function refuseNamesInPlaceOfIds(ctx: Context, table: string, parsed: Pars
 
     // Whether a value of another shape is a sys_id, the referenced table says. Each sys_id is one record, so the
     // total says how many of the values exist: one request for all of them.
-    for (let from = 0; from < odd.length; from += 40) {
-      const group = odd.slice(from, from + 40)
+    const known = (item: string) => exists.get(`${target} ${item.toLowerCase()}`)
+    const gone = odd.find((item) => known(item) === false)
+    if (gone !== undefined) throw refuse(gone)
+    const asked = odd.filter((item) => known(item) === undefined)
+    if (unreadable.has(target)) {
+      if (asked.length) notLookedUp(asked[0], 'it could not be checked whether a record has it')
+      continue
+    }
+    for (let from = 0; from < asked.length; from += 40) {
+      const group = asked.slice(from, from + 40)
       const query = group.length === 1 ? `sys_id=${group[0]}` : `sys_idIN${group.join(',')}`
       const page = await ctx.sn.query<Row>({ table: target, query, fields: ['sys_id'], limit: group.length }).catch(unlessNoConnection(null))
       if (!page || page.total === null) {
+        unreadable.add(target)
         notLookedUp(group[0], 'it could not be checked whether a record has it')
+        break
+      }
+      const found = new Set(page.records.map((row) => String(row.sys_id ?? '').toLowerCase()))
+      if (page.total >= group.length) {
+        for (const item of group) exists.set(`${target} ${item.toLowerCase()}`, true)
         continue
       }
-      if (page.total >= group.length) continue
       // Fewer records than values. Which one is missing: the rows that came back say it, and where rows are hidden
       // from this account, each value that did not come back is asked for by itself.
-      const found = new Set(page.records.map((row) => String(row.sys_id ?? '').toLowerCase()))
-      for (const item of group.filter((candidate) => !found.has(candidate.toLowerCase()))) {
-        const exists = group.length === 1 ? 0 : await ctx.sn.query<Row>({ table: target, query: `sys_id=${item}`, fields: ['sys_id'], limit: 1 }).then((one) => one.total, unlessNoConnection(null))
-        if (exists === 0) throw refuse(item)
-        if (exists === null) notLookedUp(item, 'it could not be checked whether a record has it')
+      for (const item of group) {
+        if (found.has(item.toLowerCase())) {
+          exists.set(`${target} ${item.toLowerCase()}`, true)
+          continue
+        }
+        const count = group.length === 1 ? 0 : await ctx.sn.query<Row>({ table: target, query: `sys_id=${item}`, fields: ['sys_id'], limit: 1 }).then((one) => one.total, unlessNoConnection(null))
+        exists.set(`${target} ${item.toLowerCase()}`, count === null ? null : count > 0)
+        if (count === 0) throw refuse(item)
+        if (count === null) notLookedUp(item, 'it could not be checked whether a record has it')
       }
     }
   }
@@ -1011,7 +1037,7 @@ function warnAboutEmptyFields(parsed: ParsedQuery, resolved: Map<string, Column>
   const covered = ({ field, group }: Condition) => asked.some((empty) => empty.group === group && (field === empty.field || field.startsWith(`${empty.field}.`)))
   const skipping = parsed.conditions.filter((condition) => SKIPS_EMPTY.has(condition.operator) && !asksIfFilled(condition) && !covered(condition) && resolved.get(condition.field)?.type !== 'boolean')
   if (!skipping.length) return
-  const fields = [...new Set(skipping.map(({ field }) => field))]
+  const fields = [...new Set(skipping.flatMap(({ field, operator, second }) => (operator === 'NSAMEAS' && second ? [field, second] : [field])))]
   const operators = [...new Set(skipping.map(({ operator }) => `"${operator}"`))]
   warnings.push(
     `${operators.join(', ')} ${operators.length === 1 ? 'leaves' : 'leave'} out rows where the field is empty (${fields.join(', ')}). ` +
@@ -1030,6 +1056,8 @@ const COMPARES_VALUES = new Set(['=', '!=', 'IN', 'NOT IN'])
  * value is named.
  */
 async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQuery, check: FieldCheck, warnings: string[]): Promise<void> {
+  // A list that could not be read is not asked for again with every condition on the field, and said once.
+  const lists = new Map<string, Choice[] | null>()
   for (const { field, operator, value } of parsed.conditions) {
     const column = check.resolved.get(field)
     const owner = check.owners.get(field)
@@ -1037,9 +1065,11 @@ async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQue
 
     // The list of the table the field belongs to: for a dot-walked field the table the walk ends on, for a field
     // of a database view the table it comes from.
-    const choices = await ctx.dict.choices(owner.table, owner.field).catch(() => null)
+    const first = !lists.has(field)
+    if (first) lists.set(field, await ctx.dict.choices(owner.table, owner.field).catch(unlessNoConnection(null)))
+    const choices = lists.get(field)
     if (!choices) {
-      warnings.push(`"${field}" is a choice field, and its values could not be checked (the choice list could not be read). A label in place of the stored value would match nothing.`)
+      if (first) warnings.push(`"${field}" is a choice field, and its values could not be checked (the choice list could not be read). A label in place of the stored value would match nothing.`)
       continue
     }
     if (!choices.length) continue
@@ -1084,7 +1114,10 @@ function describeChoices(choices: Choice[]): string {
  */
 export async function explainEmpty(ctx: Context, guard: Guard): Promise<string[]> {
   const notes: string[] = []
-  for (const { field, operator, value } of guard.parsed.conditions) {
+  const lists = new Map<string, Choice[]>()
+  // Each condition once, however often it stands in the query.
+  const conditions = [...new Map(guard.parsed.conditions.map((condition) => [`${condition.field} ${condition.operator} ${condition.value}`, condition])).values()]
+  for (const { field, operator, value } of conditions) {
     const column = guard.resolved.get(field)
     if (!column || (operator !== '=' && operator !== 'IN')) continue
     const given = (operator === 'IN' ? value.split(',') : [value]).filter((item) => item !== '' && item !== 'NULL')
@@ -1099,7 +1132,8 @@ export async function explainEmpty(ctx: Context, guard: Guard): Promise<string[]
       }
     } else if (column.choice && given.length) {
       const owner = guard.owners.get(field)
-      const choices = owner ? await ctx.dict.choices(owner.table, owner.field).catch(() => []) : []
+      if (!lists.has(field)) lists.set(field, owner ? await ctx.dict.choices(owner.table, owner.field).catch(unlessNoConnection<Choice[]>([])) : [])
+      const choices = lists.get(field) ?? []
       const stored = new Set(choices.map((choice) => choice.value.toLowerCase()))
       const odd = given.map((item) => item.trim()).find((item) => !stored.has(item.toLowerCase()))
       if (choices.length && odd) {

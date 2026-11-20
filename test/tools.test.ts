@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
+import type { AuditEntry } from '../src/client.js'
 import type { InstanceConfig } from '../src/config.js'
 import { buildServer, createContext } from '../src/server.js'
 import { accountRoles } from '../src/tools/instance.js'
@@ -11,8 +12,8 @@ import { closedTables, column, dictionaryRoutes, fakeInstance, isProof, knownTab
 
 type Data = Record<string, any>
 
-async function connect(routes: Route[], overrides: Partial<InstanceConfig> = {}) {
-  const { sn, calls } = fakeInstance(routes, overrides)
+async function connect(routes: Route[], overrides: Partial<InstanceConfig> = {}, audit?: (entry: AuditEntry) => void) {
+  const { sn, calls } = fakeInstance(routes, overrides, audit)
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
   const client = new Client({ name: 'test', version: '1.0.0' })
   await Promise.all([client.connect(clientTransport), buildServer(sn).connect(serverTransport)])
@@ -1052,6 +1053,94 @@ test('a query of many parts is refused before the conditions for closed tables a
   assert.ok(Date.now() - started < 2_000, `${Date.now() - started} ms`)
 })
 
+test('a call that is refused because of a closed table is written to the audit log, whichever check refused it', async () => {
+  // A person who reads the log wants to see what an agent tried, not only what was sent. Most refusals happen
+  // before any request is made for the table that was asked for.
+  const entries: AuditEntry[] = []
+  const world: Route[] = [closedTables(tableRow('sys_user', 'User'), tableRow('sys_script', 'Business Rule', 'sys_metadata')), { table: 'sys_db_object', exact: 'name=sys_script', rows: [tableRow('sys_script', 'Business Rule', 'sys_metadata')] }, ...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }]
+  const { call } = await connect(world, { tables: { allow: [], deny: ['sys_user', 'sys_script'] } }, (entry) => entries.push(entry))
+  const refusals = () => entries.filter((entry) => entry.status === 'blocked')
+
+  const tried: Array<[string, Data, Partial<AuditEntry>]> = [
+    ['sn_query', { table: 'sys_user', query: 'active=true', fields: ['name'] }, { tool: 'sn_query', table: 'sys_user', query: 'active=true', fields: ['name'] }],
+    // The line names the table that was asked for, and what was asked of it.
+    ['sn_query', { table: 'incident', fields: ['caller_id.name'] }, { tool: 'sn_query', table: 'incident', fields: ['caller_id.name'] }],
+    ['sn_query', { table: 'incident', query: 'caller_idSTARTSWITHAbel' }, { tool: 'sn_query', table: 'incident', query: 'caller_idSTARTSWITHAbel' }],
+    ['sn_query', { table: 'incident', groupBy: 'caller_id.name' }, { tool: 'sn_query', table: 'incident', fields: ['caller_id.name'] }],
+    ['sn_schema', { table: 'sys_user' }, { tool: 'sn_schema', table: 'sys_user' }],
+    ['sn_dependencies', { table: 'sys_user' }, { tool: 'sn_dependencies', table: 'sys_user' }],
+    ['sn_origin', { updateName: NAME }, { tool: 'sn_origin', table: 'sys_metadata' }],
+  ]
+  for (const [index, [tool, args, line]] of tried.entries()) {
+    const { data } = await call(tool, args)
+    assert.equal(data.error, 'blocked', `${tool} ${JSON.stringify(args)}`)
+    // One line for each refusal, not two where the client had written it down already.
+    assert.equal(refusals().length, index + 1, `${tool} ${JSON.stringify(args)}`)
+    const written = refusals().at(-1)!
+    assert.equal(written.sent, 0)
+    for (const [key, value] of Object.entries(line)) assert.deepEqual(written[key as keyof AuditEntry], value, `${tool} ${JSON.stringify(args)}: ${key}`)
+  }
+  // A call that was refused for another reason asked nothing of a closed table.
+  await call('sn_query', { table: 'incident', query: 'no_such_field=1' })
+  assert.equal(refusals().length, tried.length)
+})
+
+test('one call does not send hundreds of requests, whatever it names', async () => {
+  // Every "ref_<table>." in a query is looked up, twice where no such table exists: 730 of them were 1,460
+  // requests before the query was refused.
+  const lookups = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  const many = await lookups.call('sn_query', { table: 'incident', query: Array.from({ length: 730 }, (_, index) => `ref_x${index.toString(36)}.a=`).join('^') })
+  assert.equal(many.data.error, 'too_large')
+  assert.match(many.data.message, /This call was stopped after 500 requests to the instance/)
+  assert.equal(lookups.calls.length, 500)
+  // The next call starts at nothing.
+  assert.equal((await lookups.answer('sn_query', { table: 'incident', fields: ['number'] })).returned, 1)
+
+  // The same condition a hundred and fifty times is one look-up, and a choice list that cannot be read is asked for once.
+  const users: Route = { table: 'sys_user', rows: [{ sys_id: 'abel' }] }
+  const same = await connect([{ table: 'sys_choice', status: 403 }, users, ...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  const data = await same.answer('sn_query', { table: 'incident', query: Array.from({ length: 150 }, () => 'assigned_to!=abel^state=1').join('^'), fields: ['number'] })
+  assert.equal(same.sentTo('sys_user').length, 1)
+  assert.equal(same.sentTo('sys_choice').length, 1)
+  assert.equal(data.warnings.filter((warning: string) => /choice list could not be read/.test(warning)).length, 1)
+})
+
+test('a request longer than an instance takes is not sent', async () => {
+  // Measured: an address of 8,218 characters was taken and one of 8,223 answered with HTTP 414. A caret and an
+  // equals sign take three characters each, so a query of 6,000 characters can be one of 9,000 in the address.
+  const { call, sentTo } = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  const { data } = await call('sn_query', { table: 'incident', query: Array.from({ length: 700 }, () => 'number=1').join('^'), fields: ['number'] })
+  assert.equal(data.error, 'validation')
+  assert.match(data.message, /This request would be \d,\d{3}|This request would be \d{4,5} characters long/)
+  assert.equal(sentTo('incident').length, 0)
+  // An instance, or what stands in front of it, that takes less says so with HTTP 414.
+  const short = await connect([...dictionaryRoutes, { table: 'incident', status: 414 }])
+  assert.equal((await short.call('sn_query', { table: 'incident', fields: ['number'] })).data.error, 'bad_request')
+})
+
+test('rows nested deeper than a row of a table are an answer that cannot be used, not an error of the runtime', async () => {
+  const deep = `{"result":[{"x":${'{"a":'.repeat(3_000)}"v"${'}'.repeat(3_000)}}]}`
+  const { call } = await connect([...dictionaryRoutes, { table: 'incident', body: deep }])
+  const { data } = await call('sn_query', { table: 'incident' })
+  assert.equal(data.error, 'invalid_response')
+  assert.match(data.message, /nested deeper than a row of a table is/)
+})
+
+test('with a list of the only tables that may be read, the tables the server decides from have to be open with their parents', async () => {
+  // sys_db_object and sys_dictionary extend sys_metadata. A list that names the two and not their parent closes
+  // them as child tables of a closed one, and then nothing can be established without reading a closed table.
+  const foundation: Route[] = ['sys_db_object', 'sys_dictionary'].map((name) => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name, 'sys_metadata')] }))
+  const world = [...foundation, ...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }]
+  const narrow = await connect(world, { tables: { allow: ['sys_db_object', 'sys_dictionary', 'sys_db_view', 'sys_db_view_table', 'task', 'incident'], deny: [] } })
+  const { data } = await narrow.call('sn_query', { table: 'incident', fields: ['number'] })
+  assert.equal(data.error, 'blocked')
+  assert.match(data.message, /"sys_db_object", which this server reads for every check, is a child table of sys_metadata, which is not on SERVICENOW_TABLE_ALLOW/)
+  assert.equal(narrow.sentTo('incident').length, 0)
+  // With the parent on the list, the same query is answered.
+  const wide = await connect(world, { tables: { allow: ['sys_db_object', 'sys_dictionary', 'sys_db_view', 'sys_db_view_table', 'sys_metadata', 'task', 'incident'], deny: [] } })
+  assert.equal((await wide.answer('sn_query', { table: 'incident', fields: ['number'] })).returned, 1)
+})
+
 test('the text of comments and work notes is left out where the table of journal entries is closed', async () => {
   const fields: Route = { table: 'sys_dictionary', query: 'nameINincident,task', rows: [column('task', 'number'), column('task', 'work_notes', 'journal_input'), column('task', 'short_description')] }
   const row = { number: 'INC1', work_notes: labelled('', '2026-11-20 10:00:00 - Abel Tuter (Work notes)\nthe customer called again'), short_description: 'Printer' }
@@ -1439,8 +1528,8 @@ test('sn_query says what it could not check about choices, and what "is not" lea
   for (const query of [`assigned_to!=${ID}^ORassigned_toISEMPTY`, `assigned_to!=${ID}^ORassigned_to=NULL`, `assigned_to.name!=Abel^ORassigned_toISEMPTY`, 'assigned_to!=NULL', 'short_description!=NULL']) {
     assert.deepEqual((await answer('sn_query', { table: 'incident', query })).warnings, [], query)
   }
-  // Measured: "is different from another field" leaves the empty rows out as well.
-  assert.match((await answer('sn_query', { table: 'incident', query: 'assigned_toNSAMEAScaller_id' })).warnings.join(' '), /"NSAMEAS" leaves out rows where the field is empty \(assigned_to\)/)
+  // Measured: "is different from another field" leaves the empty rows out as well, those of either field.
+  assert.match((await answer('sn_query', { table: 'incident', query: 'assigned_toNSAMEAScaller_id' })).warnings.join(' '), /"NSAMEAS" leaves out rows where the field is empty \(assigned_to, caller_id\)/)
 })
 
 test('a name where a reference needs a sys_id is refused when it is to be left out', async () => {

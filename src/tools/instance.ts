@@ -266,7 +266,7 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
           sources,
         })
       } catch (error) {
-        return fail(error)
+        return fail(error, undefined, sn)
       }
     }),
   )
@@ -348,7 +348,7 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
           customApps: custom ? part(custom) : unread,
         })
       } catch (error) {
-        return fail(error, 'v_plugin')
+        return fail(error, 'v_plugin', sn)
       }
     }),
   )

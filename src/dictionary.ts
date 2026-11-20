@@ -345,7 +345,9 @@ export class Dictionary {
           const column = set.columns.get(segment)
           if (!column) {
             if (set.partial) unavailable(`the dictionary of "${current}" is only partly readable for this account`)
-            else check.unknown.push({ field: path, table: current, segment, reason: `"${segment}" is not a field of "${current}"`, suggestions: suggest(segment, set.columns) })
+            // Names that look like the unknown one are searched for the first few only: each search compares
+            // with every field of the table.
+            else check.unknown.push({ field: path, table: current, segment, reason: `"${segment}" is not a field of "${current}"`, suggestions: check.unknown.length < 5 ? suggest(segment, set.columns) : [] })
             break
           }
 
