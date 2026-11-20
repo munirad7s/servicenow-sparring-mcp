@@ -77,9 +77,10 @@ const CATEGORIES: Category[] = [
 
 /** What is tied to one field of a table. */
 const FIELD_CATEGORIES: Category[] = [
-  { key: 'uiPolicyActions', table: 'sys_ui_policy_action', tableField: 'table', fieldField: 'field', parents: 'always', active: 'ui_policy.active=true', label: ['ui_policy'], show: ['mandatory', 'visible', 'disabled'] },
+  // An action or a rule reaches a child table only if its policy is marked to be inherited.
+  { key: 'uiPolicyActions', table: 'sys_ui_policy_action', tableField: 'table', fieldField: 'field', parents: { flag: 'ui_policy.inherit' }, active: 'ui_policy.active=true', label: ['ui_policy'], show: ['mandatory', 'visible', 'disabled'] },
   { key: 'clientScripts', table: 'sys_script_client', tableField: 'table', fieldField: 'field', parents: { flag: 'applies_extended' }, show: ['type'] },
-  { key: 'dataPolicyRules', table: 'sys_data_policy_rule', tableField: 'table', fieldField: 'field', parents: 'always', active: 'sys_data_policy.active=true', label: ['sys_data_policy'], show: ['mandatory', 'disabled'] },
+  { key: 'dataPolicyRules', table: 'sys_data_policy_rule', tableField: 'table', fieldField: 'field', parents: { flag: 'sys_data_policy.inherit' }, active: 'sys_data_policy.active=true', label: ['sys_data_policy'], show: ['mandatory', 'disabled'] },
   {
     key: 'accessControls',
     table: 'sys_security_acl',
@@ -165,6 +166,8 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
       } else if ((page.total ?? 0) > 0) {
         return notChecked(`${page.total} row(s) match, but none is visible to this account`)
       }
+      // A field to name the items by that the instance does not know: then an empty name says nothing, and no name is made up for it.
+      const named = (category.label ?? []).every((field) => !first || field in first)
 
       const rows = page.records.map(tidy)
       const items = rows.map((row): Item => {
@@ -172,7 +175,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
         // An access control is named "incident" or "incident.number": the table is the part before the dot.
         const attachedTo = rawOf(row[category.tableField]).split('.')[0]
         return {
-          name: (category.label ?? []).map((field) => labelOf(row[field])).filter(Boolean).join('.') || category.unnamed || rawOf(row.sys_name) || rawOf(row.sys_id),
+          name: (category.label ?? []).map((field) => labelOf(row[field])).filter(Boolean).join('.') || (named && category.unnamed) || rawOf(row.sys_name) || rawOf(row.sys_id),
           sysId: rawOf(row.sys_id),
           ...(chain.includes(attachedTo) ? { definedOn: attachedTo } : {}),
           ...(rawOf(row.active) ? { active: rawOf(row.active) === 'true' } : {}),
@@ -280,6 +283,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
           )
         }
         const chain = includeParents ? info.chain : [table]
+        const warnings: string[] = []
 
         if (field) {
           if (!/^[a-z_][a-z0-9_]{0,79}$/.test(field)) throw validation('"field" is the name of one field of the table, without a dot.', table)
@@ -287,6 +291,9 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
           const unknown = check.unknown[0]
           if (unknown) {
             throw validation(`${unknown.reason}${unknown.suggestions.length ? ` (similar: ${unknown.suggestions.join(', ')})` : ''}.`, table)
+          }
+          if (check.status !== 'checked') {
+            warnings.push(`It could not be verified that "${field}" is a field of "${table}" (${check.reason ?? 'the dictionary could not be used'}). For a field that does not exist every category is empty.`)
           }
         }
         const available = field ? FIELD_CATEGORIES : CATEGORIES
@@ -303,7 +310,6 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
           sn.query<Row>({ table: 'sys_db_object', query: levels.join('^OR'), fields: ['sys_id'], limit: 1 }).catch(() => null),
         ])
 
-        const warnings: string[] = []
         const names = read.flatMap(([, { rows }]) => rows.map((row) => rawOf(row.sys_update_name))).filter(isPlainValue)
         const captured = names.length ? await capturedNames(names, warnings) : new Map<string, boolean>()
         for (const [, { result, rows }] of read) {

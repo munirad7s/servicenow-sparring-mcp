@@ -63,14 +63,14 @@ matches nothing. Both look like an answer. Five rules keep the evidence from lyi
    fields. Where the dictionary cannot be used, the names are checked against a row of the table itself. Where
    neither works and the table is not empty, a filtered query is not sent.
 2. **A condition the instance would drop is refused.** A dot-walk through a list field, a date condition with a
-   missing part, an operator written the wrong way. [docs/encoded-queries.md](docs/encoded-queries.md) lists the
-   forms that one live instance dropped or answered with nothing, and the forms that are refused because they are
-   documented to run script.
+   missing part, an operator written the wrong way, a `LIKE` without a value.
+   [docs/encoded-queries.md](docs/encoded-queries.md) lists the forms that one live instance dropped or answered
+   with nothing, and the forms that are refused because they are documented to run script.
 3. **A value that cannot match is refused or explained.** `state=Resolved` matches nothing, because the field
    stores `6`. That query is refused, and the error names the stored value. `caller_id=Abel Tuter` matches nothing,
-   because a reference is compared with a sys_id. That answer comes with the reason. The check of choice values
-   needs `sys_choice` to be readable and covers the fields of the table itself; where it could not be made, the
-   answer says so.
+   because a reference is compared with a sys_id. That answer comes with the reason. `assigned_to!=<sys_id>` leaves
+   out every row without an assignee, and the answer says that too. The check of choice values needs `sys_choice`
+   to be readable and covers the fields of the table itself; where it could not be made, the answer says so.
 4. **Counts say what they count.** `total` is what matched on the server before row-level access rules; `returned`
    is what is in the answer. When rows were withheld, the answer says so.
 5. **"Could not be checked" is never "nothing found".** A table this account cannot read is an error of kind `acl`.
@@ -106,19 +106,24 @@ one for every request in flight.
 ## What leaves the instance
 
 Everything a function returns goes to the MCP client, and from there to the model it uses. If that model runs at a
-provider, the data leaves your network. Three things limit what can go that way:
+provider, the data leaves your network. Four things limit what can go that way:
 
 - **The account.** The server reads what its account may read, and nothing else. This is the limit that counts.
 - **Secrets are withheld.** Fields of a password type or an encrypted type, and system properties of a password
   type, come back as `[withheld: this field holds a secret]`. The Table API would hand them out as stored. The
   server knows the type of a field from the dictionary. Where it cannot read the type, it withholds a field whose
   name suggests a secret (password, token, secret, key), and the answer says that types were missing.
+- **A secret cannot be found out by trying.** "Starts with a", "starts with b": the number of matches would give a
+  value away piece by piece, and so would the order of rows sorted by it. A field that holds a secret can be asked
+  whether it is filled, and nothing else. A query that compares or sorts by the value of system properties leaves
+  the properties of a password type out and says so; a count per property value is refused.
 - **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
   away from the server: it does not ask for them, a query cannot reach them through a dot-walk, a child table or a
-  database view, and the names behind references into them are left out. `SERVICENOW_TABLE_ALLOW` names the only
-  tables whose rows it may read. A name can end in `*`. A closed table is reported as "could not be checked". What
-  the dictionary says about a closed table (its fields, what is attached to it) can still be read, and the other
-  functions read a fixed set of configuration tables, which `npm run doctor` lists.
+  database view, and the names behind references into them are left out, for single references and for lists.
+  Where the type of a field cannot be read, its display value is left out as well. `SERVICENOW_TABLE_ALLOW` names
+  the only tables whose rows it may read. A name can end in `*`. A closed table is reported as "could not be
+  checked". What the dictionary says about a closed table (its fields, what is attached to it) can still be read,
+  and the other functions read a fixed set of configuration tables, which `npm run doctor` lists.
 
 Record content that comes back (names, descriptions, scripts, error texts) is data from the instance. The server
 tells the agent to treat it as data, never as an instruction, and it cuts long values. It cannot make an agent obey.
@@ -132,17 +137,20 @@ appends one line per request:
 
 `sent` is the number of HTTP requests this took: 0 for a request that was refused or held back, 2 after a retry.
 The file holds no credentials and no record content. A query can contain values, so keep it as private as the
-instance; it is created readable by its owner only. If the file cannot be written, the server says so once on
-its error output and keeps answering. The npm scripts do not write it.
+instance; it is created readable by its owner only. The lines stand in the order the requests ended. If the file
+cannot be written, the server says so once on its error output and keeps answering. The npm scripts do not write
+it.
 
 ## Requests, caching and pauses
 
 - One `sn_query` is one request, plus a few to check its field names the first time a table is used. The other
-  functions cost more: `sn_origin` 5, `sn_dependencies` 25 to 30, `sn_instance` about 45. Every answer carries its
+  functions cost more: `sn_origin` 5 to 7, `sn_dependencies` 25 to 30 (about 15 for one field), `sn_instance`
+  about 50. Every answer carries its
   count in `requests`. At most six requests of one function are in flight at a time.
 - What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is
   missing from an entry older than 30 seconds is looked up once more, so a field created during a session is
-  found. `sn_schema` reads the dictionary anew for every call.
+  found. `sn_schema` reads the dictionary anew for every call, for a database view also that of the tables it
+  joins.
 - A `429 Too Many Requests` is waited out once, for at most five seconds.
 - After a rejected login the server sends nothing for 60 seconds, unless the env file holds new credentials. While
   no request has ever succeeded, an unreachable instance pauses it for 15 seconds.
@@ -273,15 +281,20 @@ test instance), so there a captured change means `customized`.
 On one instance of the Australia release, with `npm run origin-check`:
 
 - **Against the upgrade engine.** The last family upgrade skipped 79 files because it found them changed. For 77
-  of them `sn_origin` answers `customized`; one it does not find, one it leaves `unknown`. This is not an
-  independent confirmation for all of them: 36 of the 77 have no customer update at all, and `sn_origin` knows
-  about them only because it reads what the upgrade found. Before it did, it called those 36 out-of-the-box.
-- **200 random application files:** 170 `out_of_box_as_captured`, 30 `unknown`. It abstains on 15 in 100. Most of
-  those belong to no package: parts of flows and actions, which are captured with their parent and carry no name
-  of their own.
-- **197 random captured changes:** 100 `customer_created`, 71 `customized`, 22 `custom_application_file`, 3
-  `unknown`, 1 `deleted_here`. Of the 71 customized records, 57 were captured under system accounts and 14 by
-  people.
+  of them `sn_origin` answers `customized`. The other two are system properties: the file carries the sys_id the
+  vendor gave the property, the instance holds the property under another one, so no record answers to the file
+  name and the verdict is `unknown`. This is not an independent confirmation for all 77: 36 of them have no
+  customer update at all, and `sn_origin` knows about them only because it reads what the upgrade found. Before it
+  did, it called those 36 out-of-the-box.
+- **200 random application files:** 162 `out_of_box_as_captured`, 34 `unknown`, 3 `customer_created`, 1
+  `customized`. It abstains on about one file in six (three samples of 200 gave 27, 30 and 34). Most of those
+  belong to no package: parts of flows and actions, which are captured with their parent and carry no name of
+  their own.
+- **198 random captured changes:** 104 `customer_created`, 69 `customized`, 22 `custom_application_file`, 3
+  `deleted_here`. Of the 69 customized records, 61 were captured under system accounts and 8 by people.
+- **Fields nobody touched.** Two in three dictionary entries of the instance (207,943 of 299,720) store no update
+  name, because they were never captured. Asked for by the name they would get, such as
+  `sys_dictionary_incident_category`, they are found by the table and field the name describes.
 
 What follows from that:
 
@@ -289,9 +302,9 @@ What follows from that:
   version without any captured change: a property set by a script, a role changed by an installer. Only an upgrade
   notices, by comparing content, and this server cannot compare content. Where no upgrade has looked at a record
   yet, such a change is invisible here.
-- **"Customized" is the platform's word, not a statement about people.** On this instance four in five of the
-  customized records were changed by installations, upgrades and jobs, and 2,783 of all 6,631 captured changes
-  have no person on them at all. `capturedBy` tells them apart, `sn_delta` counts them, and its `peopleOnly`
+- **"Customized" is the platform's word, not a statement about people.** On this instance most of the customized
+  records were changed by installations, upgrades and jobs (61 of 69 in the sample), and 2,783 of all 6,631
+  captured changes have no person on them at all. `capturedBy` tells them apart, `sn_delta` counts them, and its `peopleOnly`
   leaves them out.
 - **The rule is measured on one instance.** The verdicts were compared with the upgrade engine and with the stored
   evidence, not checked by hand, and not on a second instance. Update rows and versions can be cleaned up or lost

@@ -17,18 +17,16 @@ export async function runDoctor(): Promise<void> {
   console.log(`Checking ${sn.host}${config.envFile ? `, settings from ${config.envFile}` : ''}\n`)
 
   // One request first. A wrong password or address should fail once, not once per table.
-  try {
-    await sn.query({ table: SOURCES[0].table, fields: ['sys_id'], limit: 1 })
-  } catch (error) {
-    if (NO_CONNECTION.has(errorKind(error))) {
-      console.log(`The instance cannot be used: ${error instanceof Error ? error.message : error}`)
-      console.log('Check the address and the login. For a certificate or proxy problem see "Proxies and certificates" in the README.')
-      process.exitCode = 1
-      return
-    }
+  const first = await probe(sn, SOURCES[0].table)
+  if (NO_CONNECTION.has(first.status)) {
+    console.log(`The instance cannot be used: ${first.error instanceof Error ? first.error.message : first.status}`)
+    console.log('Check the address and the login. For a certificate or proxy problem see "Proxies and certificates" in the README.')
+    process.exitCode = 1
+    return
   }
 
-  const results = await mapLimit(SOURCES, 4, async (item) => ({ ...item, ...(await probe(sn, item.table)) }))
+  const others = await mapLimit(SOURCES.slice(1), 4, async (item) => ({ ...item, ...(await probe(sn, item.table)) }))
+  const results = [{ ...SOURCES[0], ...first }, ...others]
   const width = Math.max(...results.map((result) => result.table.length))
   for (const result of results) {
     const mark = result.status === 'readable' ? 'ok ' : 'NO '
@@ -41,9 +39,10 @@ export async function runDoctor(): Promise<void> {
   console.log('\nBeyond the tables:')
   const line = (label: string, text: string) => console.log(`  ${label.padEnd(34)} ${text}`)
 
+  // The row is taken by its name, not by its place: an ignored condition would hand back some other property.
   const release = await sn
-    .query<{ value: string }>({ table: 'sys_properties', query: 'name=glide.war', fields: ['value'], limit: 1 })
-    .then((page) => page.records[0]?.value || 'not returned (hidden from this account, or not set)')
+    .query<{ name: string; value: string }>({ table: 'sys_properties', query: 'name=glide.war', fields: ['name', 'value'], limit: 1 })
+    .then((page) => page.records.find((row) => row.name === 'glide.war')?.value || 'not returned (hidden from this account, or not set)')
     .catch((error) => `not readable (${errorKind(error)})`)
   line('release (glide.war)', release)
 
@@ -55,7 +54,10 @@ export async function runDoctor(): Promise<void> {
 
   const details = await sn
     .query<Record<string, string>>({ table: 'upgrade_history_task', fields: ['upgrade_detail.file_name'], limit: 1 })
-    .then((page) => (!page.records.length ? 'no entries to test with' : page.records[0]['upgrade_detail.file_name'] ? 'ok' : 'entries come back without their file names'))
+    .then((page) => {
+      if (!page.records.length) return (page.total ?? 0) > 0 ? 'entries exist, but none is visible to this account' : 'no entries to test with'
+      return page.records[0]['upgrade_detail.file_name'] ? 'ok' : 'entries come back without their file names'
+    })
     .catch((error) => `not readable (${errorKind(error)})`)
   line('upgrade details through a reference', details)
 

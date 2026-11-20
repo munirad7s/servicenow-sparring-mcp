@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ServiceNowError } from '../src/errors.js'
-import { assertFieldPath, assertPlainValue, assertSysId, assertTableName, fieldsInEncodedQuery, isPlainValue, parseEncodedQuery } from '../src/query.js'
+import { assertFieldPath, assertPlainValue, assertSysId, assertTableName, fieldsInEncodedQuery, isPlainValue, parseEncodedQuery, withCondition } from '../src/query.js'
 
 const refused = (run: () => unknown) =>
   assert.throws(run, (error: unknown) => error instanceof ServiceNowError && error.kind === 'validation')
@@ -30,7 +30,9 @@ const ACCEPTED: Array<[query: string, fields: string[]]> = [
   ['assigned_toISNOTEMPTY', ['assigned_to']],
   ['close_notesISEMPTYSTRING', ['close_notes']],
   ['short_descriptionANYTHING', ['short_description']],
+  // With an empty value, "=" means "is empty" and "!=" means "is not empty".
   ['short_description=', ['short_description']],
+  ['close_notes!=', ['close_notes']],
   ['assigned_to=NULL', ['assigned_to']],
   ['', []],
   ['sys_created_onON2025-01-15@2025-01-15 00:00:00@2025-01-15 23:59:59', ['sys_created_on']],
@@ -61,7 +63,6 @@ const ACCEPTED: Array<[query: string, fields: string[]]> = [
   ['active=true^', ['active']],
   ['ORDERBYpriority^ORDERBYDESCnumber', ['priority', 'number']],
   ['active=true^ORDERBYDESCcaller_id.name', ['active', 'caller_id.name']],
-  ['active=true^GROUPBYpriority', ['active', 'priority']],
   ['GOTOnumberSTARTSWITHINC0010001', ['number']],
   ['caller_id.manager.department.name=IT', ['caller_id.manager.department.name']],
   ['ref_incident.severity=1', ['ref_incident.severity']],
@@ -137,6 +138,27 @@ const REFUSED: Array<[query: string, why: string]> = [
   ['sys_tags=urgent', 'tags cannot be checked'],
   ['sys_tagsISEMPTY', 'matched nothing when measured, in either direction'],
   ['sys_tags.abcdef0123456789abcdef0123456789=abcdef0123456789abcdef0123456789', 'tags cannot be checked'],
+  ['parent.sys_tags=urgent', 'tags cannot be checked behind a dot-walk either'],
+  ['request_item.variables.abcdef0123456789abcdef0123456789=yes', 'catalog variables cannot be checked behind a dot-walk either'],
+  ['ORDERBYsys_tags', 'tags cannot be checked in a sort'],
+  ['short_descriptionSAMEASvariables.abcdef0123456789abcdef0123456789', 'catalog variables cannot be checked as the second field'],
+  ['reassignment_countGT_FIELDsys_tags', 'tags cannot be checked as the second field'],
+  // Measured: the Table API ignores GROUPBY in a query.
+  ['active=true^GROUPBYpriority', 'ignored by the Table API'],
+  // Measured: without a value these answer unfiltered.
+  ['close_notesLIKE', 'dropped without a value'],
+  ['close_notesNOT LIKE', 'dropped without a value'],
+  ['close_notesSTARTSWITH', 'dropped without a value'],
+  ['close_notesENDSWITH', 'dropped without a value'],
+  ['close_notesCONTAINS', 'dropped without a value'],
+  ['close_notesNOT IN', 'dropped without a value'],
+  ['active=true^short_descriptionLIKE^priority=1', 'dropped without a value, in the middle of a query'],
+  // Measured: without a value these match nothing, or mean "is empty" on text and nothing elsewhere.
+  ['close_notesIN', 'matches nothing without a value'],
+  ['priority>', 'no meaning without a value'],
+  ['priority>=', 'no meaning without a value'],
+  ['priority<', 'no meaning without a value'],
+  ['priority<=', 'no meaning without a value'],
   ['short_description%email', 'list shorthand'],
   ['short_description!*email', 'list shorthand'],
   ['short_descriptionMATCH_PAT*email*', 'not checked'],
@@ -180,7 +202,26 @@ test('conditions are returned with operator and value', () => {
   assert.equal(parseEncodedQuery('active=true').escapedCaret, false)
 })
 
+test('the fields a query sorts by or compares with are listed apart', () => {
+  const parsed = parseEncodedQuery('active=true^closed_atGT_FIELDdue_date^opened_atSAMEASresolved_at@day^ORDERBYDESCnumber')
+  assert.deepEqual(parsed.otherFields, ['due_date', 'resolved_at', 'number'])
+  assert.deepEqual(parseEncodedQuery('active=true').otherFields, [])
+})
+
+test('a condition can be added to every part of a query', () => {
+  assert.equal(withCondition('', 'x=1'), 'x=1')
+  assert.equal(withCondition('a=1', 'x=1'), 'a=1^x=1')
+  assert.equal(withCondition('a=1^ORb=2^ORDERBYc', 'x=1'), 'a=1^ORb=2^ORDERBYc^x=1')
+  assert.equal(withCondition('a=1^NQb=2^NQc=3', 'x=1'), 'a=1^x=1^NQb=2^x=1^NQc=3^x=1')
+  // A literal ^ inside a value stays one.
+  assert.equal(withCondition('aLIKEp^^q^NQb=2', 'x=1'), 'aLIKEp^^q^x=1^NQb=2^x=1')
+  assert.deepEqual(fieldsInEncodedQuery(withCondition('aLIKEp^^q^NQb=2', 'x=1')), ['a', 'x', 'b'])
+})
+
 test('a refusal names the term and how to write it', () => {
+  assert.throws(() => fieldsInEncodedQuery('close_notesLIKE'), /needs a value.*ISEMPTY/)
+  assert.throws(() => fieldsInEncodedQuery('active=true^GROUPBYstate'), /groupBy input/)
+  assert.throws(() => fieldsInEncodedQuery('parent.sys_tags=urgent'), /sys_tags is not sent/)
   assert.throws(() => fieldsInEncodedQuery('state<>6'), /use !=/)
   assert.throws(() => fieldsInEncodedQuery('descriptionISEMPTY=false'), /takes no value/)
   assert.throws(() => fieldsInEncodedQuery('sys_created_onRELATIVEGT@day@ago@7'), /dayofweek/)

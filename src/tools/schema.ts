@@ -66,11 +66,13 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
         if (filter) assertPlainValue(filter, 'filter')
 
         // Asked for the structure itself, a person expects what is there now, not what was read ten minutes ago.
-        const info = await ctx.dict.table(table, 0)
+        ctx.dict.forget(table)
+        const info = await ctx.dict.table(table)
         if (!info) {
           throw new ServiceNowError(`"${table}" is neither a table in sys_db_object nor a database view on this instance.`, 'not_found', table)
         }
-        const effective = await ctx.dict.effectiveColumns(table, 0)
+        for (const member of info.members ?? []) ctx.dict.forget(member.table)
+        const effective = await ctx.dict.effectiveColumns(table)
         const all = effective?.columns ?? []
         // A view defines no fields of its own: all of them come from the tables it joins.
         const own = info.kind === 'database_view' ? all : all.filter((column) => column.definedOn === table)

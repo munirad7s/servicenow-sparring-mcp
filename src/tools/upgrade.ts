@@ -9,7 +9,7 @@ import { traced } from '../trace.js'
 import { errorKind, READ_ONLY, type Context } from './shared.js'
 
 /** Used only if the instance does not list its own disposition codes. The answer says when that happened. */
-const FALLBACK_SKIPPED: Record<string, string> = {
+export const FALLBACK_SKIPPED: Record<string, string> = {
   '4': 'Skipped',
   '9': 'Skipped Error',
   '10': 'Skipped Manual Merge',
@@ -178,6 +178,7 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
             query: [filter, 'ORDERBYDESCsys_created_on'].filter(Boolean).join('^'),
             fields: [
               'upgrade_detail.file_name',
+              'upgrade_detail.target_name',
               'upgrade_detail.type',
               'upgrade_detail.disposition',
               'upgrade_detail.upgrade_history.to_version',
@@ -196,6 +197,7 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
 
         const rows = page.records.map(tidy).map((row) => ({
           file: rawOf(row['upgrade_detail.file_name']),
+          target: rawOf(row['upgrade_detail.target_name']),
           type: labelOf(row['upgrade_detail.type']),
           disposition: labelOf(row['upgrade_detail.disposition']),
           review: labelOf(row.state),

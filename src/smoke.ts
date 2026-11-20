@@ -66,6 +66,17 @@ check('a query with a stored script (DYNAMIC) is refused', refused(await call('s
 check('a table name with a path is refused', refused(await call('sn_query', { table: '../../x_app/endpoint' })))
 check('a dot-walk through a list field is refused', refused(await call('sn_query', { table: 'incident', query: 'watch_list.email=nobody' })))
 check('a date condition ServiceNow would drop is refused', refused(await call('sn_query', { table: 'incident', query: 'sys_created_onONToday' })))
+check('a condition without a value, which ServiceNow would drop, is refused', refused(await call('sn_query', { table: 'incident', query: 'short_descriptionLIKE' })))
+check('a condition on a field that holds a secret is refused', refused(await call('sn_query', { table: 'sys_user', query: 'user_passwordSTARTSWITHa', fields: ['sys_id'] })))
+
+// "Is not" leaves out the rows where the field is empty: the three counts must add up without them.
+const count = async (query: string) => (await call('sn_query', { table: 'incident', query, fields: ['sys_id'], limit: 1 })).data
+const [everything, unassigned, notNobody] = [await count(''), await count('assigned_toISEMPTY'), await count(`assigned_to!=${'0'.repeat(32)}`)]
+check(
+  '"is not" leaves out rows with an empty field, and the answer says so',
+  notNobody.total === everything.total - unassigned.total && notNobody.warnings.some((warning: string) => warning.includes('leave out rows where the field is empty')),
+  `${everything.total} rows, ${unassigned.total} without assignee, ${notNobody.total} returned by "is not"`,
+)
 
 const label = await call('sn_query', { table: 'incident', query: 'state=New' })
 check('a choice label in place of the stored value is refused', refused(label) && /label of "1"/.test(label.data.message))
@@ -85,6 +96,13 @@ check(
   !secrets.isError && (secrets.data.returned === 0 || secrets.data.records.every((record: Data) => String(record.value).startsWith('[withheld'))),
   `${secrets.data.returned} checked`,
 )
+const probing = await call('sn_query', { table: 'sys_properties', query: 'valueLIKEa', fields: ['name'], limit: 1 })
+check(
+  'a condition on property values leaves out the properties that hold secrets',
+  !probing.isError && String(probing.data.query).includes('typeNOT INpassword,password2') && probing.data.warnings.some((warning: string) => warning.includes('hold a secret')),
+  `${probing.data.total} match`,
+)
+check('property values are not listed as groups', refused(await call('sn_query', { table: 'sys_properties', groupBy: 'value' })))
 
 const field = await call('sn_schema', { table: 'incident', filter: 'short_description' })
 check('sn_schema finds an inherited field by default', !field.isError && field.data.columns?.[0]?.definedOn === 'task' && field.data.fieldCount > field.data.ownFieldCount, `${field.data.ownFieldCount} own, ${field.data.fieldCount} in all`)
@@ -122,6 +140,18 @@ if (customName) {
 
 const missing = await call('sn_origin', { sysId: '0'.repeat(32) })
 check('sn_origin says not_found for an unknown sys_id', !missing.isError && missing.data.verdict === 'not_found')
+
+// A dictionary entry that was never captured stores no update name. It must still be found by the name it would get.
+const unnamed = await call('sn_query', { table: 'sys_dictionary', query: 'sys_update_nameISEMPTY^elementISNOTEMPTY', fields: ['name', 'element'], limit: 1 })
+const entry = unnamed.data.records?.[0]
+if (entry && /^[a-z0-9_]+$/.test(`${entry.name}${entry.element}`)) {
+  const neverCaptured = await call('sn_origin', { updateName: `sys_dictionary_${entry.name}_${entry.element}` })
+  check(
+    'sn_origin finds a never-captured field by its update name',
+    !neverCaptured.isError && neverCaptured.data.record !== null && neverCaptured.data.verdict !== 'not_found',
+    `${neverCaptured.data.verdict}, ${unnamed.data.total} such entries`,
+  )
+}
 
 const deps = await call('sn_dependencies', { table: 'incident', limit: 2 })
 const categories: Record<string, Data> = deps.data.categories ?? {}

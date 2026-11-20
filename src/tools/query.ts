@@ -6,7 +6,7 @@ import { validation } from '../errors.js'
 import { assertTableName } from '../query.js'
 import { clip, fail, listing, listShape, ok, rawOf, rowSchema, source, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { explainEmpty, guardFields, LOOKS_SECRET, READ_ONLY, SECRET_NOTE, SECRET_TYPES, type Context, type Guard } from './shared.js'
+import { explainEmpty, guardFields, LOOKS_SECRET, propertyValueFields, READ_ONLY, SECRET_NOTE, SECRET_TYPES, type Context, type Guard } from './shared.js'
 
 /** System properties of these types hold credentials. Their value is never passed on. */
 const SECRET_PROPERTY_TYPES = new Set(['password', 'password2'])
@@ -29,68 +29,85 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
    * hold secrets, and the names behind references into a table that is closed on
    * this machine. Where the type of a field cannot be read, its name decides.
    */
-  function withhold(table: string, rows: Row[], known: Map<string, Column>, complete: boolean, warnings: string[]): Row[] {
+  async function withhold(table: string, rows: Row[], known: Map<string, Column>, complete: boolean, warnings: string[]): Promise<Row[]> {
     const byType = new Set<string>()
     const byName = new Set<string>()
     const closed = new Set<string>()
-    let properties = 0
-    let untyped = 0
+    const untold = new Set<string>()
+    const counts = { typed: 0, named: 0, neither: 0 }
+    const propertyValues = table === 'sys_properties' ? new Set<string>() : await propertyValueFields(ctx, table)
 
     const cleaned = rows.map((row) => {
       const out: Row = {}
       for (const [key, value] of Object.entries(row)) {
         const column = known.get(key)
-        const fromProperties = column?.definedOn === 'sys_properties' && (column.sourceField ?? column.name) === 'value' && table !== 'sys_properties'
-        if (column ? SECRET_TYPES.has(column.type) || fromProperties : LOOKS_SECRET.test(key)) {
-          if (filled(value)) (column ? byType : byName).add(key)
+        // Reached through a view or a reference, the value of a system property comes without the type that would say whether it is a secret.
+        const fromProperties = propertyValues.has(key) || (table !== 'sys_properties' && column?.definedOn === 'sys_properties' && (column.sourceField ?? column.name) === 'value')
+        const named = value && typeof value === 'object'
+        if (fromProperties || (column ? SECRET_TYPES.has(column.type) : LOOKS_SECRET.test(key))) {
+          if (filled(value)) (column || fromProperties ? byType : byName).add(key)
           out[key] = filled(value) ? SECRET_NOTE : value
-        } else if (column?.type === 'reference' && column.reference && !ctx.sn.allows(column.reference) && value && typeof value === 'object') {
+        } else if (named && column?.reference && !ctx.sn.allows(column.reference)) {
+          // A single reference or a list of them: the display value is the name of a record in the closed table.
           closed.add(key)
+          out[key] = rawOf(value)
+        } else if (named && ctx.sn.restricted && (!column || column.type === 'document_id')) {
+          // Which table the name comes from is not known: the type could not be read, or the field can point anywhere.
+          untold.add(key)
           out[key] = rawOf(value)
         } else {
           out[key] = value
         }
       }
 
-      // A system property says by its type whether its value is a secret.
+      // A system property says by its type whether its value is a secret. Without the type its name decides, without both nothing is passed on.
       if (table === 'sys_properties' && filled(out.value) && out.value !== SECRET_NOTE) {
-        const typed = 'type' in row
-        if (typed ? SECRET_PROPERTY_TYPES.has(rawOf(row.type)) : LOOKS_SECRET.test(rawOf(row.name))) {
+        const type = rawOf(row.type)
+        const how = type ? 'typed' : 'name' in row ? 'named' : 'neither'
+        if (how === 'typed' ? SECRET_PROPERTY_TYPES.has(type) : how === 'named' ? LOOKS_SECRET.test(rawOf(row.name)) : true) {
           out.value = SECRET_NOTE
-          if (typed) properties++
-          else untyped++
+          counts[how]++
         }
       }
       return out
     })
 
+    const properties = (count: number) => `${count} system propert${count === 1 ? 'y' : 'ies'}`
     if (byType.size) warnings.push(`Withheld because the field holds a secret: ${list(byType)}.`)
     if (byName.size) warnings.push(`Withheld because the type of the field could not be read and its name suggests a secret: ${list(byName)}.`)
     if (!complete) {
       warnings.push('The types of some fields could not be read (the dictionary is not fully readable for this account). A field that holds a secret is then recognised by its name only.')
     }
-    if (properties) warnings.push(`The value of ${properties} system propert${properties === 1 ? 'y' : 'ies'} was withheld, because the property holds a secret.`)
-    if (untyped) warnings.push(`The value of ${untyped} system propert${untyped === 1 ? 'y' : 'ies'} was withheld: the type was not returned, and the name suggests a secret.`)
+    if (counts.typed) warnings.push(`The value of ${properties(counts.typed)} was withheld, because the property holds a secret.`)
+    if (counts.named) warnings.push(`The value of ${properties(counts.named)} was withheld: its type did not come back, and its name suggests a secret.`)
+    if (counts.neither) warnings.push(`The value of ${properties(counts.neither)} was withheld: neither type nor name came back, so it could not be told whether the property holds a secret.`)
     if (closed.size) warnings.push(`The names behind references into a table that is closed on this machine were left out: ${list(closed)}.`)
+    if (untold.size) warnings.push(`Tables are closed on this machine, and it could not be told which table these fields point to, so their display values were left out: ${list(untold)}.`)
     return cleaned
   }
 
   /** Rows per value of one field, through the Aggregate API. An unknown field would be ignored there too, and counted as one group. */
   async function countPerValue(table: string, query: string, groupBy: string, limit: number) {
-    const guard = await guardFields(ctx, table, query, [groupBy])
+    const guard = await guardFields(ctx, table, query, [], groupBy)
     const column = guard.resolved.get(groupBy)
     if (column ? SECRET_TYPES.has(column.type) : LOOKS_SECRET.test(groupBy)) {
       throw validation(`"${groupBy}" holds a secret. Its values are not listed, also not as groups.`, table)
     }
+    const fromProperties = column?.definedOn === 'sys_properties' && (column.sourceField ?? column.name) === 'value'
+    if (fromProperties || (await propertyValueFields(ctx, table)).has(groupBy)) {
+      throw validation(`"${groupBy}" is the value of a system property, and some properties hold secrets. The values are not listed as groups. Read the properties with their name and type instead.`, table)
+    }
 
-    // The label of a group is the name behind a reference. Not asked for where that table is closed on this machine.
-    const labels = !(column?.type === 'reference' && column.reference && !ctx.sn.allows(column.reference))
-    const groups = (await ctx.sn.groupCount(table, groupBy, query, labels)).sort((a, b) => b.count - a.count)
+    // The label of a group is the name behind a reference. Not asked for where that table is closed on this machine,
+    // or where tables are closed and it is not known which table the field points to.
+    const intoClosed = Boolean(column?.reference) && !ctx.sn.allows(column?.reference ?? '')
+    const labels = !(intoClosed || (ctx.sn.restricted && (!column || column.type === 'document_id')))
+    const groups = (await ctx.sn.groupCount(table, groupBy, guard.query, labels)).sort((a, b) => b.count - a.count)
     const shown = groups.slice(0, limit)
     return ok({
       ...source(ctx.sn, [...guard.warnings]),
       table,
-      query,
+      query: guard.query,
       total: groups.reduce((sum, group) => sum + group.count, 0),
       returned: shown.length,
       offset: 0,
@@ -163,12 +180,12 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         const guard = await guardFields(ctx, table, query, fields)
         const warnings = [...guard.warnings]
 
-        // The type of a system property decides whether its value is a secret, so it is read along.
-        const hidesPropertyType = table === 'sys_properties' && Boolean(fields?.includes('value')) && !fields?.includes('type')
+        // The type of a system property decides whether its value is a secret, and without a type its name does: both are read along.
+        const readAlong = table === 'sys_properties' && fields?.includes('value') ? ['type', 'name'].filter((field) => !fields.includes(field)) : []
         const page = await ctx.sn.query<Row>({
           table,
-          query,
-          fields: hidesPropertyType ? [...(fields ?? []), 'type'] : fields,
+          query: guard.query,
+          fields: fields && [...fields, ...readAlong],
           limit,
           offset,
           display: displayValue,
@@ -179,8 +196,8 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         if (leftOut.length) warnings.push(`The instance left out the requested field(s) ${leftOut.join(', ')}.`)
 
         const { known, complete } = await describeFields(table, fields, guard)
-        const rows = withhold(table, displayValue ? page.records.map(tidy) : page.records, known, complete, warnings)
-        if (hidesPropertyType) rows.forEach((row) => delete row.type)
+        const rows = await withhold(table, displayValue ? page.records.map(tidy) : page.records, known, complete, warnings)
+        for (const field of readAlong) rows.forEach((row) => delete row[field])
 
         if (page.total === 0 && guard.parsed.conditions.length) {
           warnings.push(...(await explainEmpty(ctx, table, guard).catch(() => [])))

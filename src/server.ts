@@ -118,7 +118,8 @@ export function buildServer(sn: ServiceNowClient): McpServer {
               `Assess what this change touches on the live ServiceNow instance:\n\n"${change}" on the table "${table}".\n\n` +
               '1. If you have not called sn_instance in this session, call it.\n' +
               `2. Call sn_schema for "${table}", with filter if a field is concerned. Note the kind of table, its parents, and which table defines the field.\n` +
-              `3. Call sn_dependencies for "${table}". For every category note the total, and which items carry customerUpdate true.\n` +
+              `3. Call sn_dependencies for "${table}". For every category note the total, and which items carry customerUpdate true. ` +
+              'If the change is about one field, call it a second time with "field": that lists what is tied to the field itself.\n' +
               '4. Read the items that can interfere with the change (business rules, client scripts, UI policies, data ' +
               'policies, access controls on the field) with sn_query, using the table and query the category names.\n' +
               '5. Report: what is attached, per category, with the table and query behind each number; what of it was ' +

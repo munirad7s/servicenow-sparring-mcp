@@ -47,6 +47,29 @@ measurements.
   instead of "Resolution notes".
 - A table whose dictionary entry is hidden by an access rule was reported as "does not exist". A table whose name
   contains "acl" was reported as "access denied" when it did not exist.
+- **A condition without a value was sent.** Measured: `LIKE`, `NOT LIKE`, `STARTSWITH`, `ENDSWITH`, `CONTAINS` and
+  `NOT IN` without a value are dropped and the answer is unfiltered; `IN` without one matches nothing. Only `=` and
+  `!=` may come without a value now, where they mean "is empty" and "is not empty".
+- **"Is not" silently left rows out.** Measured: `!=`, `NOT IN` and `NOT LIKE` skip the rows where the field is
+  empty. "Not assigned to X" missed every unassigned record. The query is still sent, and the answer now says so.
+- **`GROUPBY` inside a query was accepted,** although the Table API ignores it. It is refused, with a pointer to
+  the `groupBy` input. Tags and catalog variables were refused in front of a condition only, not in a sort, as the
+  second field of a comparison, or behind a dot-walk.
+- **`sn_origin` said "not found" for a field nobody ever changed.** Two in three dictionary entries of the test
+  instance store no update name. Asked for by the name `sn_schema` tells an agent to use
+  (`sys_dictionary_<table>_<field>`), such a field is now found by what the name describes.
+- **`sn_origin` said "not found" for a file an upgrade had skipped,** where the instance holds the record under
+  another sys_id than the vendor's file. That is now `unknown`, with the name to look the record up by.
+- **`sn_origin` decided on evidence it saw only part of.** A hidden current version behind a visible older one, a
+  hidden upgrade entry behind a visible older one, hidden update rows behind a visible one by a system account. A
+  skip by an older upgrade no longer counts once a later upgrade has applied the record. With more update rows
+  than one page shows, it now asks whether a person is on any of them. It no longer searches update rows by a
+  sys_id that is a plain word.
+- **`sn_dependencies` with a field listed the actions of UI policies and data policies of a parent table** that
+  are not passed down to child tables.
+- `sn_instance` reported a partial role list as the roles of the account when some role names were hidden.
+- A choice list that is only partly readable was treated as complete, and the choices of a field of a database
+  view were looked up under the name of the view.
 
 ### Added
 
@@ -79,6 +102,8 @@ measurements.
   property and the account's roles, not only the tables.
 - Two more prompts: `review_upgrade` and `assess_change`.
 - `npm run call` runs one tool from the shell. `npm run origin-check` measures `sn_origin` on your instance.
+- `sn_upgrade_skips` and the upgrade evidence of `sn_origin` show `target`, the name the upgrade gives the record,
+  next to the file name.
 
 ### Changed
 
@@ -89,6 +114,8 @@ measurements.
 - `sn_delta`: `createdBy` became `changedBy` and also matches the user of the last change.
 - `sn_upgrade_skips`: `upgrade` defaults to `latest_family`. `byDisposition` and `byType` are exact lists for the
   whole filter instead of counts within the page.
+- `sn_query`: the `query` in the answer is the one that was sent. It differs from the input where properties that
+  hold secrets were left out.
 - `sn_plugins`: `storeApps.readFrom` became `table`; both lists carry `table` and `query`.
 - A redirect is an error of kind `redirect`, an oversized answer one of kind `too_large`. Both were
   `invalid_response`, with a hint about hibernating instances.
@@ -105,6 +132,20 @@ measurements.
 - A parent chain that loops, sent by a broken or hostile instance, made the server wait forever.
 - A value read from the instance (an update name, a parent table) went into the next query unchecked.
 - An answer was read into memory completely before its size was checked.
+- A field that holds a secret was withheld from the answer, but could be used in a condition or a sort. "Starts
+  with a", "starts with b": the number of matches gives a value away piece by piece. Such a field can now only be
+  asked whether it is filled. A query that compares or sorts by the value of system properties leaves the
+  properties of a password type out; a count per property value is refused.
+- The value of a system property was passed on when neither its type nor its name came back, when its type was
+  empty, and through a database view whose dictionary could not be read.
+- With tables closed on the machine, the names behind a list of references into a closed table were passed on, and
+  so were display values of fields whose type could not be read. A hint about a misspelled field named fields of a
+  closed table.
+- A field to count by that could not be verified was sent to the Aggregate API when no row was visible to check
+  it against.
+- A token renewed between two rejected requests was not tried for a minute, because the pause after the first
+  rejection stayed in force.
+- The lines of the audit log could stand in another order than the requests.
 
 ## 0.2.0 (2026-11-19)
 

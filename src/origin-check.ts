@@ -14,9 +14,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { ServiceNowClient } from './client.js'
 import { loadSettings } from './config.js'
+import { labelOf, rawOf, tidy } from './result.js'
 import { buildServer } from './server.js'
 import { mapLimit } from './tools/shared.js'
-import { recentUpgrades } from './tools/upgrade.js'
+import { FALLBACK_SKIPPED, recentUpgrades } from './tools/upgrade.js'
 
 type Data = Record<string, any>
 
@@ -60,19 +61,33 @@ const upgrade = (await recentUpgrades(sn)).find((item) => item.kind === 'family'
 if (!upgrade) {
   console.log('\nNo change of release family is recorded, so there is no upgrade to cross-check against.')
 } else {
-  const choices = await sn.query<Record<string, string>>({
-    table: 'sys_choice',
-    query: 'name=sys_upgrade_history_log^element=disposition^language=en^inactive=false^labelSTARTSWITHSkipped',
-    fields: ['value', 'label'],
-    limit: 50,
-  })
+  const choices = await sn
+    .query<Record<string, string>>({
+      table: 'sys_choice',
+      query: 'name=sys_upgrade_history_log^element=disposition^language=en^inactive=false^labelSTARTSWITHSkipped',
+      fields: ['value', 'label'],
+      limit: 50,
+    })
+    .then((page) => page.records)
+    .catch(() => [])
+  // Where the instance does not list its codes, the built-in list is used, as sn_upgrade_skips does.
+  const labels = choices.length ? choices : Object.entries(FALLBACK_SKIPPED).map(([value, label]) => ({ value, label }))
   // "Skipped Error" is a failure to apply a file, not a judgement that it was customized.
-  const codes = choices.records.filter((row) => !/error/i.test(row.label)).map((row) => row.value)
+  const codes = labels.filter((row) => !/error/i.test(row.label)).map((row) => row.value)
   const skipped = await sn.all<Record<string, string>>(
-    { table: 'upgrade_history_task', query: `upgrade_detail.upgrade_history=${upgrade.sysId}^upgrade_detail.dispositionIN${codes.join(',')}`, fields: ['upgrade_detail.file_name'] },
+    { table: 'upgrade_history_task', query: `upgrade_detail.upgrade_history=${upgrade.sysId}^upgrade_detail.dispositionIN${codes.join(',')}`, fields: ['upgrade_detail.file_name', 'state'], display: true },
     2_000,
   )
-  const names = [...new Set(skipped.records.map((row) => row['upgrade_detail.file_name']).filter((name) => /^[A-Za-z0-9_.-]{1,250}$/.test(name ?? '')))]
+  // A file that was reviewed and reverted is the vendor's again: sn_origin does not call it customized, and it is not counted here.
+  const names = [
+    ...new Set(
+      skipped.records
+        .map(tidy)
+        .filter((row) => !/reverted/i.test(labelOf(row.state)))
+        .map((row) => rawOf(row['upgrade_detail.file_name']))
+        .filter((name) => /^[A-Za-z0-9_.-]{1,250}$/.test(name)),
+    ),
+  ]
   const answers = await mapLimit(names, 3, (updateName) => origin({ updateName }))
   table(`Files the last family upgrade (finished ${upgrade.finished}) skipped as customized`, answers, verdict)
   const agree = answers.filter((answer) => answer.verdict === 'customized').length

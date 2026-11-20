@@ -23,6 +23,7 @@ export const ORIGIN_CAVEATS = [
   '"installed_application" covers applications from the ServiceNow Store and applications from a company\'s own repository alike.',
   'A record that was reverted to the vendor version can keep its customer update row. The platform then still treats it as customized.',
   'The rule was derived and measured on one instance and one release. Treat "out_of_box_as_captured" as "no captured change", not as proof.',
+  'The file name an upgrade lists carries the sys_id the vendor gave the record. Where the instance holds the same thing under another sys_id, as measured for system properties, no record answers to that name: the verdict is then "unknown", and the record has to be looked up by its name.',
 ]
 
 export const DEPENDENCIES_NOT_COVERED = [
@@ -54,11 +55,14 @@ export const UPGRADE_NOTES = [
 ]
 
 export const QUERY_LIMITS = [
-  'Encoded queries are parsed with a strict grammar. What cannot be checked is refused: related-list queries (RLQUERY), tag conditions, catalog variables, the shorthand operators *, % and !*, and regular expressions.',
+  'Encoded queries are parsed with a strict grammar. What cannot be checked is refused: related-list queries (RLQUERY), tag conditions, catalog variables, the shorthand operators *, % and !*, and regular expressions. GROUPBY inside a query is refused, because the Table API ignores it: use the groupBy input.',
   'DYNAMIC conditions are refused, because they run a script stored on the instance. "javascript:" values are refused for the same reason.',
   'Date conditions need fixed values. RELATIVEGT and its siblings work with the units year, quarter, month, dayofweek, hour and minute.',
+  'A condition needs a value. Only "=" and "!=" may come without one: they then mean "is empty" and "is not empty". Without a value ServiceNow drops LIKE, NOT LIKE, STARTSWITH, ENDSWITH, CONTAINS and NOT IN and answers unfiltered, and IN matches nothing.',
+  '"!=", "NOT IN" and "NOT LIKE" leave out the rows where the field is empty. The answer says so when one of them is used; add ^OR<field>ISEMPTY to count those rows too.',
   'A choice field is compared with its stored value. A query that uses the English label of a field of the table itself is refused and the stored value is named. Where the choices could not be read, the answer says so.',
   'Fields that hold secrets (types password, password2, glide_encrypted, and system properties of a password type) come back as "[withheld: this field holds a secret]". Where the type of a field cannot be read, its name decides, and the answer says that types were missing.',
+  'A field that holds a secret can be asked whether it is filled (ISEMPTY, ISNOTEMPTY). It cannot be compared or sorted by: the number of matches would give its value away piece by piece. A query that compares or sorts by the value of system properties leaves the properties of a password type out and says so; through a database view or a reference such a query is refused, and so is a count per property value.',
   'One answer carries about 60,000 characters of rows. Longer values are cut and marked; more rows are reached with nextOffset.',
 ]
 
@@ -106,7 +110,9 @@ second time. sn_instance reports whether the account has that role.
 Everything a tool returns goes to the MCP client and from there to the model it uses. The account's access rules
 decide what can be read. On the machine that runs the server, SERVICENOW_TABLE_ALLOW and SERVICENOW_TABLE_DENY can
 keep the rows of tables away from it: also through a dot-walk or a database view, and including the names behind
-references into them. A table closed that way is reported as an error of kind \`blocked\`.
+references into them, single ones and lists. Where tables are closed and the type of a field cannot be read, its
+display value is left out, because it is not known which table it names. A table closed that way is reported as an
+error of kind \`blocked\`.
 
 ## Evidence
 

@@ -23,6 +23,9 @@ condition. Other releases can behave differently; `test/query.test.ts` holds the
 | `NOTLIKE` written without the space | `close_notesNOTLIKEx` | refuses |
 | A second condition written after `^^` | `active=false^^priority=1` | sends it as one condition, with a warning |
 | An unknown field in `ORDERBY` | `ORDERBYzzz` | refuses |
+| `LIKE`, `NOT LIKE`, `STARTSWITH`, `ENDSWITH` or `CONTAINS` without a value | `close_notesLIKE` | refuses |
+| `NOT IN` without a value | `close_notesNOT IN` | refuses |
+| `GROUPBY<field>` | `active=true^GROUPBYstate` | refuses: use the `groupBy` input, which counts through the Aggregate API |
 
 `^^` is how ServiceNow writes a literal `^` inside a value. `active=false^^priority=1` is therefore one condition on
 `active`; the part about `priority` is not applied.
@@ -43,6 +46,8 @@ condition. Other releases can behave differently; `test/query.test.ts` holds the
 | `MORETHAN` or `LESSTHAN` between two plain fields | `reassignment_countMORETHANreopen_count` | refuses: use `GT_FIELD` or `LT_FIELD` |
 | `MORETHAN` or `LESSTHAN` with the unit `minute`, `second` or `dayofweek` | `closed_atMORETHANopened_at@minute@after@240` | refuses: the units that work are `year`, `quarter`, `month`, `week`, `day`, `hour` |
 | `INSTANCEOF` or `IN_HIERARCHY` without a value | `sys_class_nameINSTANCEOF` | refuses |
+| `IN` without a value | `close_notesIN` | refuses: it matched none of the 53 rows with an empty field |
+| `>`, `>=`, `<` or `<=` without a value | `priority>` | refuses: on a number or a date it matched nothing, on a text field the empty rows |
 
 ## Applied, but not as written
 
@@ -52,7 +57,7 @@ condition. Other releases can behave differently; `test/query.test.ts` holds the
 | `SAMEAS` with a unit it does not know | compares the exact values instead | refuses units other than `year`, `month`, `week`, `day`, `hour` |
 | `GT_FIELD` with `@day` behind the field | answers with a different count than without | refuses: these operators take a plain field |
 | `^OR` in front of a text search | applies something, but not an "or" | refuses |
-| `GROUPBY<field>` | ignores it for the Table API | accepts it, after checking the field |
+| `!=`, `NOT IN`, `NOT LIKE` | leaves out the rows where the field is empty: of 82 incidents, 33 without an assignee, `assigned_to!=<sys_id nobody has>` returns 49 | sends it, with a warning that names `^OR<field>ISEMPTY` |
 
 ## Runs script on the instance
 
@@ -63,6 +68,19 @@ condition. Other releases can behave differently; `test/query.test.ts` holds the
 | `DATEPART` | needs a `javascript:` value | refuses |
 
 These were not sent to the instance for measurement. They are refused because of what they are documented to do.
+
+## Reads a secret piece by piece
+
+| Form | Example | The server |
+|---|---|---|
+| A condition on a field of a password or encrypted type | `user_passwordSTARTSWITH$s$a` | refuses; `ISEMPTY` and `ISNOTEMPTY` are allowed |
+| A sort by such a field, or a comparison of another field with it | `ORDERBYuser_password` | refuses |
+| A condition on, or a sort by, the value of system properties | `valueLIKEhttp` on `sys_properties` | sends it with `typeNOT INpassword,password2^ORtypeISEMPTY` added to every part of the query, and says so |
+| The same through a database view or a reference | `prop_valueLIKEhttp` | refuses |
+
+The instance applies each of these as written. The number of matches would tell whether a guess was right, and
+repeated guesses would spell out a value that the answer itself withholds. The second part of the added condition
+keeps the properties without a type in the result: `NOT IN` alone would leave them out.
 
 ## Works as expected
 
@@ -80,14 +98,19 @@ Also measured:
 - `LIKE` and `STARTSWITH` on a reference field match its display value. `=` and `IN` compare with the sys_id.
 - A string is compared without regard to case: `category=Inquiry` finds `inquiry`.
 - `ref_<child table>.<field>` on a parent table reaches a field of the child table.
-- An empty value (`priority=`, `priorityIN`) is applied as "is empty".
+- `=` without a value is applied as "is empty", and `!=` without a value as "is not empty", on text, reference,
+  number, date and boolean fields alike.
+- A condition written behind an `ORDERBY` is applied.
+- Three carets in a row are read as a literal `^` followed by a separator: `active=false^^^priority=1` applies both
+  conditions.
 
 ## Not measured
 
 Related-list queries (`RLQUERY … ENDRLQUERY`), tag conditions by id (`sys_tags.<id>`), catalog variables
 (`variables.<id>`), `MATCH_RGX`, `MATCH_PAT` and `TRENDBY` are refused, because the server cannot check their field
-names against the dictionary. `IN_HIERARCHY` with a real sys_id is accepted on the strength of its documentation
-only.
+names against the dictionary. Tags and variables are refused wherever a field can stand: in a condition, behind a
+dot-walk, in a sort, and as the second field of a comparison. `IN_HIERARCHY` with a sys_id is accepted on the
+strength of its documentation only.
 
 The refusal of a choice label looks at the English labels of fields of the queried table, and of fields a database
 view takes from its tables. A field reached by a dot-walk is not checked, and the answer says so.

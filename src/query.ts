@@ -80,6 +80,10 @@ const REFUSED: Array<[string, string]> = [
 ]
 
 const NO_VALUE = new Set<Operator>(['ISEMPTY', 'ISNOTEMPTY', 'ISEMPTYSTRING', 'ANYTHING'])
+/** With an empty value these two mean "is empty" and "is not empty". Every other operator drops the condition or matches nothing. */
+const EMPTY_VALUE_ALLOWED = new Set<Operator>(['=', '!='])
+/** Tags and catalog variables are addressed like fields, but they are not in the dictionary and cannot be checked. */
+const NOT_IN_DICTIONARY = /(?:^|\.)(sys_tags|variables)(?:\.|$)/
 const RELATIVE = new Set<Operator>(['RELATIVEGT', 'RELATIVELT', 'RELATIVEGE', 'RELATIVELE', 'RELATIVEEE'])
 const PLAIN_FIELD = new Set<Operator>(['GT_FIELD', 'LT_FIELD', 'GT_OR_EQUALS_FIELD', 'LT_OR_EQUALS_FIELD'])
 
@@ -103,6 +107,8 @@ export interface ParsedQuery {
   /** Every field path the query mentions: in conditions, in comparisons with a second field, and in sorting. */
   fields: string[]
   conditions: Condition[]
+  /** The fields the query sorts by, and the second field of a comparison between two fields. */
+  otherFields: string[]
   /** true if the query contains "^^", a literal ^ inside a value. */
   escapedCaret: boolean
 }
@@ -123,6 +129,11 @@ export function assertFieldPath(field: string, table?: string): void {
   if (!FIELD_PATH.test(field)) {
     throw validation(`"${shorten(field)}" is not a valid field name. Use lowercase names; dots for dot-walking.`, table)
   }
+}
+
+/** The usual form of a sys_id. Some delivered records carry another one, a word such as "global". */
+export function isGeneratedSysId(value: string): boolean {
+  return /^[0-9a-f]{32}$/.test(value)
 }
 
 export function assertSysId(value: string): void {
@@ -188,7 +199,7 @@ function splitTerms(query: string): string[] {
  * checked against the dictionary.
  */
 export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
-  const parsed: ParsedQuery = { fields: [], conditions: [], escapedCaret: false }
+  const parsed: ParsedQuery = { fields: [], conditions: [], otherFields: [], escapedCaret: false }
   if (!query) return parsed
 
   if (query.length > MAX_QUERY_LENGTH) throw validation(`The query is longer than ${MAX_QUERY_LENGTH} characters.`, table)
@@ -204,14 +215,21 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
   const unsupported = (term: string, why: string) =>
     validation(`Cannot check the query term "${shorten(term)}": ${why}. ${GRAMMAR}`, table)
   parsed.escapedCaret = query.includes('^^')
+  const inDictionary = (path: string, raw: string) => {
+    const special = NOT_IN_DICTIONARY.exec(path)
+    if (special) throw unsupported(raw, `${special[1]} is not sent, because it is addressed like a field but is not in the dictionary, so its use cannot be checked`)
+    return path
+  }
 
   for (const raw of splitTerms(query)) {
     if (raw === '' || raw === 'EQ') continue
 
     const sort = /^(ORDERBYDESC|ORDERBY|GROUPBY)(.*)$/s.exec(raw)
     if (sort) {
+      if (sort[1] === 'GROUPBY') throw unsupported(raw, 'the Table API ignores GROUPBY in a query; to count rows per value use the groupBy input of sn_query')
       if (!FIELD_PATH.test(sort[2])) throw unsupported(raw, `${sort[1]} needs a field name`)
-      parsed.fields.push(sort[2])
+      parsed.fields.push(inDictionary(sort[2], raw))
+      parsed.otherFields.push(sort[2])
       continue
     }
 
@@ -228,11 +246,7 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
     const match = FIELD_PREFIX.exec(term)
     if (!match) throw unsupported(raw, 'it does not start with a lowercase field name')
     const [, field, rest] = match
-
-    // Tags and catalog variables are addressed like fields, but they are not in the dictionary and cannot be checked.
-    if (/^(sys_tags|variables)(\.|$)/.test(field)) {
-      throw unsupported(raw, `conditions on ${field.split('.')[0]} are not sent, because their names cannot be checked against the dictionary`)
-    }
+    inDictionary(field, raw)
 
     const refused = REFUSED.find(([name]) => rest.startsWith(name))
     if (refused) throw unsupported(raw, `${refused[0]} is not sent, because ${refused[1]}`)
@@ -244,11 +258,29 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
     parsed.fields.push(field)
     parsed.conditions.push({ field, operator, value })
     const second = checkValue(operator, value, (why) => unsupported(raw, why))
-    if (second) parsed.fields.push(second)
+    if (second) {
+      parsed.fields.push(inDictionary(second, raw))
+      parsed.otherFields.push(second)
+    }
   }
 
   parsed.fields = [...new Set(parsed.fields)]
+  parsed.otherFields = [...new Set(parsed.otherFields)]
   return parsed
+}
+
+/**
+ * Adds a condition to every part of a query that is joined by ^NQ, so that it
+ * holds for all of them. Measured: a condition behind an ORDERBY is applied.
+ */
+export function withCondition(query: string, condition: string): string {
+  const terms: string[] = []
+  for (const term of splitTerms(query)) {
+    if (term.startsWith('NQ')) terms.push(condition)
+    terms.push(term.replaceAll('^', '^^'))
+  }
+  terms.push(condition)
+  return terms.filter(Boolean).join('^')
 }
 
 /**
@@ -292,6 +324,8 @@ function checkValue(operator: Operator, value: string, unsupported: (why: string
       )
     }
     return parts[0]
+  } else if (value === '' && !EMPTY_VALUE_ALLOWED.has(operator)) {
+    throw unsupported(`${operator} needs a value. Without one ServiceNow drops the condition or matches nothing; to ask for empty fields use ISEMPTY or ISNOTEMPTY`)
   }
   return undefined
 }

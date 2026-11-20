@@ -46,6 +46,10 @@ export const SOURCES: Array<{ table: string; usedBy: string }> = [
   { table: 'sc_cat_item_producer', usedBy: 'sn_dependencies' },
   { table: 'sys_relationship', usedBy: 'sn_dependencies' },
   { table: 'sys_db_view_table', usedBy: 'sn_dependencies, database views' },
+  { table: 'sys_ui_policy_action', usedBy: 'sn_dependencies for one field' },
+  { table: 'sys_data_policy_rule', usedBy: 'sn_dependencies for one field' },
+  { table: 'sys_ui_element', usedBy: 'sn_dependencies for one field (forms)' },
+  { table: 'sys_ui_list_element', usedBy: 'sn_dependencies for one field (lists)' },
 ]
 
 /** Failures that say the instance could not be used at all, as opposed to one table being closed. */
@@ -79,9 +83,9 @@ export async function accountRoles(sn: ServiceNowClient): Promise<{ roles: numbe
       2_000,
     )
     if (!complete || (total !== null && records.length < total)) return null
-    const names = new Set(records.map((row) => row['role.name']).filter(Boolean))
-    // Rows without a role name: the name is hidden from this account, so the roles are not known.
-    if (records.length && !names.size) return null
+    // A row without a role name: the name is hidden from this account, and it could be the one that matters.
+    if (records.some((row) => !row['role.name'])) return null
+    const names = new Set(records.map((row) => row['role.name']))
     return { roles: names.size, admin: names.has('admin'), readOnlyRole: names.has('snc_read_only') }
   } catch {
     return null

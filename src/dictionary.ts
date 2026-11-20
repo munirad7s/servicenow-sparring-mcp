@@ -97,9 +97,17 @@ export class Dictionary {
     private readonly recheckMs = 30_000,
   ) {}
 
-  table(name: string, maxAgeMs = this.ttlMs): Promise<TableInfo | null> {
+  table(name: string): Promise<TableInfo | null> {
     assertTableName(name)
-    return this.cached(this.tables, name, () => this.loadTable(name), maxAgeMs)
+    return this.cached(this.tables, name, () => this.loadTable(name))
+  }
+
+  /**
+   * Drops what is remembered about a table, so that the next read asks the instance.
+   * For a database view, call it for the tables it joins as well.
+   */
+  forget(name: string): void {
+    for (const cache of [this.tables, this.columnSets, this.labelSets]) cache.delete(name)
   }
 
   /** Own and inherited fields of a table, without dictionary overrides. null if the table is unknown. */
@@ -108,16 +116,16 @@ export class Dictionary {
   }
 
   /** The fields as they behave on this table: inherited fields included, overrides applied. */
-  async effectiveColumns(name: string, maxAgeMs = this.ttlMs): Promise<{ columns: Column[]; complete: boolean; overridesRead: boolean; labelsRead: boolean } | null> {
-    const info = await this.table(name, maxAgeMs)
-    const base = info && (await this.columnSet(name, maxAgeMs))
+  async effectiveColumns(name: string): Promise<{ columns: Column[]; complete: boolean; overridesRead: boolean; labelsRead: boolean } | null> {
+    const info = await this.table(name)
+    const base = info && (await this.columnSet(name))
     if (!info || !base) return null
 
     const columns = new Map([...base.columns].map(([key, column]) => [key, { ...column }]))
     if (info.kind === 'database_view') return { columns: [...columns.values()], complete: !base.partial, overridesRead: true, labelsRead: true }
 
     // A child table can give an inherited field its own label: "Close notes" on task is "Resolution notes" on incident.
-    const labels = await this.cached(this.labelSets, name, () => this.loadLabels(info.chain), maxAgeMs).catch(() => null)
+    const labels = await this.cached(this.labelSets, name, () => this.loadLabels(info.chain)).catch(() => null)
     for (const [element, label] of labels ?? []) {
       const column = columns.get(element)
       if (column && label) column.label = label
@@ -242,18 +250,26 @@ export class Dictionary {
     return check
   }
 
-  /** The choices of a field, from the nearest table in the parent chain that defines any. Empty if there are none. */
+  /**
+   * The choices of a field, from the nearest table in the parent chain that defines any. Empty if there are none.
+   * Fails if the list is only partly readable: a missing choice would look like a value that does not exist.
+   */
   async choices(table: string, field: string): Promise<Choice[]> {
     const info = await this.table(table)
     if (!info) return []
 
     return this.cached(this.choiceLists, `${table}.${field}`, async () => {
-      const { records } = await this.sn.query<Record<string, string>>({
-        table: 'sys_choice',
-        query: `nameIN${info.chain.join(',')}^element=${field}^inactive=false^language=en^ORDERBYsequence`,
-        fields: ['name', 'value', 'label'],
-        limit: 200,
-      })
+      const { records, total, complete } = await this.sn.all<Record<string, string>>(
+        {
+          table: 'sys_choice',
+          query: `nameIN${info.chain.join(',')}^element=${field}^inactive=false^language=en^ORDERBYsequence`,
+          fields: ['name', 'value', 'label'],
+        },
+        2_000,
+      )
+      if (!complete || (total !== null && records.length < total)) {
+        throw new ServiceNowError(`The choices of "${field}" are only partly readable.`, 'acl', 'sys_choice')
+      }
       const owner = info.chain.find((name) => records.some((row) => row.name === name))
       return records
         .filter((row) => row.name === owner && typeof row.value === 'string')

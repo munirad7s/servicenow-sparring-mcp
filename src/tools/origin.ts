@@ -3,10 +3,10 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { GroupCount, Page, Row } from '../client.js'
 import { validation } from '../errors.js'
 import { ORIGIN_CAVEATS } from '../limitations.js'
-import { assertSysId, isTableName } from '../query.js'
+import { assertSysId, isGeneratedSysId, isTableName } from '../query.js'
 import { fail, labelOf, ok, rawOf, rowSchema, source, sourceShape, tidy, withheldWarning } from '../result.js'
 import { traced } from '../trace.js'
-import { errorKind, isSystemAccount, READ_ONLY, type Context } from './shared.js'
+import { errorKind, isSystemAccount, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
 
 const UPDATE_NAME = /^[A-Za-z0-9_.-]{1,250}$/
 
@@ -26,8 +26,57 @@ const PROVENANCE: Record<string, Provenance> = {
  * element, and the entry of a table itself is named "..._null".
  */
 const NAMED_BY_CONTENT: Record<string, (row: Record<string, string>) => string> = {
-  sys_dictionary: (row) => `sys_dictionary_${row.name}_${row.element || 'null'}`,
-  sys_documentation: (row) => `sys_documentation_${row.name}_${row.element ?? ''}_${row.language}`,
+  sys_dictionary: (row) => (row.name ? `sys_dictionary_${row.name}_${row.element || 'null'}` : ''),
+  sys_documentation: (row) => (row.name && row.language ? `sys_documentation_${row.name}_${row.element ?? ''}_${row.language}` : ''),
+}
+const NAME_BY_CONTENT = /^(sys_dictionary|sys_documentation)_([a-z0-9_]+)$/
+
+const FILE_FIELDS = [
+  'sys_id',
+  'sys_class_name',
+  'sys_name',
+  'sys_update_name',
+  'sys_package',
+  'sys_package.sys_class_name',
+  'sys_scope',
+  'sys_policy',
+  'sys_created_on',
+  'sys_created_by',
+  'sys_updated_on',
+  'sys_updated_by',
+]
+
+/** true if rows that match were not returned: access rules hide them from the account. */
+const hidesRows = (page: Page<unknown> | null) =>
+  Boolean(page && page.total !== null && page.records.length < Math.min(page.limit, Math.max(page.total - page.offset, 0)))
+
+/**
+ * The query that finds the record such a name was built from. The name does not
+ * say where the table name ends and the field name begins, so every split is a
+ * candidate; the caller keeps the row whose name comes out the same.
+ */
+export function queryByContent(updateName: string): { table: string; query: string } | null {
+  const match = NAME_BY_CONTENT.exec(updateName)
+  if (!match) return null
+  const [, table] = match
+  let body = match[2]
+  let language = ''
+  if (table === 'sys_documentation') {
+    const cut = body.lastIndexOf('_')
+    language = body.slice(cut + 1)
+    body = cut < 0 ? '' : body.slice(0, cut)
+    if (!language) return null
+  }
+
+  const splits = [...body.matchAll(/_/g)].map((at) => [body.slice(0, at.index), body.slice(at.index + 1)]).filter(([name]) => isTableName(name))
+  // The entry of a table itself has no element: it is named "..._null", and its label "...__<language>".
+  const none = (element: string) => element === '' || (table === 'sys_dictionary' && element === 'null')
+  const elements = [...new Set(splits.map(([, element]) => element).filter((element) => !none(element)))]
+  const element = [elements.length ? `elementIN${elements.join(',')}` : '', splits.some(([, item]) => none(item)) ? 'elementISEMPTY' : ''].filter(Boolean).join('^OR')
+  if (!element) return null
+
+  const names = [...new Set(splits.map(([name]) => name))]
+  return { table, query: [`nameIN${names.join(',')}`, element, language ? `language=${language}` : ''].filter(Boolean).join('^') }
 }
 
 /** Where a version came from. A version from an upgrade or an app installation is the vendor's own. */
@@ -113,7 +162,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
               total: z.number().nullable(),
               rows: z.array(rowSchema),
             })
-            .describe('Upgrades that did not overwrite this record. The upgrade engine compares content, so it also finds changes nobody captured.'),
+            .describe('Upgrades that did not overwrite this record. The upgrade engine compares content, so it also finds changes nobody captured. "target" is the name the upgrade gives the record.'),
         }),
         caveats: z.array(z.string()),
       },
@@ -138,40 +187,47 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           }
         }
 
-        const found = await sn.query<Row>({
-          table: 'sys_metadata',
-          query: sysId ? `sys_id=${sysId}` : `sys_update_name=${updateName}`,
-          fields: [
-            'sys_id',
-            'sys_class_name',
-            'sys_name',
-            'sys_update_name',
-            'sys_package',
-            'sys_package.sys_class_name',
-            'sys_scope',
-            'sys_policy',
-            'sys_created_on',
-            'sys_created_by',
-            'sys_updated_on',
-            'sys_updated_by',
-          ],
-          limit: 1,
-          display: true,
-        })
+        const fileBy = (query: string) => sn.query<Row>({ table: 'sys_metadata', query, fields: FILE_FIELDS, limit: 1, display: true })
+        const found = await fileBy(sysId ? `sys_id=${sysId}` : `sys_update_name=${updateName}`)
         let file = found.records[0] ? tidy(found.records[0]) : null
-        const hidden = !file && (found.total ?? 0) > 0
+        let hidden = !file && (found.total ?? 0) > 0
+        // true where it could not be established whether the record exists: then "not found" is not an answer.
+        let untraceable = false
+        let name = ''
+
+        // A dictionary entry or a label that was never captured stores no update name. Asked for by the name it would
+        // get, it is found by what it describes. Measured: two in three dictionary entries of an instance are like that.
+        const described = !file && !hidden && updateName ? queryByContent(updateName) : null
+        if (described && updateName) {
+          const own = await sn.query<Record<string, string>>({ table: described.table, query: described.query, fields: ['sys_id', 'name', 'element', 'language'], limit: 50 }).catch((error) => errorKind(error))
+          const hit = typeof own === 'string' ? undefined : own.records.find((row) => NAMED_BY_CONTENT[described.table](row) === updateName)
+          if (hit && isGeneratedSysId(String(hit.sys_id))) {
+            const again = await fileBy(`sys_id=${hit.sys_id}`)
+            file = again.records[0] ? tidy(again.records[0]) : null
+            hidden = !file
+            name = updateName
+          } else if (typeof own === 'string' ? own !== 'not_found' : hidesRows(own)) {
+            untraceable = true
+            warnings.push(`${described.table} could not be read completely, so it is not known whether a record of this name exists.`)
+          }
+        }
         if (hidden) warnings.push('The record exists, but this account may not read it (row-level access rule). Nothing about it could be checked.')
 
         // The update name is the key of all evidence. Read from the instance, it is checked before it goes into a query.
-        let name = file ? rawOf(file.sys_update_name) : (updateName ?? '')
+        if (!name) name = file ? rawOf(file.sys_update_name) : (updateName ?? '')
         if (file && !name) {
           const kind = rawOf(file.sys_class_name)
-          const own = NAMED_BY_CONTENT[kind]
-            ? await sn.query<Record<string, string>>({ table: kind, query: `sys_id=${rawOf(file.sys_id)}`, fields: ['name', 'element', 'language'], limit: 1 }).catch(() => null)
-            : null
-          name = own?.records[0] ? NAMED_BY_CONTENT[kind](own.records[0]) : ''
-          if (!name) {
+          if (!NAMED_BY_CONTENT[kind]) {
             warnings.push('This record carries no update name. Records of this kind are captured as part of another record, or not at all, so its change history cannot be looked up.')
+          } else {
+            const own = await sn.query<Record<string, string>>({ table: kind, query: `sys_id=${rawOf(file.sys_id)}`, fields: ['name', 'element', 'language'], limit: 1 }).catch((error) => errorKind(error))
+            name = typeof own === 'string' || !own.records[0] ? '' : NAMED_BY_CONTENT[kind](own.records[0])
+            if (!name) {
+              warnings.push(
+                `The update name of this record is built from the table and field it describes, and those could not be read from ${kind}` +
+                  `${typeof own === 'string' ? ` (${own})` : ''}, so its change history was not looked up.`,
+              )
+            }
           }
         }
         if (name && !UPDATE_NAME.test(name)) {
@@ -180,13 +236,18 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         }
 
         // Not an application file, or deleted: its update rows still carry the sys_id at the end of their name.
-        let untraceable = false
         if (!file && !hidden && sysId && !name) {
-          const trace = await read('sys_update_xml', `nameENDSWITH_${sysId}^ORDERBYDESCsys_updated_on`, ['name'], 1)
-          const tracedName = trace?.records[0] ? rawOf(tidy(trace.records[0]).name) : ''
-          if (UPDATE_NAME.test(tracedName)) name = tracedName
-          // Not readable, or rows exist that this account cannot see: then "no trace" is not established.
-          untraceable = !trace || (!trace.records.length && (trace.total ?? 0) > 0)
+          if (isGeneratedSysId(sysId)) {
+            const trace = await read('sys_update_xml', `nameENDSWITH_${sysId}^ORDERBYDESCsys_updated_on`, ['name'], 1)
+            const tracedName = trace?.records[0] ? rawOf(tidy(trace.records[0]).name) : ''
+            if (UPDATE_NAME.test(tracedName)) name = tracedName
+            // Not readable, or rows exist that this account cannot see: then "no trace" is not established.
+            untraceable = !trace || (!trace.records.length && (trace.total ?? 0) > 0)
+          } else {
+            // A word like "category" at the end of a name would match the update rows of other records.
+            untraceable = true
+            warnings.push('This sys_id is not of the generated form (32 hexadecimal digits), so customer updates could not be searched for by it. Give the update name instead.')
+          }
         }
 
         // A tracked record outside sys_metadata, for example a choice: read it from its own table.
@@ -217,7 +278,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
               sn.groupCount('sys_update_version', 'source_table', `name=${name}`).catch(() => null as GroupCount[] | null),
               // Not a warning if this fails: it is one more witness, and many accounts cannot read it.
               sn
-                .query<Row>({ table: 'upgrade_history_task', query: skipsQuery, fields: ['upgrade_detail.disposition', 'upgrade_detail.upgrade_history.to_version', 'state', 'sys_created_on'], limit: 5, display: true })
+                .query<Row>({ table: 'upgrade_history_task', query: skipsQuery, fields: ['upgrade_detail.disposition', 'upgrade_detail.target_name', 'upgrade_detail.upgrade_history.to_version', 'state', 'sys_created_on'], limit: 5, display: true })
                 .catch(() => null),
             ])
           : [null, null, null, null]
@@ -227,7 +288,12 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         const updateRows = updates?.records.map(tidy) ?? []
         const versionRows = versions?.records.map(tidy) ?? []
         const current = versionRows.find((row) => rawOf(row.state) === 'current') ?? null
-        const sources = bySource ? Object.fromEntries(bySource.map((group) => [group.value || 'unknown', group.count])) : null
+        let sources: Record<string, number> | null = bySource ? Object.fromEntries(bySource.map((group) => [group.value || 'unknown', group.count])) : null
+        if (!sources && versions && versions.total !== null && versions.total <= versionRows.length) {
+          // The Aggregate API did not answer, but the page holds every version: they are counted here.
+          sources = {}
+          for (const row of versionRows) sources[rawOf(row.source_table) || 'unknown'] = (sources[rawOf(row.source_table) || 'unknown'] ?? 0) + 1
+        }
         const vendorVersions = sources ? Object.entries(sources).filter(([table]) => VENDOR_SOURCES.has(table)).reduce((sum, [, count]) => sum + count, 0) : null
         const customerVersions = sources ? Object.entries(sources).filter(([table]) => CUSTOMER_SOURCES.has(table)).reduce((sum, [, count]) => sum + count, 0) : null
         const otherSources = sources ? Object.keys(sources).filter((table) => !VENDOR_SOURCES.has(table) && !CUSTOMER_SOURCES.has(table)) : []
@@ -236,8 +302,8 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
 
         const captured = updates?.total ?? (updates ? updateRows.length : null)
         const currentFromCustomer = current ? CUSTOMER_SOURCES.has(rawOf(current.source_table)) : false
-        // Versions exist, but this account sees none of them: the current one could be a customer's.
-        const versionsHidden = Boolean(versions) && !versionRows.length && (versions?.total ?? 0) > 0
+        // Versions this account cannot see, and the current one is not among those it can: it could be a customer's.
+        const versionsHidden = !current && hidesRows(versions)
         let divergence: Divergence = 'unknown'
         if ((captured ?? 0) > 0 || currentFromCustomer) divergence = 'customer_changes_captured'
         else if (captured === 0 && versions && sources && !versionsHidden) divergence = 'no_customer_changes_captured'
@@ -246,12 +312,15 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         const skipRows = (skips?.records.map(tidy) ?? []).map((row) => ({
           disposition: labelOf(row['upgrade_detail.disposition']),
           review: labelOf(row.state),
+          target: rawOf(row['upgrade_detail.target_name']),
           upgrade: rawOf(row['upgrade_detail.upgrade_history.to_version']),
           createdOn: rawOf(row.sys_created_on),
         }))
         const skip = skipRows[0]
-        const skippedAsChanged = Boolean(skip) && /^Skipped/.test(skip.disposition) && !/error/i.test(skip.disposition) && !/reverted/i.test(skip.review)
-        if (divergence === 'no_customer_changes_captured' && skips && !skipRows.length && (skips.total ?? 0) > 0) {
+        // A vendor version that became current after the skip means a later upgrade applied the record: it no longer differs.
+        const appliedSince = Boolean(skip && current) && VENDOR_SOURCES.has(rawOf(current?.source_table)) && seconds(rawOf(current?.sys_created_on)) > seconds(skip.createdOn)
+        const skippedAsChanged = Boolean(skip) && /^Skipped/.test(skip.disposition) && !/error/i.test(skip.disposition) && !/reverted/i.test(skip.review) && !appliedSince
+        if (divergence === 'no_customer_changes_captured' && hidesRows(skips)) {
           divergence = 'unknown'
           warnings.push('An upgrade has an entry for this record that this account cannot see, so it is not known whether the upgrade found it changed.')
         }
@@ -300,22 +369,40 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         }
 
         const authors = updateRows.flatMap((row) => [rawOf(row.sys_created_by), rawOf(row.sys_updated_by)]).filter(Boolean)
-        // Rows that exist but are not visible have authors too: then nothing can be said.
-        const capturedBy = !updates || (!authors.length && (captured ?? 0) > 0) ? 'unknown' : !authors.length ? 'nobody' : authors.every(isSystemAccount) ? 'system_accounts' : 'people'
+        let capturedBy: 'people' | 'system_accounts' | 'nobody' | 'unknown' = !authors.length ? 'nobody' : authors.every(isSystemAccount) ? 'system_accounts' : 'people'
+        if (!updates) capturedBy = 'unknown'
+        else if (capturedBy !== 'people' && hidesRows(updates)) {
+          // Rows that exist but are not visible have authors too: then nothing can be said.
+          capturedBy = 'unknown'
+        } else if (capturedBy !== 'people' && (captured ?? 0) > updateRows.length) {
+          // More rows than the page shows: whether a person is on any of them is asked, not guessed.
+          const byPeople = await sn.query({ table: 'sys_update_xml', query: withPeopleOnly(`name=${name}`), fields: ['sys_id'], limit: 1 }).catch(() => null)
+          capturedBy = byPeople?.total === 0 ? 'system_accounts' : byPeople?.total ? 'people' : 'unknown'
+        }
         if (capturedBy === 'system_accounts') {
           warnings.push('Every captured change to this record was made under a system account: an installation, an upgrade or a job, not an edit by a person. The platform still treats the record as customized.')
         }
 
         const changed = divergence === 'customer_changes_captured' || divergence === 'changed_without_capture'
+        // An upgrade that has an entry under this name knows a file of it, also where no record answers to the name.
+        const upgradeKnows = Boolean(skips) && (skips?.total ?? skipRows.length) > 0
 
         let verdict: Verdict = 'unknown'
         if (!file) {
-          if (hidden) verdict = 'unknown'
+          if (hidden || untraceable) verdict = 'unknown'
           else if (updateRows.some((row) => rawOf(row.action) === 'DELETE')) verdict = 'deleted_here'
-          else if (untraceable) verdict = 'unknown'
-          else if (!name || (updates && versions && captured === 0 && (versions.total ?? versionRows.length) === 0)) verdict = 'not_found'
-          else if (updateRows.length || versionRows.length) {
-            warnings.push('Changes are captured under this name, but the record itself is not readable: it was removed without a captured delete, or it lives in a table this account cannot read.')
+          else if (!name || (updates && versions && captured === 0 && (versions.total ?? versionRows.length) === 0 && !upgradeKnows)) verdict = 'not_found'
+          else {
+            if (updateRows.length || versionRows.length) {
+              warnings.push('Update rows or versions exist under this name, but the record itself is not readable: it was removed without a captured delete, or it lives in a table this account cannot read.')
+            }
+            if (upgradeKnows) {
+              warnings.push(
+                'An upgrade has an entry for a file of this name, but no record answers to it. The name of such a file carries the sys_id the vendor gave the record. ' +
+                  'A record the platform matches by its name, a system property for example, can exist here under another sys_id: ' +
+                  'look for it by the name the upgrade shows ("target" in the upgrade evidence) and judge the record you find.',
+              )
+            }
           }
         } else if (provenance === 'custom_application') {
           verdict = 'custom_application_file'
@@ -324,8 +411,9 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             // Changed, in a delivered package: created here inside it, or delivered and then changed. Inside an installed
             // application both are common, so an undecided case stays undecided. In a platform package a record made
             // here is rare (measured: 5 of 1,885 changed records), so there the change decides.
+            // Without the count of versions "created here" cannot be ruled out, and the rarity is no argument.
             if (created === 'here') verdict = 'customer_created'
-            else if (created === 'delivered' || divergence === 'changed_without_capture' || provenance === 'vendor') verdict = 'customized'
+            else if (created === 'delivered' || divergence === 'changed_without_capture' || (provenance === 'vendor' && sources !== null)) verdict = 'customized'
           } else if (created === 'delivered') {
             // No package says who delivered it, but a vendor version exists.
             verdict = 'customized'
