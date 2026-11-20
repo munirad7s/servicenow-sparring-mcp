@@ -386,17 +386,57 @@ export const copiesRecords = (table: string): boolean => withBases(table).some((
 const tableBeforeId = (name: string): string | undefined => /^(.+)_[0-9a-f]{32}$/.exec(name)?.[1]
 
 /**
+ * As many beginnings of update names as one page asks the instance about. Measured on an instance: two hundred
+ * update names share most of their beginnings, the most one page had was 433 different ones (application files)
+ * and 182 (captured changes), and no name of 76,000 had more than fifteen. A page beyond this was written to cost
+ * requests: forty beginnings a name, each name with a first word of its own, were two hundred requests and then
+ * one or two more per row.
+ */
+const MAX_BEGINNINGS_ASKED = 2_000
+
+/** What the instance said about the beginnings of the update names of one page. */
+export interface RecordTables {
+  /** The beginnings that are tables of the instance. */
+  tables: Set<string>
+  /** Every beginning that was asked about, and answered. */
+  asked: Set<string>
+  /** Names that were not asked about, because the page had more beginnings than one call asks about. */
+  leftOut: number
+}
+
+/**
  * Asks in one go which beginnings of these update names are tables. isClosedRecord needs that for each name: with
  * a list of the only tables that may be read for every beginning, otherwise for what stands before the sys_id. A
  * page of two hundred names shares most of its beginnings, so this is a handful of requests where asking name by
- * name would be hundreds. Nothing is asked where no table is closed.
+ * name would be hundreds. Nothing is asked where no table is closed. The answer is handed to isClosedRecord as it
+ * is: a name it does not cover is judged as one whose table cannot be told, and is not asked about row by row.
  */
-export async function knowRecordTables(ctx: Context, updateNames: string[]): Promise<void> {
-  if (!ctx.sn.restricted) return
-  const names = updateNames.map((name) => name.toLowerCase()).filter((name) => name.length <= MAX_UPDATE_NAME)
-  const asked = ctx.sn.openClasses() ? names.flatMap(tableCuts) : names.map(tableBeforeId).filter((table): table is string => table !== undefined)
-  // A look-up that fails here fails again where the name is judged, and is dealt with there.
-  await ctx.dict.knownTables(asked).catch(unlessNoConnection(null))
+export async function knowRecordTables(ctx: Context, updateNames: string[]): Promise<RecordTables> {
+  const asked = new Set<string>()
+  if (!ctx.sn.restricted) return { tables: new Set(), asked, leftOut: 0 }
+  const listed = Boolean(ctx.sn.openClasses())
+  let leftOut = 0
+  for (const name of new Set(updateNames.map((name) => name.toLowerCase()))) {
+    if (!name || name.length > MAX_UPDATE_NAME) continue
+    const cuts = tableCuts(name)
+    const exact = tableBeforeId(name)
+    const fresh = (listed ? cuts : exact && cuts.includes(exact) ? [exact] : []).filter((cut) => !asked.has(cut))
+    // A name is asked about as a whole or not at all: half of its beginnings say nothing about it.
+    if (asked.size + fresh.length > MAX_BEGINNINGS_ASKED) leftOut++
+    else for (const cut of fresh) asked.add(cut)
+  }
+  // A look-up that fails leaves every name without an answer: each is then judged as one whose table cannot be told.
+  const tables = await ctx.dict.knownTables([...asked]).catch(unlessNoConnection(null))
+  return tables ? { tables, asked, leftOut } : { tables: new Set(), asked: new Set(), leftOut: 0 }
+}
+
+/** What an answer says where a page had more beginnings of update names than one call asks about. */
+export function leftOutNames(page: RecordTables): string[] {
+  if (!page.leftOut) return []
+  return [
+    `${page.leftOut} update name(s) on this page were not looked up: together the names begin with more than ${MAX_BEGINNINGS_ASKED} ` +
+      'different names a table could have, and one call asks about no more. Whether those records are in a closed table could not be told, so they are treated as if they were.',
+  ]
 }
 
 /**
@@ -414,7 +454,7 @@ export async function knowRecordTables(ctx: Context, updateNames: string[]): Pro
  *
  * Measured: the instance compares a name without regard to case, so the name is judged in small letters.
  */
-export async function isClosedRecord(ctx: Context, updateName: string): Promise<boolean> {
+export async function isClosedRecord(ctx: Context, updateName: string, page?: RecordTables): Promise<boolean> {
   if (!ctx.sn.restricted) return false
   const name = updateName.toLowerCase()
   if (!name || name.length > MAX_UPDATE_NAME) return true
@@ -430,7 +470,10 @@ export async function isClosedRecord(ctx: Context, updateName: string): Promise<
   // "sys_script_include_<sys_id>" is no business rule: where a table of that name stands before the sys_id, the
   // record is of that table and of no shorter one.
   const exact = tableBeforeId(name)
-  const known = await ctx.dict.knownTables(listed ? cuts : exact && cuts.includes(exact) ? [exact] : []).catch(unlessNoConnection(null))
+  const needed = listed ? cuts : exact && cuts.includes(exact) ? [exact] : []
+  // Where the names of a page were asked about together, the answer is that one: a name it does not cover is not
+  // asked about again, row by row.
+  const known = page ? (needed.every((cut) => page.asked.has(cut)) ? page.tables : null) : await ctx.dict.knownTables(needed).catch(unlessNoConnection(null))
   const candidates = exact && known?.has(exact) ? [exact] : cuts
   if (candidates.some(closedByName)) return true
   if (!listed) return false

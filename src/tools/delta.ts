@@ -6,7 +6,7 @@ import { DELTA_GAPS } from '../limitations.js'
 import { assertPlainValue } from '../query.js'
 import { clip, fail, listing, listShape, ok, rawOf, rowSchema, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { BY_SYSTEM_ACCOUNT, CLOSED_NAME, isClosedRecord, isDate, knowRecordTables, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
+import { BY_SYSTEM_ACCOUNT, CLOSED_NAME, isClosedRecord, isDate, knowRecordTables, leftOutNames, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
 
 /** A day or a moment as the caller wrote it, in the one form the instance is asked with: YYYY-MM-DD HH:MM:SS. */
 const moment = (given: string) => {
@@ -144,9 +144,10 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
 
         // The readable name of a record in a table that is closed on this machine is not passed on. Which tables
         // the names begin with is asked for the page as a whole.
-        await knowRecordTables(ctx, page.records.map((row) => rawOf(tidy(row).name)))
+        const named = await knowRecordTables(ctx, page.records.map((row) => rawOf(tidy(row).name)))
+        warnings.push(...leftOutNames(named))
         const rows = await Promise.all(
-          page.records.map(tidy).map(async (row) => ((await isClosedRecord(ctx, rawOf(row.name))) ? { ...row, target_name: CLOSED_NAME } : row)),
+          page.records.map(tidy).map(async (row) => ((await isClosedRecord(ctx, rawOf(row.name), named)) ? { ...row, target_name: CLOSED_NAME } : row)),
         )
         const updates = clip(rows, warnings)
         return ok({ ...listing(sn, page, warnings, updates.length), byType, capturedBySystemAccounts: bySystem, updates, notCaptured: DELTA_GAPS })

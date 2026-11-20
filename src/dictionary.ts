@@ -248,23 +248,29 @@ export class Dictionary {
   async knownTables(names: string[]): Promise<Set<string>> {
     const wanted = [...new Set(names)].filter(isTableName)
     const now = Date.now()
-    const fresh = (name: string) => {
+    // The answer is put together from what this call reads, not read back from what is remembered: that is
+    // bounded, and a name that had to make room while the others were asked would come back as "no table".
+    const tables = new Set<string>()
+    const unknown: string[] = []
+    for (const name of wanted) {
       const hit = this.knownNames.get(name)
-      return hit !== undefined && now - hit.at < this.ttlMs
+      if (hit === undefined || now - hit.at >= this.ttlMs) unknown.push(name)
+      else if (hit.table) tables.add(name)
     }
-    for (const group of inGroups(wanted.filter((name) => !fresh(name)))) {
+    for (const group of inGroups(unknown)) {
       const { records, total, complete } = await this.sn.all<Record<string, string>>({ table: 'sys_db_object', query: `nameIN${group.join(',')}`, fields: ['name'] }, 1_000)
       if (!complete || (total !== null && records.length < total)) {
         throw new ServiceNowError('It could not be read completely which of these names are tables: rows of sys_db_object are hidden from this account.', 'acl', 'sys_db_object')
       }
       const found = new Set(records.map((row) => row.name))
       for (const name of group) {
+        if (found.has(name)) tables.add(name)
         this.knownNames.delete(name)
         this.knownNames.set(name, { table: found.has(name), at: now })
       }
       while (this.knownNames.size > MAX_KNOWN_NAMES) this.knownNames.delete(this.knownNames.keys().next().value as string)
     }
-    return new Set(wanted.filter((name) => this.knownNames.get(name)?.table))
+    return tables
   }
 
   /**

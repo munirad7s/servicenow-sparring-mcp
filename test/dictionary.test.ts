@@ -543,6 +543,19 @@ test('which names are tables is asked for many names at once, and remembered', a
   await assert.rejects(hidden.knownTables(['sys_script', 'sys_user']), (error: unknown) => error instanceof ServiceNowError && error.kind === 'acl')
 })
 
+test('a name that had to make room among those remembered is not answered as "no table"', async () => {
+  // What is remembered about names is bounded. A table whose entry is the oldest is dropped while more names than
+  // that are asked about: read back from what is remembered, it came back as a name that is no table.
+  const many = Array.from({ length: 5_200 }, (_, index) => `u_no_table_${index}`)
+  const instance = () => new Dictionary(fakeInstance([{ table: 'sys_db_object', query: 'nameIN', rows: [{ name: 'sys_script' }] }]).sn)
+  // Remembered from an earlier call.
+  const earlier = instance()
+  assert.deepEqual([...(await earlier.knownTables(['sys_script']))], ['sys_script'])
+  assert.equal((await earlier.knownTables(['sys_script', ...many])).has('sys_script'), true)
+  // Asked about first in the same call.
+  assert.equal((await instance().knownTables(['sys_script', ...many])).has('sys_script'), true)
+})
+
 test('names that look like an unknown field are searched for the first few only', async () => {
   // Each search compares with every field of the table: a hundred unknown names on a wide table took seconds.
   const check = await new Dictionary(fakeInstance(dictionaryRoutes).sn).checkFields('incident', Array.from({ length: 8 }, (_, index) => `numbe${index}`))

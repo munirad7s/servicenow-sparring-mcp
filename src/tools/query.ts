@@ -17,6 +17,7 @@ import {
   isClosedTableName,
   JOURNAL_TYPES,
   knowRecordTables,
+  leftOutNames,
   LOOKS_SECRET,
   mayBePropertyValue,
   NAMED_LIKE_A_PAYLOAD,
@@ -94,13 +95,12 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     }
 
     // Which tables the update names of this page begin with is asked for the page as a whole.
-    if (restricted) {
-      const beside = (row: Row) => Object.keys(row).flatMap((key) => {
-        const nameOf = recordNameKey(table, key, describe(key), owners.get(key)?.table)
-        return nameOf?.holds === 'update_name' && nameOf.path in row ? [rawOf(row[nameOf.path])] : []
-      })
-      await knowRecordTables(ctx, rows.flatMap(beside))
-    }
+    const beside = (row: Row) => Object.keys(row).flatMap((key) => {
+      const nameOf = recordNameKey(table, key, describe(key), owners.get(key)?.table)
+      return nameOf?.holds === 'update_name' && nameOf.path in row ? [rawOf(row[nameOf.path])] : []
+    })
+    const named = restricted ? await knowRecordTables(ctx, rows.flatMap(beside)) : undefined
+    if (named) warnings.push(...leftOutNames(named))
 
     const cleaned: Row[] = []
     for (const row of rows) {
@@ -137,7 +137,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
           // empty name is no table, and no update name stands for a closed record.
           const which = nameOf.path in row ? rawOf(row[nameOf.path]) : ''
           const closed =
-            nameOf.holds === 'untold' ? true : nameOf.holds === 'table' ? !nameOf.notTables?.includes(which) && (await isClosedTableName(ctx, which)) : await isClosedRecord(ctx, which)
+            nameOf.holds === 'untold' ? true : nameOf.holds === 'table' ? !nameOf.notTables?.includes(which) && (await isClosedTableName(ctx, which)) : await isClosedRecord(ctx, which, named)
           if (closed) counts.closedNames++
           out[key] = closed ? CLOSED_NAME : scrub(value)
         } else if (fromProperties || holdsSecret(column, key)) {

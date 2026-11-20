@@ -1615,6 +1615,49 @@ test('the tables of a page of update names are asked for together, not name by n
   assert.ok(calls.length < 40, `${calls.length} requests in all`)
 })
 
+test('a page of update names written to cost requests costs a bounded number, and says what it left open', async () => {
+  // Forty beginnings a name, each name with a first word of its own: eight thousand names a table could have, for
+  // one page. Asked about all of them, and again row by row once what is remembered about names had run over,
+  // that was 368 requests for the names in sn_delta, and sn_query ended at the 500 requests one call may send.
+  const tail = '_a'.repeat(38)
+  const written = (name: string, target: string) => ({ name, type: 'Other', target_name: target, sys_created_by: 'abel', sys_updated_by: 'abel' })
+  const rows = [written('sys_dictionary_incident_u_field_0', 'Field 0'), ...Array.from({ length: 199 }, (_, index) => written(`k${index}${tail}_x`, `Thing ${index}`))]
+  const world: Route[] = [
+    knownTables('sys_dictionary', 'incident'),
+    { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Update')] },
+    { table: 'sys_db_object', exact: 'name=sys_dictionary', rows: [tableRow('sys_dictionary', 'Dictionary')] },
+    { table: 'sys_db_object', query: '^ORname=sys_update_xml', rows: [tableRow('sys_update_xml', 'Update')] },
+    { table: 'sys_dictionary', query: 'nameINsys_update_xml', rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'target_name'), column('sys_update_xml', 'type'), column('sys_update_xml', 'sys_created_by'), column('sys_update_xml', 'sys_updated_by')] },
+    ...dictionaryRoutes,
+    { table: 'sys_update_xml', rows },
+    stats('sys_update_xml', { Other: 200 }),
+  ]
+  const only = { tables: { allow: ['sys_*', 'incident', 'task'], deny: [] } }
+  const { answer, calls } = await connect(world, only)
+  const data = await answer('sn_delta', { limit: 200 })
+  assert.equal(data.updates.length, 200)
+  // The name that begins with an open table stays, whatever stands beside it on the page.
+  assert.equal(data.updates[0].target_name, 'Field 0')
+  // The others begin with no table: asked about or not, the record counts as one of a closed table.
+  assert.ok(data.updates.slice(1).every((row: Data) => /^\[withheld: the record is in a table closed/.test(row.target_name)))
+  // Five beginnings of the first name, then 39 a name: 51 names fit into the two thousand that are asked about.
+  assert.match(data.warnings.join(' '), /148 update name\(s\) on this page were not looked up: together the names begin with more than 2000 different names a table could have/)
+  const asked = calls.filter((call) => call.table === 'sys_db_object' && /^nameIN[^^]*\^ORDERBYsys_id$/.test(call.query))
+  assert.ok(asked.length > 40 && asked.length < 70, `${asked.length} requests for the tables of 200 names`)
+  assert.ok(calls.length < 110, `${calls.length} requests in all`)
+
+  // The same page through sn_query, which judges row by row: no request per row either.
+  const queried = await connect(world, only)
+  const page = await queried.answer('sn_query', { table: 'sys_update_xml', fields: ['name', 'target_name'], limit: 200 })
+  assert.equal(page.records[0].target_name, 'Field 0')
+  assert.match(page.warnings.join(' '), /148 update name\(s\) on this page were not looked up/)
+  assert.ok(queried.calls.length < 110, `${queried.calls.length} requests in all`)
+
+  // A page as an instance has them says nothing of the kind.
+  const usual = await connect(world.map((route) => (route.table === 'sys_update_xml' && route.rows === rows ? { ...route, rows: rows.slice(0, 1) } : route)), only)
+  assert.doesNotMatch((await usual.answer('sn_delta', { limit: 200 })).warnings.join(' '), /not looked up/)
+})
+
 test('a list of counts that is cut says so', async () => {
   // Thirty-five types of captured changes: the answer lists the thirty largest, and a sum over them is no total.
   const types = Object.fromEntries(Array.from({ length: 35 }, (_, index) => [`Type ${String(index).padStart(2, '0')}`, 100 - index]))
