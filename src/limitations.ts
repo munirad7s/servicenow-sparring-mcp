@@ -57,8 +57,8 @@ export const QUERY_LIMITS = [
   'Encoded queries are parsed with a strict grammar. What cannot be checked is refused: related-list queries (RLQUERY), tag conditions, catalog variables, the shorthand operators *, % and !*, and regular expressions.',
   'DYNAMIC conditions are refused, because they run a script stored on the instance. "javascript:" values are refused for the same reason.',
   'Date conditions need fixed values. RELATIVEGT and its siblings work with the units year, quarter, month, dayofweek, hour and minute.',
-  'A choice field is compared with its stored value. A query that uses the label is refused and the stored value is named.',
-  'Fields that hold secrets (types password, password2, glide_encrypted, and system properties of a password type) are returned as "[withheld]".',
+  'A choice field is compared with its stored value. A query that uses the English label of a field of the table itself is refused and the stored value is named. Where the choices could not be read, the answer says so.',
+  'Fields that hold secrets (types password, password2, glide_encrypted, and system properties of a password type) come back as "[withheld: this field holds a secret]". Where the type of a field cannot be read, its name decides, and the answer says that types were missing.',
   'One answer carries about 60,000 characters of rows. Longer values are cut and marked; more rows are reached with nextOffset.',
 ]
 
@@ -105,14 +105,15 @@ second time. sn_instance reports whether the account has that role.
 
 Everything a tool returns goes to the MCP client and from there to the model it uses. The account's access rules
 decide what can be read. On the machine that runs the server, SERVICENOW_TABLE_ALLOW and SERVICENOW_TABLE_DENY can
-narrow that further.
+keep the rows of tables away from it: also through a dot-walk or a database view, and including the names behind
+references into them. A table closed that way is reported as an error of kind \`blocked\`.
 
 ## Evidence
 
 - A count is what matched on the server before row-level access rules. This account may see fewer rows.
 - A table this account cannot read is reported as an error of kind \`acl\`. That is "could not be checked".
 - Field names are verified against the dictionary before a query is sent, or against a row of the table when the
-  dictionary cannot be used. If neither is possible, the query is not sent.
+  dictionary cannot be used. If neither is possible and the table is not empty, a filtered query is not sent.
 
 ## Queries (sn_query)
 

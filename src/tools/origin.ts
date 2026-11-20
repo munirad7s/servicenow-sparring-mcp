@@ -4,7 +4,7 @@ import type { GroupCount, Page, Row } from '../client.js'
 import { validation } from '../errors.js'
 import { ORIGIN_CAVEATS } from '../limitations.js'
 import { assertSysId, isTableName } from '../query.js'
-import { fail, labelOf, ok, rawOf, rowSchema, source, sourceShape, tidy } from '../result.js'
+import { fail, labelOf, ok, rawOf, rowSchema, source, sourceShape, tidy, withheldWarning } from '../result.js'
 import { traced } from '../trace.js'
 import { errorKind, isSystemAccount, READ_ONLY, type Context } from './shared.js'
 
@@ -63,7 +63,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
       description:
         'Judge one configuration record (a business rule, a field, an ACL, a UI action). Answers separately: who ' +
         'delivered it (from the package it belongs to), whether it was changed here (customer update rows, the ' +
-        'current version, and whether the last upgrade skipped it), whether it was created here or delivered ' +
+        'current version, and whether an upgrade refused to overwrite it), whether it was created here or delivered ' +
         '(baseline version and creation time), and whether people or only system accounts made the captured changes. Returns a verdict with the evidence rows ' +
         'and the queries behind them. The verdict is "unknown" when the evidence does not decide it. Identify the ' +
         'record by sysId, or by updateName such as "sys_script_<sys_id>" or "sys_dictionary_incident_u_field". Find ' +
@@ -82,7 +82,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           .describe('"changed_without_capture": no customer update exists, but an upgrade skipped the record because it differs from the vendor version.'),
         created: z
           .enum(['here', 'delivered', 'unknown'])
-          .describe('"delivered" if a vendor version of the record exists or the record is older than its first captured change; "here" if neither holds.'),
+          .describe('"delivered" if a vendor version of the record exists or the record is older than its first captured change; "here" if a change is captured, no vendor version exists and the record is not older than that change; "unknown" otherwise.'),
         capturedBy: z
           .enum(['people', 'system_accounts', 'nobody', 'unknown'])
           .describe('Who made the captured changes. "system_accounts" means installations, upgrades or jobs, not an edit by a person.'),
@@ -180,10 +180,13 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         }
 
         // Not an application file, or deleted: its update rows still carry the sys_id at the end of their name.
+        let untraceable = false
         if (!file && !hidden && sysId && !name) {
           const trace = await read('sys_update_xml', `nameENDSWITH_${sysId}^ORDERBYDESCsys_updated_on`, ['name'], 1)
           const tracedName = trace?.records[0] ? rawOf(tidy(trace.records[0]).name) : ''
           if (UPDATE_NAME.test(tracedName)) name = tracedName
+          // Not readable, or rows exist that this account cannot see: then "no trace" is not established.
+          untraceable = !trace || (!trace.records.length && (trace.total ?? 0) > 0)
         }
 
         // A tracked record outside sys_metadata, for example a choice: read it from its own table.
@@ -192,10 +195,14 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         if (!file && !hidden && tail && isTableName(tail[1])) {
           const own = await sn
             .query<Row>({ table: tail[1], query: `sys_id=${tail[2]}`, fields: ['sys_id', 'sys_created_on', 'sys_created_by', 'sys_updated_on', 'sys_updated_by'], limit: 1, display: true })
-            .catch(() => null)
-          if (own?.records[0]) {
+            .catch((error) => errorKind(error))
+          if (typeof own !== 'string' && own.records[0]) {
             file = tidy(own.records[0])
             ownTable = tail[1]
+          } else if (typeof own === 'string' ? own !== 'not_found' : (own.total ?? 0) > 0) {
+            // The table exists but could not be read, or the row is hidden: "no such record" is not established.
+            untraceable = true
+            warnings.push(`The record could not be read from "${tail[1]}", so it is not known whether it still exists.`)
           }
         }
 
@@ -215,6 +222,8 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             ])
           : [null, null, null, null]
 
+        if (updates) withheldWarning('Customer updates', updates, warnings)
+        if (versions) withheldWarning('Versions', versions, warnings)
         const updateRows = updates?.records.map(tidy) ?? []
         const versionRows = versions?.records.map(tidy) ?? []
         const current = versionRows.find((row) => rawOf(row.state) === 'current') ?? null
@@ -227,9 +236,11 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
 
         const captured = updates?.total ?? (updates ? updateRows.length : null)
         const currentFromCustomer = current ? CUSTOMER_SOURCES.has(rawOf(current.source_table)) : false
+        // Versions exist, but this account sees none of them: the current one could be a customer's.
+        const versionsHidden = Boolean(versions) && !versionRows.length && (versions?.total ?? 0) > 0
         let divergence: Divergence = 'unknown'
         if ((captured ?? 0) > 0 || currentFromCustomer) divergence = 'customer_changes_captured'
-        else if (captured === 0 && versions && sources) divergence = 'no_customer_changes_captured'
+        else if (captured === 0 && versions && sources && !versionsHidden) divergence = 'no_customer_changes_captured'
 
         // The upgrade engine compares content. A record it skipped and nobody reverted differs from the vendor's version.
         const skipRows = (skips?.records.map(tidy) ?? []).map((row) => ({
@@ -240,6 +251,10 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         }))
         const skip = skipRows[0]
         const skippedAsChanged = Boolean(skip) && /^Skipped/.test(skip.disposition) && !/error/i.test(skip.disposition) && !/reverted/i.test(skip.review)
+        if (divergence === 'no_customer_changes_captured' && skips && !skipRows.length && (skips.total ?? 0) > 0) {
+          divergence = 'unknown'
+          warnings.push('An upgrade has an entry for this record that this account cannot see, so it is not known whether the upgrade found it changed.')
+        }
         if (divergence === 'no_customer_changes_captured' && skippedAsChanged) {
           divergence = 'changed_without_capture'
           warnings.push(
@@ -260,7 +275,12 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           warnings.push('A customer update row exists, but the version marked current is the vendor\'s and is not older than the last captured change: the record was reverted to the vendor version while the update row stayed. An upgrade still skips it.')
         }
 
-        // Created here, or delivered? A vendor version proves delivery. So does a record that is older than its first captured change.
+        const packageClass = file && !ownTable ? rawOf(file['sys_package.sys_class_name']) : ''
+        const provenance: Provenance = PROVENANCE[packageClass] ?? 'unknown'
+        const inDeliveredPackage = provenance === 'vendor' || provenance === 'installed_application'
+
+        // Created here, or delivered? A vendor version proves delivery. Inside a delivered package, so does a record that
+        // is older than its first captured change. Outside one, an old record can as well be the customer's own.
         const createdOn = file ? seconds(rawOf(file.sys_created_on)) : NaN
         let firstCapturedOn = updateRows.map((row) => rawOf(row.sys_created_on)).filter(Boolean).sort()[0] ?? ''
         if (updates && (updates.total ?? 0) > updateRows.length) {
@@ -268,41 +288,52 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           firstCapturedOn = earliest?.records[0] ? rawOf(tidy(earliest.records[0]).sys_created_on) : ''
         }
         const firstCapture = seconds(firstCapturedOn)
+        const dated = !Number.isNaN(createdOn) && !Number.isNaN(firstCapture)
         let created: 'here' | 'delivered' | 'unknown' = 'unknown'
         if ((vendorVersions ?? 0) > 0) created = 'delivered'
-        else if (!Number.isNaN(createdOn) && !Number.isNaN(firstCapture)) created = createdOn < firstCapture - 5 ? 'delivered' : vendorVersions === 0 ? 'here' : 'unknown'
+        else if (dated && inDeliveredPackage && createdOn < firstCapture - 5) created = 'delivered'
+        else if (vendorVersions === 0 && dated && createdOn >= firstCapture - 5) created = 'here'
+        else if (vendorVersions === 0 && provenance === 'global_scope' && ((captured ?? 0) > 0 || currentFromCustomer)) created = 'here'
 
         if ((vendorVersions ?? 0) > 0 && !Number.isNaN(createdOn) && !Number.isNaN(firstCapture) && createdOn >= firstCapture - 5) {
           warnings.push('A vendor version of this record exists, yet the record was created at the moment of its first captured change. It may have been created here before the vendor delivered a file with the same name.')
         }
 
         const authors = updateRows.flatMap((row) => [rawOf(row.sys_created_by), rawOf(row.sys_updated_by)]).filter(Boolean)
-        const capturedBy = !updates ? 'unknown' : !authors.length ? 'nobody' : authors.every(isSystemAccount) ? 'system_accounts' : 'people'
+        // Rows that exist but are not visible have authors too: then nothing can be said.
+        const capturedBy = !updates || (!authors.length && (captured ?? 0) > 0) ? 'unknown' : !authors.length ? 'nobody' : authors.every(isSystemAccount) ? 'system_accounts' : 'people'
         if (capturedBy === 'system_accounts') {
           warnings.push('Every captured change to this record was made under a system account: an installation, an upgrade or a job, not an edit by a person. The platform still treats the record as customized.')
         }
 
-        const packageClass = file && !ownTable ? rawOf(file['sys_package.sys_class_name']) : ''
-        const provenance: Provenance = PROVENANCE[packageClass] ?? 'unknown'
         const changed = divergence === 'customer_changes_captured' || divergence === 'changed_without_capture'
 
         let verdict: Verdict = 'unknown'
         if (!file) {
           if (hidden) verdict = 'unknown'
           else if (updateRows.some((row) => rawOf(row.action) === 'DELETE')) verdict = 'deleted_here'
-          else if (!name || (updates && versions && captured === 0 && !versionRows.length)) verdict = 'not_found'
+          else if (untraceable) verdict = 'unknown'
+          else if (!name || (updates && versions && captured === 0 && (versions.total ?? versionRows.length) === 0)) verdict = 'not_found'
           else if (updateRows.length || versionRows.length) {
             warnings.push('Changes are captured under this name, but the record itself is not readable: it was removed without a captured delete, or it lives in a table this account cannot read.')
           }
         } else if (provenance === 'custom_application') {
           verdict = 'custom_application_file'
         } else if (changed) {
-          const delivered = (vendorVersions ?? 0) > 0
-          if (provenance === 'vendor' || provenance === 'installed_application') verdict = created === 'here' ? 'customer_created' : 'customized'
-          else if (delivered) verdict = 'customized'
-          else if (provenance === 'global_scope' || created === 'here') verdict = 'customer_created'
+          if (inDeliveredPackage) {
+            // Changed, in a delivered package: created here inside it, or delivered and then changed. Inside an installed
+            // application both are common, so an undecided case stays undecided. In a platform package a record made
+            // here is rare (measured: 5 of 1,885 changed records), so there the change decides.
+            if (created === 'here') verdict = 'customer_created'
+            else if (created === 'delivered' || divergence === 'changed_without_capture' || provenance === 'vendor') verdict = 'customized'
+          } else if (created === 'delivered') {
+            // No package says who delivered it, but a vendor version exists.
+            verdict = 'customized'
+          } else if (created === 'here') {
+            verdict = 'customer_created'
+          }
         } else if (divergence === 'no_customer_changes_captured') {
-          if (provenance === 'vendor' || provenance === 'installed_application' || (vendorVersions ?? 0) > 0) verdict = 'out_of_box_as_captured'
+          if (inDeliveredPackage || (vendorVersions ?? 0) > 0) verdict = 'out_of_box_as_captured'
         }
 
         return ok({

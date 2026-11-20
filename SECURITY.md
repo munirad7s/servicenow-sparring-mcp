@@ -21,10 +21,13 @@ Especially welcome:
 - It refuses queries that would make the instance run script: values with `javascript:`, and `DYNAMIC` conditions.
 - It writes nothing to disk, except the audit log when `SERVICENOW_AUDIT_LOG` names a file.
 - It reads its settings from the environment and from an env file that is named explicitly. Only `SERVICENOW_*`
-  keys are taken from that file, and the process environment is not changed.
+  keys are taken from that file, and the process environment is not changed. The `doctor` command and the npm
+  scripts, which a person runs in a folder of their choice, also read a file named `.env` there when no
+  `SERVICENOW_*` variable is set. The server itself does not.
 
-These are enforced in one place, `src/client.ts` and `src/query.ts`, and held by tests in `test/repo.test.ts` and
-`test/tools.test.ts`. The tests are a regression guard. They run in CI on every push; they are not a sandbox.
+Requests are built in `src/client.ts`, input is checked in `src/query.ts`, settings are read in `src/config.ts`.
+The tests that hold these promises are in `test/repo.test.ts`, `test/client.test.ts`, `test/config.test.ts` and
+`test/tools.test.ts`. They are a regression guard. They run in CI on every push; they are not a sandbox.
 
 ## What it does not control
 
@@ -42,7 +45,9 @@ These are enforced in one place, `src/client.ts` and `src/query.ts`, and held by
 Credentials are read from environment variables or the env file you name. They are sent only to the configured
 instance, in the `Authorization` header. They are never written to an answer, an error message or the audit log.
 Fields that hold secrets on the instance (password types, encrypted fields, system properties of a password type)
-are replaced by a note before an answer leaves the server.
+are replaced by a note before an answer leaves the server. That needs the type of the field, which comes from the
+dictionary. Where the type cannot be read, a field is withheld if its name suggests a secret, and the answer says
+that types were missing. A secret in a field with a harmless name and an unreadable type would pass.
 
 Give the server an account of its own, with read roles and the role `snc_read_only`. `sn_instance` and the doctor
 command report whether the account has that role.

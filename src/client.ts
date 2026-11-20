@@ -40,7 +40,12 @@ export interface AuditEntry {
   api: 'table' | 'stats'
   table: string
   query: string
+  /** The fields that were asked for. null means all fields of the table. For a count: the field it is grouped by. */
+  fields: string[] | null
+  /** HTTP status of the answer, or the kind of failure. */
   status: number | ErrorKind
+  /** HTTP requests this took: 0 if nothing was sent, 2 after a retry. */
+  sent: number
   rows: number | null
   total: number | null
   ms: number
@@ -106,7 +111,7 @@ export class ServiceNowClient {
     params.set('sysparm_suppress_pagination_header', 'true')
     if (display) params.set('sysparm_display_value', 'all')
 
-    const { body, headers } = await this.get('table', table, query, params)
+    const { body, headers } = await this.get('table', table, query, fields?.length ? fields : null, params)
     if (!Array.isArray(body.result)) {
       throw new ServiceNowError(`${this.host} answered without a result list.`, 'invalid_response', table)
     }
@@ -161,7 +166,7 @@ export class ServiceNowClient {
     if (query) params.set('sysparm_query', query)
     if (display) params.set('sysparm_display_value', 'all')
 
-    const { body } = await this.get('stats', table, query, params)
+    const { body } = await this.get('stats', table, query, [groupBy], params)
     if (!Array.isArray(body.result)) {
       throw new ServiceNowError(`${this.host} answered without a result list.`, 'invalid_response', table)
     }
@@ -182,23 +187,29 @@ export class ServiceNowClient {
     api: 'table' | 'stats',
     table: string,
     query: string,
+    fields: string[] | null,
     params: URLSearchParams,
   ): Promise<{ body: { result?: unknown }; headers: Headers }> {
     const started = Date.now()
+    const count = { sent: 0 }
     const log = (status: number | ErrorKind, rows: number | null, total: number | null) =>
-      this.options.audit?.({ time: new Date(started).toISOString(), tool: currentCall()?.tool ?? null, api, table, query, status, rows, total, ms: Date.now() - started })
+      this.options.audit?.({ time: new Date(started).toISOString(), tool: currentCall()?.tool ?? null, api, table, query, fields, status, sent: count.sent, rows, total, ms: Date.now() - started })
 
     try {
       // A table closed on this machine is not asked for, but the attempt is still written to the audit log.
       this.assertAllowed(table)
       const answer = this.accepted
-        ? await this.send(api, table, params)
-        : await this.alone(() => this.send(api, table, params))
+        ? await this.send(api, table, params, count)
+        : await this.alone(() => this.send(api, table, params, count))
+      if (!Array.isArray(answer.body.result)) {
+        throw new ServiceNowError(`${this.host} answered without a result list.`, 'invalid_response', table)
+      }
       const header = answer.headers.get('x-total-count')
-      log(200, Array.isArray(answer.body.result) ? answer.body.result.length : null, header !== null && /^\d+$/.test(header) ? Number(header) : null)
+      log(200, answer.body.result.length, header !== null && /^\d+$/.test(header) ? Number(header) : null)
       return answer
     } catch (error) {
-      log(error instanceof ServiceNowError ? (error.status ?? error.kind) : 'unknown', null, null)
+      // A request that was not sent has no HTTP status of its own.
+      log(error instanceof ServiceNowError ? ((count.sent ? error.status : undefined) ?? error.kind) : 'unknown', null, null)
       throw error
     }
   }
@@ -226,18 +237,27 @@ export class ServiceNowClient {
     api: 'table' | 'stats',
     table: string,
     params: URLSearchParams,
+    count: { sent: number },
     attempt = 0,
   ): Promise<{ body: { result?: unknown }; headers: Headers }> {
     if (this.paused) {
-      if (Date.now() < this.paused.until) {
+      // A renewed token ends the pause after a rejected login at once.
+      const renewed = this.paused.error.kind === 'auth' ? this.config.reloadAuth?.() : undefined
+      if (renewed && !sameAuth(renewed, this.auth)) {
+        this.auth = renewed
+        this.paused = null
+      } else if (Date.now() < this.paused.until) {
         const { error } = this.paused
         throw new ServiceNowError(`${error.message} Not sent again for a moment, because the last request to this instance failed.`, error.kind, table, error.status)
+      } else {
+        this.paused = null
       }
-      this.paused = null
     }
 
     const url = `${this.config.instanceUrl}/api/now/${api}/${table}?${params}`
+    const sent = this.auth
     this.requestCount++
+    count.sent++
     const call = currentCall()
     if (call) call.requests++
 
@@ -266,11 +286,11 @@ export class ServiceNowClient {
     }
 
     if (response.status === 401) {
+      // Try again once with other credentials: those another request picked up in the meantime, or those now in the env file.
       const fresh = attempt === 0 ? this.config.reloadAuth?.() : undefined
-      if (fresh && JSON.stringify(fresh) !== JSON.stringify(this.auth)) {
-        this.auth = fresh
-        return this.send(api, table, params, attempt + 1)
-      }
+      if (fresh && !sameAuth(fresh, sent)) this.auth = fresh
+      if (attempt === 0 && !sameAuth(this.auth, sent)) return this.send(api, table, params, count, attempt + 1)
+
       const error = new ServiceNowError(`${this.host} rejected the credentials (HTTP 401).`, 'auth', table, 401)
       // Back to one request at a time: an expired token must not be retried by everything in flight.
       this.accepted = false
@@ -281,7 +301,7 @@ export class ServiceNowClient {
     if (response.status === 429 && attempt === 0) {
       const wait = Number(response.headers.get('retry-after'))
       await this.sleep(Number.isFinite(wait) && wait > 0 ? Math.min(wait, 5) * 1000 : 500)
-      return this.send(api, table, params, attempt + 1)
+      return this.send(api, table, params, count, attempt + 1)
     }
 
     let body: { result?: unknown; error?: { message?: unknown; detail?: unknown } } | undefined
@@ -293,8 +313,8 @@ export class ServiceNowClient {
     const isObject = body !== null && typeof body === 'object'
 
     if (!response.ok || (isObject && body?.error)) {
-      // The instance answered, so it is reachable and the login was accepted.
-      this.accepted = true
+      // A refusal by the instance itself means it is reachable and took the login. A 5xx or 429 can come from in front of it.
+      if (response.status < 500 && response.status !== 429) this.accepted = true
       const message = quoteInstanceText(isObject ? body?.error?.message : '')
       const detail = quoteInstanceText(isObject ? body?.error?.detail : '')
       const said = message ? `: "${message}"${detail ? ` ("${detail}")` : ''}` : ''
@@ -366,15 +386,21 @@ export class ServiceNowClient {
     return error
   }
 
-  private assertAllowed(table: string): void {
+  /** true if SERVICENOW_TABLE_ALLOW or SERVICENOW_TABLE_DENY closes any table on this machine. */
+  get restricted(): boolean {
+    return this.config.tables.allow.length > 0 || this.config.tables.deny.length > 0
+  }
+
+  /** Whether this machine may ask for a table. Also used for tables a query reaches without naming them in the URL. */
+  allows(table: string): boolean {
     const { allow, deny } = this.config.tables
     const matches = (pattern: string) => (pattern.endsWith('*') ? table.startsWith(pattern.slice(0, -1)) : table === pattern)
+    return !deny.some(matches) && (!allow.length || allow.some(matches))
+  }
 
-    if (deny.some(matches)) {
-      throw new ServiceNowError(`Table "${table}" is blocked on this machine by SERVICENOW_TABLE_DENY. Nothing was sent.`, 'blocked', table)
-    }
-    if (allow.length && !allow.some(matches)) {
-      throw new ServiceNowError(`Table "${table}" is not in SERVICENOW_TABLE_ALLOW on this machine. Nothing was sent.`, 'blocked', table)
+  private assertAllowed(table: string): void {
+    if (!this.allows(table)) {
+      throw new ServiceNowError(`Table "${table}" is closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY). Nothing was sent.`, 'blocked', table)
     }
   }
 
@@ -382,6 +408,10 @@ export class ServiceNowClient {
     if (this.auth.kind === 'bearer') return `Bearer ${this.auth.token}`
     return 'Basic ' + Buffer.from(`${this.auth.username}:${this.auth.password}`).toString('base64')
   }
+}
+
+function sameAuth(a: Auth, b: Auth): boolean {
+  return JSON.stringify(a) === JSON.stringify(b)
 }
 
 function classify(status: number, text: string): ErrorKind {

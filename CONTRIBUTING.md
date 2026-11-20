@@ -29,6 +29,9 @@ npm run smoke        # read-only, end to end against your instance
 npm run call -- sn_schema '{"table":"incident","filter":"assign"}'
 ```
 
+In the Windows command prompt, write the JSON for `npm run call` with escaped double quotes instead of single
+quotes: `"{\"table\":\"incident\"}"`.
+
 Add a unit test with every change. The fake instance in `test/fake.ts` behaves like the Table API where the tools
 depend on it: it leaves unknown fields out of a row, and it answers "Invalid table" for a table without a route.
 

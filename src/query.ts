@@ -19,7 +19,7 @@ const SYS_ID = /^[0-9A-Za-z_]{1,32}$/
 const CONTROL = /[\u0000-\u001f\u007f]/
 const MAX_QUERY_LENGTH = 8_000
 
-/** Longest first, so that "IN" does not win over "INSTANCEOF". Each one was seen to work on a live instance. */
+/** Longest first, so that "IN" does not win over "INSTANCEOF". Each one was seen to work on a live instance, except IN_HIERARCHY, which is taken from the documentation. */
 const OPERATORS = [
   'GT_OR_EQUALS_FIELD',
   'LT_OR_EQUALS_FIELD',
@@ -228,6 +228,11 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
     const match = FIELD_PREFIX.exec(term)
     if (!match) throw unsupported(raw, 'it does not start with a lowercase field name')
     const [, field, rest] = match
+
+    // Tags and catalog variables are addressed like fields, but they are not in the dictionary and cannot be checked.
+    if (/^(sys_tags|variables)(\.|$)/.test(field)) {
+      throw unsupported(raw, `conditions on ${field.split('.')[0]} are not sent, because their names cannot be checked against the dictionary`)
+    }
 
     const refused = REFUSED.find(([name]) => rest.startsWith(name))
     if (refused) throw unsupported(raw, `${refused[0]} is not sent, because ${refused[1]}`)

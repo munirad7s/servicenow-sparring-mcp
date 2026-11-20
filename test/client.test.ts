@@ -265,6 +265,48 @@ test('a rejected login is retried only with credentials that changed, and only o
   assert.deepEqual(await count(() => ({ kind: 'bearer', token: 'also rejected' })), { kind: 'auth', requests: 2 })
 })
 
+test('requests that were all rejected with an expired token all go again with the renewed one', async () => {
+  let token = 'old'
+  const seen: string[] = []
+  const sn = new ServiceNowClient({ ...config, auth: { kind: 'bearer', token: 'old' }, reloadAuth: () => ({ kind: 'bearer', token }) }, async (_url, init) => {
+    const header = (init.headers as Record<string, string>).Authorization
+    seen.push(header)
+    await new Promise((resolve) => setImmediate(resolve))
+    return header === `Bearer ${token}` ? json({ result: [{ a: '1' }] }) : json({ error: { message: 'User Not Authenticated' } }, 401)
+  })
+  await sn.query({ table: 'incident' })
+
+  // The token expires, a helper writes a new one, and three requests are in flight with the old one.
+  token = 'new'
+  const pages = await Promise.all([1, 2, 3].map(() => sn.query({ table: 'incident' })))
+  assert.deepEqual(pages.map((page) => page.records.length), [1, 1, 1])
+  assert.deepEqual(seen.slice(1).sort(), ['Bearer new', 'Bearer new', 'Bearer new', 'Bearer old', 'Bearer old', 'Bearer old'])
+})
+
+test('a token renewed during the pause after a rejected login is used at once', async () => {
+  let token = 'old'
+  let valid = 'new'
+  const sn = new ServiceNowClient({ ...config, auth: { kind: 'bearer', token: 'old' }, reloadAuth: () => ({ kind: 'bearer', token }) }, async (_url, init) =>
+    (init.headers as Record<string, string>).Authorization === `Bearer ${valid}` ? json({ result: [] }) : json({ error: { message: 'User Not Authenticated' } }, 401),
+  )
+  assert.equal(await kindOf(() => sn.query({ table: 'incident' })), 'auth')
+  assert.match((await failure(() => sn.query({ table: 'incident' }))).message, /Not sent again/)
+
+  token = 'new'
+  valid = 'new'
+  assert.equal((await sn.query({ table: 'incident' })).records.length, 0)
+})
+
+test('an answer from in front of the instance does not count as an accepted login', async () => {
+  // A gateway error first: the requests behind it must still go one at a time, or a wrong password is sent by all of them.
+  let requests = 0
+  const sn = new ServiceNowClient(config, async () => (++requests === 1 ? new Response('<html>Bad gateway</html>', { status: 502 }) : json({ error: { message: 'User Not Authenticated' } }, 401)))
+  assert.equal(await kindOf(() => sn.query({ table: 'incident' })), 'unknown')
+  const kinds = await Promise.all(Array.from({ length: 6 }, () => kindOf(() => sn.query({ table: 'incident' }))))
+  assert.deepEqual([...new Set(kinds)], ['auth'])
+  assert.equal(requests, 2)
+})
+
 test('an error inside a successful HTTP answer is an error', async () => {
   const sn = new ServiceNowClient(config, async () => json({ error: { message: 'Operation Failed', detail: 'ACL Exception Read Failed' } }, 200))
   assert.equal(await kindOf(() => sn.query({ table: 'incident' })), 'acl')
@@ -297,8 +339,20 @@ test('every request is written to the audit log with the tool that asked, and no
   assert.equal(entries.pop()?.status, 'blocked')
   assert.equal(closed.calls.length, 0)
 
+  // What was not sent is logged as such, and a retry is counted.
+  const rejected = fakeInstance([{ table: 'incident', status: 401 }], {}, (entry) => entries.push(entry))
+  await kindOf(() => rejected.sn.query({ table: 'incident' }))
+  await kindOf(() => rejected.sn.query({ table: 'incident' }))
+  assert.deepEqual(entries.splice(-2).map((entry) => `${entry.status}, sent ${entry.sent}`), ['401, sent 1', 'auth, sent 0'])
+  const limited = fakeInstance([{ table: 'incident', status: 429 }], {}, (entry) => entries.push(entry))
+  await kindOf(() => limited.sn.query({ table: 'incident', fields: ['number'] }))
+  assert.deepEqual(entries.splice(-1).map((entry) => `${entry.status}, sent ${entry.sent}, fields ${entry.fields}`), ['429, sent 2, fields number'])
+  const odd = new ServiceNowClient(config, async () => json({ result: { a: 1 } }), { audit: (entry) => entries.push(entry) })
+  await kindOf(() => odd.query({ table: 'incident' }))
+  assert.equal(entries.pop()?.status, 'invalid_response')
+
   assert.equal(entries.length, 2)
-  assert.deepEqual({ ...entries[0], time: '', ms: 0 }, { time: '', tool: 'sn_query', api: 'table', table: 'incident', query: 'active=true', status: 200, rows: 1, total: 9, ms: 0 })
+  assert.deepEqual({ ...entries[0], time: '', ms: 0 }, { time: '', tool: 'sn_query', api: 'table', table: 'incident', query: 'active=true', fields: null, status: 200, sent: 1, rows: 1, total: 9, ms: 0 })
   assert.equal(entries[1].status, 403)
   assert.equal(entries[1].tool, null)
   const written = JSON.stringify(entries)

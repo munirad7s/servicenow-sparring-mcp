@@ -202,6 +202,21 @@ test('a database view has the fields of the tables it joins, with their prefix',
   assert.equal(check.resolved.get('inc_number')?.definedOn, 'incident')
 })
 
+test('a view that names itself or another view as a part does not send the server in circles', async () => {
+  const view = (name: string, id: string, part: string): Parameters<typeof fakeInstance>[0] => [
+    { table: 'sys_db_object', query: `name=${name}`, rows: [] },
+    { table: 'sys_db_view', query: `name=${name}`, rows: [{ sys_id: id.repeat(32), name, label: name }] },
+    { table: 'sys_db_view_table', query: `view=${id.repeat(32)}`, rows: [{ table: part, variable_prefix: 'p' }] },
+  ]
+  const self = fakeInstance([...view('view_a', 'a', 'view_a'), ...dictionaryRoutes])
+  await assert.rejects(new Dictionary(self.sn).table('view_a'), (error: unknown) => error instanceof ServiceNowError && error.kind === 'invalid_response')
+
+  const loop = fakeInstance([...view('view_a', 'a', 'view_b'), ...view('view_b', 'b', 'view_a'), ...dictionaryRoutes])
+  const check = await new Dictionary(loop.sn).checkFields('view_a', ['p_number'])
+  assert.equal(check.status, 'unavailable')
+  assert.deepEqual(check.unknown, [])
+})
+
 test('choices come from the nearest table that defines any', async () => {
   const { sn } = fakeInstance(dictionaryRoutes)
   const dict = new Dictionary(sn)

@@ -61,13 +61,16 @@ matches nothing. Both look like an answer. Five rules keep the evidence from lyi
    answers unfiltered. One typo would turn "no match" into "here are some records". Field names, dot-walks
    included, are checked against the instance dictionary before anything is sent, and the error names similar
    fields. Where the dictionary cannot be used, the names are checked against a row of the table itself. Where
-   neither works, a filtered query is not sent.
+   neither works and the table is not empty, a filtered query is not sent.
 2. **A condition the instance would drop is refused.** A dot-walk through a list field, a date condition with a
-   missing part, an operator written the wrong way. [docs/encoded-queries.md](docs/encoded-queries.md) lists what
-   was measured on a live instance: which forms are dropped, which match nothing, and which run script.
+   missing part, an operator written the wrong way. [docs/encoded-queries.md](docs/encoded-queries.md) lists the
+   forms that one live instance dropped or answered with nothing, and the forms that are refused because they are
+   documented to run script.
 3. **A value that cannot match is refused or explained.** `state=Resolved` matches nothing, because the field
    stores `6`. That query is refused, and the error names the stored value. `caller_id=Abel Tuter` matches nothing,
-   because a reference is compared with a sys_id. That answer comes with the reason.
+   because a reference is compared with a sys_id. That answer comes with the reason. The check of choice values
+   needs `sys_choice` to be readable and covers the fields of the table itself; where it could not be made, the
+   answer says so.
 4. **Counts say what they count.** `total` is what matched on the server before row-level access rules; `returned`
    is what is in the answer. When rows were withheld, the answer says so.
 5. **"Could not be checked" is never "nothing found".** A table this account cannot read is an error of kind `acl`.
@@ -107,22 +110,42 @@ provider, the data leaves your network. Three things limit what can go that way:
 
 - **The account.** The server reads what its account may read, and nothing else. This is the limit that counts.
 - **Secrets are withheld.** Fields of a password type or an encrypted type, and system properties of a password
-  type, come back as `[withheld: this field holds a secret]`. The Table API would hand them out as stored.
-- **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` stops the server from asking
-  for those tables at all. `SERVICENOW_TABLE_ALLOW` names the only tables it may ask for. A name can end in `*`.
-  A closed table is reported as "could not be checked".
+  type, come back as `[withheld: this field holds a secret]`. The Table API would hand them out as stored. The
+  server knows the type of a field from the dictionary. Where it cannot read the type, it withholds a field whose
+  name suggests a secret (password, token, secret, key), and the answer says that types were missing.
+- **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
+  away from the server: it does not ask for them, a query cannot reach them through a dot-walk, a child table or a
+  database view, and the names behind references into them are left out. `SERVICENOW_TABLE_ALLOW` names the only
+  tables whose rows it may read. A name can end in `*`. A closed table is reported as "could not be checked". What
+  the dictionary says about a closed table (its fields, what is attached to it) can still be read, and the other
+  functions read a fixed set of configuration tables, which `npm run doctor` lists.
 
 Record content that comes back (names, descriptions, scripts, error texts) is data from the instance. The server
 tells the agent to treat it as data, never as an instruction, and it cuts long values. It cannot make an agent obey.
 
-To see afterwards what an agent asked, set `SERVICENOW_AUDIT_LOG` to a file. It receives one line per request:
+To see afterwards what an agent asked, set `SERVICENOW_AUDIT_LOG` to a file, with its full path. The server
+appends one line per request:
 
 ```json
-{"time":"2026-11-20T02:14:07.101Z","tool":"sn_query","api":"table","table":"sys_script","query":"collection=incident^active=true","status":200,"rows":2,"total":83,"ms":212}
+{"time":"2026-11-20T02:14:07.101Z","tool":"sn_query","api":"table","table":"sys_script","query":"collection=incident^active=true","fields":["name","when"],"status":200,"sent":1,"rows":2,"total":83,"ms":212}
 ```
 
-It holds no credentials and no record content. A query can contain values, so keep the file as private as the
-instance.
+`sent` is the number of HTTP requests this took: 0 for a request that was refused or held back, 2 after a retry.
+The file holds no credentials and no record content. A query can contain values, so keep it as private as the
+instance; it is created readable by its owner only. If the file cannot be written, the server says so once on
+its error output and keeps answering. The npm scripts do not write it.
+
+## Requests, caching and pauses
+
+- One `sn_query` is one request, plus a few to check its field names the first time a table is used. The other
+  functions cost more: `sn_origin` 5, `sn_dependencies` about 25, `sn_instance` about 45. Every answer carries its
+  count in `requests`. At most four requests of one function are in flight at a time.
+- What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is
+  missing from an entry older than 30 seconds is looked up once more, so a field created during a session is
+  found. `sn_schema` reads the dictionary anew for every call.
+- A `429 Too Many Requests` is waited out once, for at most five seconds.
+- After a rejected login the server sends nothing for 60 seconds, unless the env file holds new credentials. While
+  no request has ever succeeded, an unreachable instance pauses it for 15 seconds.
 
 ## Setup
 
@@ -214,20 +237,27 @@ It asks the instance four questions and shows the rows behind each answer, with 
 | Question | Evidence | Answer |
 |---|---|---|
 | Who delivered the record? | the class of the package it belongs to (`sys_metadata.sys_package`) | `provenance`: vendor, installed application, custom application, global scope |
-| Was it changed here? | customer update rows (`sys_update_xml`), the version marked current (`sys_update_version`), and whether the last upgrade refused to overwrite it (`upgrade_history_task`) | `divergence` |
-| Was it created here, or delivered? | a vendor version of the record exists, or the record is older than its first captured change | `created` |
+| Was it changed here? | customer update rows (`sys_update_xml`), the version marked current (`sys_update_version`), and the newest entry of an upgrade that refused to overwrite it (`upgrade_history_task`) | `divergence` |
+| Was it created here, or delivered? | a vendor version of the record exists; inside a delivered package also: the record is older than its first captured change | `created` |
 | Who made the captured changes? | the authors of the update rows | `capturedBy`: people, or system accounts only |
 
 | Delivered by | Changed here | Created | Verdict |
 |---|---|---|---|
+| custom application | any | | `custom_application_file` |
 | platform or installed application | no | | `out_of_box_as_captured` |
 | platform or installed application | yes | delivered | `customized` |
 | platform or installed application | yes | here | `customer_created` |
-| custom application | any | | `custom_application_file` |
-| no package (global scope) | yes | a vendor version exists | `customized` |
-| no package (global scope) | yes | otherwise | `customer_created` |
-| no package (global scope) | no | | `unknown` |
-| anything | evidence not readable | | `unknown` |
+| installed application | yes | not decided | `unknown` |
+| platform | yes | not decided | `customized` |
+| no package (global scope) | yes | delivered: a vendor version exists | `customized` |
+| no package (global scope) | yes | here: no vendor version | `customer_created` |
+| no package (global scope) | no | delivered: a vendor version exists | `out_of_box_as_captured` |
+| no package (global scope) | no | otherwise | `unknown` |
+| any but a custom application | the evidence it needs is not readable, or rows of it are hidden | | `unknown` |
+
+Inside an installed application both happen often, a file made here and a delivered file changed here, so an
+undecided case stays undecided. In a platform package a file made here is rare (5 of 1,885 changed files on the
+test instance), so there a captured change means `customized`.
 
 ### What was measured
 
@@ -251,8 +281,8 @@ What follows from that:
   notices, by comparing content, and this server cannot compare content. Where no upgrade has looked at a record
   yet, such a change is invisible here.
 - **"Customized" is the platform's word, not a statement about people.** On this instance four in five of the
-  customized records were changed by installations, upgrades and jobs, and of all 6,631 captured changes 2,789
-  were made under system accounts. `capturedBy` tells them apart, `sn_delta` counts them, and its `peopleOnly`
+  customized records were changed by installations, upgrades and jobs, and 2,783 of all 6,631 captured changes
+  have no person on them at all. `capturedBy` tells them apart, `sn_delta` counts them, and its `peopleOnly`
   leaves them out.
 - **The rule is measured on one instance.** The verdicts were compared with the upgrade engine and with the stored
   evidence, not checked by hand, and not on a second instance. Update rows and versions can be cleaned up or lost
@@ -282,12 +312,13 @@ npm test              # unit tests against a fake instance, no network
 npm run typecheck
 npm run smoke         # end-to-end against the configured instance, read-only
 npm run call -- sn_schema '{"table":"incident","filter":"assign"}'
-npm run origin-check  # measures sn_origin on the configured instance
+npm run origin-check  # measures sn_origin on the configured instance, with about 1,200 requests
 ```
 
 `npm run smoke` drives the real server through an MCP client and exits with 1 if a check fails. It prints counts and
 verdicts, never record content. `npm run call` runs one function from the shell and prints what an agent would
-receive.
+receive. In the Windows command prompt, write the JSON with escaped double quotes instead of single quotes:
+`"{\"table\":\"incident\"}"`.
 
 What was tested, and what was not:
 

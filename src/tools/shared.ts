@@ -18,6 +18,8 @@ export const READ_ONLY = {
 /** Field types whose values are secrets, stored hashed or encrypted. The Table API hands them out as they are stored. */
 export const SECRET_TYPES = new Set(['password', 'password2', 'glide_encrypted'])
 export const SECRET_NOTE = '[withheld: this field holds a secret]'
+/** Where the type of a field cannot be read, its name is the only sign left. */
+export const LOOKS_SECRET = /pass(word|wd)?|secret|token|credential|private_?key|api_?key/i
 
 export interface Guard {
   /** A sentence for the answer: how the field names were verified. */
@@ -40,6 +42,9 @@ export interface Guard {
  * 4. Choice fields: a label where the stored value belongs matches nothing.
  */
 export async function guardFields(ctx: Context, table: string, query: string, fields: string[] = []): Promise<Guard> {
+  if (!ctx.sn.allows(table)) {
+    throw new ServiceNowError(`Table "${table}" is closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY). Nothing was sent.`, 'blocked', table)
+  }
   fields.forEach((field) => assertFieldPath(field, table))
   const parsed = parseEncodedQuery(query, table)
   const paths = [...new Set([...parsed.fields, ...fields])]
@@ -48,7 +53,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
     warnings.push('The query contains "^^". ServiceNow reads that as a literal ^ inside a value, not as a separator between conditions.')
   }
 
-  if (!paths.length) return { fieldCheck: 'not needed: the call names no fields', parsed, resolved: new Map(), warnings }
+  if (!paths.length && !ctx.sn.restricted) return { fieldCheck: 'not needed: the call names no fields', parsed, resolved: new Map(), warnings }
 
   const check = await ctx.dict.checkFields(table, paths)
   if (check.unknown.length) {
@@ -61,11 +66,31 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
     )
   }
 
-  if (check.status === 'checked') {
-    await refuseChoiceLabels(ctx, table, parsed, check.resolved)
-    return { fieldCheck: 'all field names verified against sys_dictionary', parsed, resolved: check.resolved, warnings }
+  // A table that is closed on this machine must not be read through the side door either.
+  const closed = [...check.reached].filter((name) => !ctx.sn.allows(name))
+  if (closed.length) {
+    throw new ServiceNowError(
+      `This query reads from ${closed.join(', ')} through a dot-walk or a database view, and ${closed.length === 1 ? 'that table is' : 'those tables are'} closed on this machine. Nothing was sent.`,
+      'blocked',
+      closed[0],
+    )
+  }
+  if (ctx.sn.restricted && check.status !== 'checked') {
+    throw new ServiceNowError(
+      `Tables are closed on this machine, and it could not be established which tables this query reads from (${check.reason ?? 'the dictionary could not be used'}). Nothing was sent.`,
+      'blocked',
+      table,
+    )
   }
 
+  if (check.status === 'checked') {
+    await refuseChoiceLabels(ctx, table, parsed, check.resolved, warnings)
+    const fieldCheck = paths.length ? 'all field names verified against sys_dictionary' : 'not needed: the call names no fields'
+    return { fieldCheck, parsed, resolved: check.resolved, warnings }
+  }
+
+  // Not every name could be checked against the dictionary. What it did resolve is still checked for choice labels.
+  await refuseChoiceLabels(ctx, table, parsed, check.resolved, warnings)
   const why = check.reason ?? 'the dictionary could not be used'
   const probe = await ctx.sn.query<Row>({ table, fields: paths, limit: 1 })
   const row = probe.records[0]
@@ -104,13 +129,21 @@ const COMPARES_VALUES = new Set(['=', '!=', 'IN', 'NOT IN'])
  * The answer would be a correct-looking zero. Where the value is plainly a label,
  * the query is refused and the stored value is named.
  */
-async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQuery, resolved: Map<string, Column>): Promise<void> {
+async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQuery, resolved: Map<string, Column>, warnings: string[]): Promise<void> {
   for (const { field, operator, value } of parsed.conditions) {
     const column = resolved.get(field)
-    // A dot-walked field belongs to another table, and its choices can differ per child table. Those are left alone.
-    if (!column?.choice || field.includes('.') || !COMPARES_VALUES.has(operator)) continue
+    if (!column?.choice || !COMPARES_VALUES.has(operator)) continue
 
-    const choices = await ctx.dict.choices(table, field).catch(() => [])
+    // A field of a database view takes its choices from the table it comes from. A dot-walked field belongs to a
+    // table that is not known here, and its choices can differ per child table: those are not looked up.
+    const walked = field.includes('.')
+    const choices = walked
+      ? null
+      : await (column.sourceField ? ctx.dict.choices(column.definedOn, column.sourceField) : ctx.dict.choices(table, field)).catch(() => null)
+    if (!choices) {
+      warnings.push(`"${field}" is a choice field, and its values could not be checked${walked ? '' : ' (sys_choice is not readable)'}. A label in place of the stored value would match nothing.`)
+      continue
+    }
     if (!choices.length) continue
     const stored = new Set(choices.map((choice) => choice.value.toLowerCase()))
 
@@ -182,9 +215,22 @@ export function errorKind(error: unknown): string {
  * Accounts that are not a person: the platform itself, the guest session, and
  * ServiceNow's own maintenance logins (user names of the form name@snc.maint).
  * Changes captured under them come from installations, upgrades and jobs.
+ *
+ * A captured change counts as made by a system account only if no person is on
+ * it: neither as the one who first captured it nor as the one who changed it last.
  */
-export const BY_SYSTEM_ACCOUNT = 'sys_created_byINsystem,guest^ORsys_created_byLIKE@snc.'
-export const NOT_BY_SYSTEM_ACCOUNT = 'sys_created_byNOT INsystem,guest^sys_created_byNOT LIKE@snc.'
+const BY_SYSTEM = (field: string) => `${field}INsystem,guest^OR${field}LIKE@snc.`
+const NOT_BY_SYSTEM = (field: string) => `${field}NOT INsystem,guest^${field}NOT LIKE@snc.`
+
+export const BY_SYSTEM_ACCOUNT = `${BY_SYSTEM('sys_created_by')}^${BY_SYSTEM('sys_updated_by')}`
+
+/**
+ * The same filter, restricted to rows a person is on. "Created by a person, or
+ * last changed by a person" is a union, written as two queries joined by ^NQ.
+ */
+export function withPeopleOnly(filter: string): string {
+  return ['sys_created_by', 'sys_updated_by'].map((field) => [filter, NOT_BY_SYSTEM(field)].filter(Boolean).join('^')).join('^NQ')
+}
 
 export function isSystemAccount(user: string): boolean {
   return user === 'system' || user === 'guest' || user.includes('@snc.')

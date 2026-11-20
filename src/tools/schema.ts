@@ -15,10 +15,12 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
       title: 'Inspect a table structure',
       description:
         'Return the fields of a table as they apply to it: the fields of all parent tables included, dictionary ' +
-        'overrides applied, each with the table that defines it. Use "filter" to look for one field; a field that is ' +
-        'not in the answer does not exist on the table. Also answers for database views. Reports the chain of parent ' +
-        'tables and the kind of table. To judge a single field with sn_origin, pass the update name ' +
-        '"sys_dictionary_<definedOn>_<name>". Structure only; for records use sn_query.',
+        'overrides applied, each with the table that defines it and the label it has on this table. Use "filter" to ' +
+        'look for one field: unless a warning says the dictionary was only partly readable, a field that is not in the ' +
+        'answer does not exist on the table. Also answers for database views, whose fields carry the prefix of the ' +
+        'table they come from. Reports the chain of parent tables and the kind of table. To judge a field of a table ' +
+        'with sn_origin, pass the update name "sys_dictionary_<definedOn>_<name>". The dictionary is read anew for ' +
+        'every call. Structure only; for records use sn_query.',
       inputSchema: {
         table: z.string().min(1).max(80).describe('Table name, e.g. "incident".'),
         filter: z.string().max(80).optional().describe('Text the field name or label must contain, e.g. "business" or "assign".'),
@@ -63,13 +65,15 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
         assertTableName(table)
         if (filter) assertPlainValue(filter, 'filter')
 
-        const info = await ctx.dict.table(table)
+        // Asked for the structure itself, a person expects what is there now, not what was read ten minutes ago.
+        const info = await ctx.dict.table(table, 0)
         if (!info) {
           throw new ServiceNowError(`"${table}" is neither a table in sys_db_object nor a database view on this instance.`, 'not_found', table)
         }
-        const effective = await ctx.dict.effectiveColumns(table)
+        const effective = await ctx.dict.effectiveColumns(table, 0)
         const all = effective?.columns ?? []
-        const own = all.filter((column) => column.definedOn === table)
+        // A view defines no fields of its own: all of them come from the tables it joins.
+        const own = info.kind === 'database_view' ? all : all.filter((column) => column.definedOn === table)
 
         const warnings: string[] = []
         if (effective && !effective.complete) {

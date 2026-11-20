@@ -236,6 +236,93 @@ test('a table closed on this machine is never asked for', async () => {
   assert.equal(calls.length, 0)
 })
 
+test('a closed table cannot be read through a dot-walk, a child table, a view or a display value', async () => {
+  const view: Route[] = [
+    { table: 'sys_db_object', query: 'name=incident_caller', rows: [] },
+    { table: 'sys_db_view', query: 'name=incident_caller', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_caller', label: 'Incident with caller' }] },
+    { table: 'sys_db_view_table', rows: [{ table: 'incident', variable_prefix: 'inc' }, { table: 'sys_user', variable_prefix: 'usr' }] },
+  ]
+  const rows = [{ number: 'INC1', caller_id: labelled(ID, 'Abel Tuter'), assigned_to: labelled(ID, 'Beth Anglin') }]
+  const routes = [...view, ...dictionaryRoutes, { table: 'incident', rows }, { table: 'incident_caller', rows: [{ inc_number: 'INC1' }] }, { table: 'task', rows: [{ number: 'TASK1' }] }]
+  const noUsers = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
+
+  for (const args of [
+    { table: 'incident', fields: ['number', 'caller_id.email'] },
+    { table: 'incident', query: 'caller_id.emailLIKEexample' },
+    { table: 'incident', query: 'ORDERBYcaller_id.name' },
+    { table: 'incident', groupBy: 'caller_id.email' },
+    { table: 'incident_caller', fields: ['inc_number'] },
+    { table: 'incident_caller' },
+  ]) {
+    const { data } = await noUsers.call('sn_query', args)
+    assert.equal(data.error, 'blocked', JSON.stringify(args))
+    assert.match(data.message, /sys_user/)
+  }
+  assert.equal(noUsers.sentTo('incident').length + noUsers.sentTo('incident_caller').length, 0)
+
+  // The reference itself may be read. The name behind it comes from the closed table and is left out.
+  const data = await noUsers.answer('sn_query', { table: 'incident', fields: ['number', 'caller_id'], displayValue: true })
+  assert.deepEqual(data.records, [{ number: 'INC1', caller_id: ID }])
+  assert.match(data.warnings.join(' '), /closed on this machine were left out: caller_id/)
+  const all = await noUsers.answer('sn_query', { table: 'incident', displayValue: true })
+  assert.deepEqual({ caller: all.records[0].caller_id, assignee: all.records[0].assigned_to }, { caller: ID, assignee: ID })
+
+  const noIncident = await connect(routes, { tables: { allow: [], deny: ['incident'] } })
+  assert.equal((await noIncident.call('sn_query', { table: 'task', query: 'ref_incident.caller_id=x' })).data.error, 'blocked')
+  assert.equal((await noIncident.answer('sn_query', { table: 'task', fields: ['number'] })).returned, 1)
+
+  // With tables closed, a query whose reach cannot be established is not sent.
+  const blind = await connect([{ table: 'sys_db_object', status: 403 }, { table: 'incident', rows }], { tables: { allow: [], deny: ['sys_user'] } })
+  assert.equal((await blind.call('sn_query', { table: 'incident', fields: ['number'] })).data.error, 'blocked')
+  assert.equal(blind.sentTo('incident').length, 0)
+})
+
+test('where field types cannot be read, a secret is recognised by its name, and the answer says so', async () => {
+  const user = { name: 'Abel', user_password: '$s$hash', u_api_token: 'tok', email: 'abel@example.org' }
+
+  // The dictionary hides rows from this account: the entry of user_password is not among those it returns.
+  const partial = await connect([
+    { table: 'sys_dictionary', query: 'nameINsys_user', rows: [column('sys_user', 'name'), column('sys_user', 'email')], total: 4 },
+    ...dictionaryRoutes,
+    { table: 'sys_user', rows: [user] },
+  ])
+  const named = await partial.answer('sn_query', { table: 'sys_user', fields: ['name', 'user_password'] })
+  assert.deepEqual(named.records, [{ name: 'Abel', user_password: '[withheld: this field holds a secret]' }])
+  assert.match(named.warnings.join(' '), /name suggests a secret: user_password/)
+  const whole = await partial.answer('sn_query', { table: 'sys_user' })
+  assert.deepEqual(whole.records, [{ name: 'Abel', user_password: '[withheld: this field holds a secret]', u_api_token: '[withheld: this field holds a secret]', email: 'abel@example.org' }])
+  assert.match(whole.warnings.join(' '), /recognised by its name only/)
+
+  // No dictionary at all.
+  const none = await connect([{ table: 'sys_db_object', status: 403 }, { table: 'sys_user', rows: [user] }])
+  assert.equal((await none.answer('sn_query', { table: 'sys_user' })).records[0].user_password, '[withheld: this field holds a secret]')
+
+  // A system property whose type the instance does not return.
+  const untyped = await connect([
+    { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] },
+    { table: 'sys_dictionary', query: 'nameINsys_properties', rows: [column('sys_properties', 'name'), column('sys_properties', 'value'), column('sys_properties', 'type')] },
+    ...dictionaryRoutes,
+    { table: 'sys_properties', rows: [{ name: 'glide.smtp.password', value: 'ciphertext' }, { name: 'glide.war', value: 'glide-zurich' }] },
+  ])
+  const properties = await untyped.answer('sn_query', { table: 'sys_properties', fields: ['name', 'value'] })
+  assert.deepEqual(properties.records.map((row: Data) => row.value), ['[withheld: this field holds a secret]', 'glide-zurich'])
+  assert.match(properties.warnings.join(' '), /the type was not returned/)
+})
+
+test('the value of a system property is withheld when it is read through a database view', async () => {
+  const { answer } = await connect([
+    { table: 'sys_db_object', query: 'name=u_property_view', rows: [] },
+    { table: 'sys_db_view', query: 'name=u_property_view', rows: [{ sys_id: 'b'.repeat(32), name: 'u_property_view', label: 'Properties' }] },
+    { table: 'sys_db_view_table', rows: [{ table: 'sys_properties', variable_prefix: 'prop' }] },
+    { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] },
+    { table: 'sys_dictionary', query: 'nameINsys_properties', rows: [column('sys_properties', 'name'), column('sys_properties', 'value')] },
+    ...dictionaryRoutes,
+    { table: 'u_property_view', rows: [{ prop_name: 'glide.smtp.pw', prop_value: 'ciphertext' }] },
+  ])
+  const data = await answer('sn_query', { table: 'u_property_view', fields: ['prop_name', 'prop_value'] })
+  assert.deepEqual(data.records, [{ prop_name: 'glide.smtp.pw', prop_value: '[withheld: this field holds a secret]' }])
+})
+
 // --------------------------------------------------------------- sn_schema
 
 test('sn_schema returns the fields that apply to the table, inherited ones included', async () => {
@@ -459,6 +546,42 @@ test('sn_origin: a current version from an update set counts, even without an up
   assert.match(data.warnings.join(' '), /no customer update row exists/)
 })
 
+test('sn_origin abstains inside an installed application when it cannot tell "created here" from "delivered"', async () => {
+  // A current version from an update set, no update row to date the first change, no vendor version.
+  const undecided = await connect(origin('sys_store_app', [], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')]))
+  const data = await undecided.answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ divergence: data.divergence, created: data.created, verdict: data.verdict }, { divergence: 'customer_changes_captured', created: 'unknown', verdict: 'unknown' })
+
+  // Versions that cannot be counted: a vendor version of a global record cannot be ruled out.
+  const uncounted = await connect([
+    { table: 'sys_metadata', rows: [file('sys_scope', { sys_created_on: '2026-03-01 10:00:00' })] },
+    { table: 'sys_update_xml', rows: [change()] },
+    { table: 'sys_update_version', rows: [] },
+    { table: 'sys_update_version', api: 'stats', status: 403 },
+  ])
+  assert.equal((await uncounted.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
+})
+
+test('sn_origin says so when rows of the evidence are hidden from the account', async () => {
+  const hiddenUpdates = await connect([
+    { table: 'sys_metadata', rows: [file('sys_plugins')] },
+    { table: 'sys_update_xml', rows: [], total: 3 },
+    { table: 'sys_update_version', rows: [] },
+    stats('sys_update_version', {}),
+  ])
+  const data = await hiddenUpdates.answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ divergence: data.divergence, capturedBy: data.capturedBy }, { divergence: 'customer_changes_captured', capturedBy: 'unknown' })
+  assert.match(data.warnings.join(' '), /Customer updates: 3 matching row\(s\) were not returned/)
+
+  const hiddenSkip = await connect([...origin('sys_plugins', [], []).slice(0, 4), { table: 'upgrade_history_task', rows: [], total: 1 }])
+  const skipped = await hiddenSkip.answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ divergence: skipped.divergence, verdict: skipped.verdict }, { divergence: 'unknown', verdict: 'unknown' })
+
+  // A deleted record cannot be told from an unknown one when the update rows are not readable.
+  const blind = await connect([{ table: 'sys_metadata', rows: [] }, { table: 'sys_update_xml', status: 403 }])
+  assert.equal((await blind.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
+})
+
 test('sn_origin: a reverted record keeps its update row, and the answer says so', async () => {
   const versions = [version('current', 'sys_store_app', '2026-03-01 10:00:00', 'abel'), version('previous', 'sys_update_set', '2026-03-01 09:00:00', 'abel')]
   const { answer } = await connect(origin('sys_store_app', [change({ sys_created_on: '2026-03-01 09:00:00' })], versions))
@@ -477,6 +600,13 @@ test('sn_origin: records in the global scope', async () => {
 
   const untouched = await connect(origin('sys_scope', [], []))
   assert.equal((await untouched.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
+})
+
+test('sn_origin: an old record of the global scope without a vendor version is the customer\'s own', async () => {
+  // Created in 2020, captured in 2026, no version from an upgrade: nothing says the vendor delivered it.
+  const { answer } = await connect(origin('sys_scope', [change()], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')]))
+  const data = await answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ created: data.created, verdict: data.verdict }, { created: 'here', verdict: 'customer_created' })
 })
 
 test('sn_origin: an application developed here', async () => {
@@ -589,7 +719,7 @@ test('sn_delta lists updates, exact counts per type, system accounts, and its ow
   assert.deepEqual(data.byType, [{ type: 'Business Rule', count: 9 }])
   // Both counts are taken under the same filter as the list.
   assert.equal(sentTo('sys_update_xml', 'stats')[0].query, filter)
-  assert.equal(sentTo('sys_update_xml')[1].query, `${filter}^sys_created_byINsystem,guest^ORsys_created_byLIKE@snc.`)
+  assert.equal(sentTo('sys_update_xml')[1].query, `${filter}^sys_created_byINsystem,guest^ORsys_created_byLIKE@snc.^sys_updated_byINsystem,guest^ORsys_updated_byLIKE@snc.`)
   assert.equal(data.capturedBySystemAccounts, 4)
   assert.match(data.warnings.join(' '), /4 of the 9 rows were captured under system accounts/)
   assert.ok(data.notCaptured.length >= 5)
@@ -600,8 +730,11 @@ test('sn_delta lists updates, exact counts per type, system accounts, and its ow
 
 test('sn_delta can leave out system accounts, and explains a type nobody uses', async () => {
   const people = await connect([{ table: 'sys_update_xml', rows: [{ name: 'a' }] }, stats('sys_update_xml', { Report: 1 })])
-  const data = await people.answer('sn_delta', { peopleOnly: true })
-  assert.equal(people.sentTo('sys_update_xml')[0].query, 'sys_created_byNOT INsystem,guest^sys_created_byNOT LIKE@snc.^ORDERBYDESCsys_updated_on')
+  const data = await people.answer('sn_delta', { peopleOnly: true, type: 'Report' })
+  // A row counts as a person's if a person captured it first or changed it last: a union of two queries, each with the whole filter.
+  const union = 'type=Report^sys_created_byNOT INsystem,guest^sys_created_byNOT LIKE@snc.^NQtype=Report^sys_updated_byNOT INsystem,guest^sys_updated_byNOT LIKE@snc.'
+  assert.equal(people.sentTo('sys_update_xml')[0].query, `${union}^ORDERBYDESCsys_updated_on`)
+  assert.equal(people.sentTo('sys_update_xml', 'stats')[0].query, union)
   assert.equal(data.capturedBySystemAccounts, 0)
 
   const guessed = await connect([{ table: 'sys_update_xml', rows: [] }, stats('sys_update_xml', {}, 'type=ACL'), stats('sys_update_xml', { 'Access Control': 3, Report: 1 })])

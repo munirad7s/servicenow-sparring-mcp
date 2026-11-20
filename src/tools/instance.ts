@@ -55,6 +55,8 @@ export interface Probe {
   /** "readable", "row_restricted" (rows exist, none is visible to this account), or the kind of failure. */
   status: string
   total: number | null
+  /** The failure itself, where there was one. */
+  error?: unknown
 }
 
 export async function probe(sn: ServiceNowClient, table: string, query = ''): Promise<Probe> {
@@ -62,14 +64,15 @@ export async function probe(sn: ServiceNowClient, table: string, query = ''): Pr
     const page = await sn.query({ table, query, fields: ['sys_id'], limit: 1 })
     return { status: page.records.length === 0 && (page.total ?? 0) > 0 ? 'row_restricted' : 'readable', total: page.total }
   } catch (error) {
-    return { status: errorKind(error), total: null }
+    return { status: errorKind(error), total: null, error }
   }
 }
 
 /** What the instance says about the account the server logs in with. null if that could not be read. */
 export async function accountRoles(sn: ServiceNowClient): Promise<{ roles: number; admin: boolean; readOnlyRole: boolean } | null> {
   const user = sn.username
-  if (!user || !isPlainValue(user)) return null
+  // The lookup filters on the user table. Where that is closed on this machine, it is not made.
+  if (!user || !isPlainValue(user) || !sn.allows('sys_user')) return null
   try {
     const { records, total, complete } = await sn.all<Record<string, string>>(
       { table: 'sys_user_has_role', query: `user.user_name=${user}^state=active`, fields: ['role.name'] },
@@ -151,14 +154,12 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
       try {
         // One request first: wrong credentials or a wrong address should fail once, not once per source.
         const first = await probe(sn, SOURCES[0].table)
-        if (NO_CONNECTION.has(first.status)) {
-          await sn.query({ table: SOURCES[0].table, fields: ['sys_id'], limit: 1 })
-        }
+        if (NO_CONNECTION.has(first.status)) throw first.error
 
         const warnings: string[] = []
         const rest = await mapLimit(SOURCES.slice(1), 4, async ({ table }) => [table, await probe(sn, table)] as const)
         const probes = [[SOURCES[0].table, first] as const, ...rest]
-        const sources = Object.fromEntries(probes.map(([table, result]) => [table, result.status]))
+        const sources: Record<string, string> = Object.fromEntries(probes.map(([table, result]) => [table, result.status]))
         const totalOf = (table: string) => probes.find(([name]) => name === table)?.[1].total ?? null
 
         const [properties, upgrades, storeApps, scopeApps, plugins, account] = await Promise.all([

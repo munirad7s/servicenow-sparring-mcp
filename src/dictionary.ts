@@ -19,6 +19,8 @@ export interface Column {
   /** The nearest table whose dictionary override changes the field for the inspected table. */
   overriddenOn?: string
   overrides?: string[]
+  /** For a field of a database view: its name on the table it comes from. */
+  sourceField?: string
 }
 
 export interface TableInfo {
@@ -48,6 +50,8 @@ export interface FieldCheck {
   unknown: UnknownField[]
   /** The dictionary entry of each path that was verified, keyed by the path as written. */
   resolved: Map<string, Column>
+  /** Tables the paths read from besides the queried one: targets of dot-walks, child tables, tables a view joins. */
+  reached: Set<string>
 }
 
 export interface Choice {
@@ -55,7 +59,7 @@ export interface Choice {
   label: string
 }
 
-interface ColumnSet {
+export interface ColumnSet {
   columns: Map<string, Column>
   /** true if rows of the dictionary were withheld or cut off: a missing name proves nothing. */
   partial: boolean
@@ -93,9 +97,9 @@ export class Dictionary {
     private readonly recheckMs = 30_000,
   ) {}
 
-  table(name: string): Promise<TableInfo | null> {
+  table(name: string, maxAgeMs = this.ttlMs): Promise<TableInfo | null> {
     assertTableName(name)
-    return this.cached(this.tables, name, () => this.loadTable(name))
+    return this.cached(this.tables, name, () => this.loadTable(name), maxAgeMs)
   }
 
   /** Own and inherited fields of a table, without dictionary overrides. null if the table is unknown. */
@@ -104,15 +108,16 @@ export class Dictionary {
   }
 
   /** The fields as they behave on this table: inherited fields included, overrides applied. */
-  async effectiveColumns(name: string): Promise<{ columns: Column[]; complete: boolean; overridesRead: boolean; labelsRead: boolean } | null> {
-    const [info, base] = await Promise.all([this.table(name), this.columnSet(name)])
+  async effectiveColumns(name: string, maxAgeMs = this.ttlMs): Promise<{ columns: Column[]; complete: boolean; overridesRead: boolean; labelsRead: boolean } | null> {
+    const info = await this.table(name, maxAgeMs)
+    const base = info && (await this.columnSet(name, maxAgeMs))
     if (!info || !base) return null
 
     const columns = new Map([...base.columns].map(([key, column]) => [key, { ...column }]))
     if (info.kind === 'database_view') return { columns: [...columns.values()], complete: !base.partial, overridesRead: true, labelsRead: true }
 
     // A child table can give an inherited field its own label: "Close notes" on task is "Resolution notes" on incident.
-    const labels = await this.cached(this.labelSets, name, () => this.loadLabels(info.chain)).catch(() => null)
+    const labels = await this.cached(this.labelSets, name, () => this.loadLabels(info.chain), maxAgeMs).catch(() => null)
     for (const [element, label] of labels ?? []) {
       const column = columns.get(element)
       if (column && label) column.label = label
@@ -174,10 +179,16 @@ export class Dictionary {
    * field. "ref_<child>.<field>" reaches a field of a child table.
    */
   async checkFields(table: string, paths: string[]): Promise<FieldCheck> {
-    const check: FieldCheck = { status: 'checked', unknown: [], resolved: new Map() }
+    const check: FieldCheck = { status: 'checked', unknown: [], resolved: new Map(), reached: new Set() }
     const unavailable = (reason: string) => {
       check.status = 'unavailable'
       check.reason ??= reason
+    }
+
+    try {
+      for (const member of (await this.table(table))?.members ?? []) check.reached.add(member.table)
+    } catch (error) {
+      unavailable(`the dictionary could not be read (${error instanceof ServiceNowError ? error.kind : 'unknown'})`)
     }
 
     for (const path of new Set(paths)) {
@@ -192,6 +203,7 @@ export class Dictionary {
             const child = await this.table(segment.slice(4))
             if (child?.chain.includes(current)) {
               current = child.name
+              check.reached.add(current)
               continue
             }
           }
@@ -219,6 +231,7 @@ export class Dictionary {
             break
           } else {
             current = column.reference
+            check.reached.add(current)
           }
         }
       } catch (error) {
@@ -318,16 +331,21 @@ export class Dictionary {
     }
 
     const members = joined.records
-      .filter((row) => isTableName(row.table) && /^[a-z0-9_]{1,40}$/.test(String(row.variable_prefix)))
+      .filter((row) => isTableName(row.table) && row.table !== name && /^[a-z0-9_]{1,40}$/.test(String(row.variable_prefix)))
       .map((row) => ({ table: row.table, prefix: row.variable_prefix }))
+    // A row that cannot be used means the list of joined tables is not complete.
+    if (members.length < joined.records.length || (joined.total === null && joined.records.length === 50)) {
+      throw new ServiceNowError(`The tables of the database view "${name}" could not be read completely.`, 'invalid_response', 'sys_db_view_table')
+    }
     return { name, label: String(view.label ?? ''), chain: [name], kind: 'database_view', members }
   }
 
-  private columnSet(name: string, maxAgeMs = this.ttlMs): Promise<ColumnSet | null> {
-    return this.cached(this.columnSets, name, () => this.loadColumns(name), maxAgeMs)
+  /** The fields of a table, and whether the list is complete. null if the table is unknown. */
+  columnSet(name: string, maxAgeMs = this.ttlMs): Promise<ColumnSet | null> {
+    return this.cached(this.columnSets, name, () => this.loadColumns(name, maxAgeMs), maxAgeMs)
   }
 
-  private async loadColumns(name: string): Promise<ColumnSet | null> {
+  private async loadColumns(name: string, maxAgeMs: number): Promise<ColumnSet | null> {
     const info = await this.table(name)
     if (!info) return null
 
@@ -335,10 +353,12 @@ export class Dictionary {
     if (info.kind === 'database_view') {
       let partial = false
       for (const member of info.members ?? []) {
-        const set = await this.columnSet(member.table)
+        // A view joins tables. A view named as its own part, or another view, is not followed: that could go in a circle.
+        const joined = await this.table(member.table)
+        const set = joined && joined.kind !== 'database_view' ? await this.columnSet(member.table, maxAgeMs) : null
         if (!set || set.partial) partial = true
         for (const column of set?.columns.values() ?? []) {
-          columns.set(`${member.prefix}_${column.name}`, { ...column, name: `${member.prefix}_${column.name}`, definedOn: member.table })
+          columns.set(`${member.prefix}_${column.name}`, { ...column, name: `${member.prefix}_${column.name}`, definedOn: member.table, sourceField: column.name })
         }
       }
       return { columns, partial }

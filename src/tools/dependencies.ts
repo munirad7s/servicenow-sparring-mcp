@@ -202,9 +202,15 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
   /** Which of these update names have a captured customer update. null for a name whose lookup failed. */
   async function capturedNames(names: string[], warnings: string[]): Promise<Map<string, boolean>> {
     const known = new Map<string, boolean>()
-    const unique = [...new Set(names)]
-    for (let start = 0; start < unique.length; start += 50) {
-      const chunk = unique.slice(start, start + 50)
+    // At most 50 names per request, and never a query longer than the address of a request should be.
+    const chunks: string[][] = [[]]
+    for (const name of new Set(names)) {
+      const last = chunks[chunks.length - 1]
+      if (last.length >= 50 || last.join(',').length + name.length > 4_000) chunks.push([name])
+      else last.push(name)
+    }
+    for (const chunk of chunks) {
+      if (!chunk.length) continue
       try {
         const groups = await sn.groupCount('sys_update_xml', 'name', `nameIN${chunk.join(',')}`)
         const found = new Set(groups.filter((group) => group.count > 0).map((group) => group.value))
@@ -324,7 +330,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
             direct: children?.total ?? null,
             descendants: descendants?.total ?? null,
             names: children?.records.map((row) => String(row.name ?? '')).filter(Boolean) ?? [],
-            truncated: children ? (children.total ?? children.records.length) > children.records.length : false,
+            truncated: children ? (children.total === null ? children.records.length === 50 : children.total > children.records.length) : false,
           },
           notCovered: field ? FIELD_DEPENDENCIES_NOT_COVERED : DEPENDENCIES_NOT_COVERED,
         })

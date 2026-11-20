@@ -18,7 +18,7 @@ test('the audit log gets one line per request, readable by its owner only', asyn
 
     const lines = readFileSync(path, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
     assert.equal(lines.length, 2)
-    assert.deepEqual({ ...lines[0], time: '', ms: 0 }, { time: '', tool: null, api: 'table', table: 'incident', query: 'active=true', status: 200, rows: 1, total: 1, ms: 0 })
+    assert.deepEqual({ ...lines[0], time: '', ms: 0 }, { time: '', tool: null, api: 'table', table: 'incident', query: 'active=true', fields: null, status: 200, sent: 1, rows: 1, total: 1, ms: 0 })
     if (process.platform !== 'win32') assert.equal(statSync(path).mode & 0o777, 0o600)
   } finally {
     rmSync(dir, { recursive: true, force: true })

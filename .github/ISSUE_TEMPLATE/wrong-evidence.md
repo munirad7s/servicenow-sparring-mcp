@@ -16,4 +16,4 @@ labels: evidence
 
 **Release of the instance** (the `release.family` from `sn_instance`)
 
-**Version of servicenow-sparring** (`servicenow-sparring --version`)
+**Version of servicenow-sparring** (`node dist/index.js --version` in a checkout)

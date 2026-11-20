@@ -66,8 +66,13 @@ measurements.
   when read.
 - `sn_instance` reports whether the server's account is an administrator and whether it has `snc_read_only`.
 - Fields that hold secrets are withheld: password types, encrypted fields, system properties of a password type.
-- `SERVICENOW_TABLE_ALLOW` and `SERVICENOW_TABLE_DENY` close tables on the machine that runs the server.
-- `SERVICENOW_AUDIT_LOG` writes one line per request: tool, table, query, status, row counts.
+- `SERVICENOW_TABLE_ALLOW` and `SERVICENOW_TABLE_DENY` close tables on the machine that runs the server: their
+  rows cannot be asked for, nor reached through a dot-walk, a child table or a database view, and the names behind
+  references into them are left out.
+- `SERVICENOW_AUDIT_LOG` writes one line per request: tool, table, query, fields, status, requests sent, row
+  counts.
+- Where the type of a field cannot be read, a field whose name suggests a secret is withheld, and the answer says
+  that types were missing.
 - Every answer says how many requests it cost.
 - A renewed token is read again from the env file after a rejected login.
 - `servicenow-sparring doctor`, `--version` and `--help`. The doctor command checks the Aggregate API, the release

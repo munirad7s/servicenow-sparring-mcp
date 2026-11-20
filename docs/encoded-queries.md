@@ -31,7 +31,8 @@ condition. Other releases can behave differently; `test/query.test.ts` holds the
 
 | Form | Example | The server |
 |---|---|---|
-| The label of a choice instead of its stored value | `state=New` instead of `state=1` | refuses, and names the stored value |
+| The label of a choice instead of its stored value, with `=`, `!=`, `IN` or `NOT IN` | `state=New`, `state!=New` | refuses, and names the stored value |
+| A condition on tags | `sys_tagsISEMPTY`, and `sys_tagsISNOTEMPTY` as well | refuses |
 | A name in place of the sys_id of a reference | `caller_id=Abel Tuter` | sends it, and explains the empty result |
 | `<>` for "not equal" | `state<>6` | refuses: use `!=` |
 | `VALCHANGES`, `CHANGESFROM`, `CHANGESTO` | `stateCHANGESTO6` | refuses: these work only inside a business rule |
@@ -73,7 +74,7 @@ the `RELATIVE` operators with `@<unit>@<ago|ahead>@<n>`.
 
 Also measured:
 
-- `^OR` and `^NQ` work at the start of a query too.
+- `OR` and `NQ` work at the start of a query too, with and without a `^` in front.
 - `^EQ` in the middle of a query does not end it: conditions behind it still apply.
 - A `GOTO` in front of a condition, as the list search writes it, changes nothing.
 - `LIKE` and `STARTSWITH` on a reference field match its display value. `=` and `IN` compare with the sys_id.
@@ -83,6 +84,10 @@ Also measured:
 
 ## Not measured
 
-Related-list queries (`RLQUERY … ENDRLQUERY`), tag conditions (`sys_tags`), catalog variables (`variables.<id>`),
-`MATCH_RGX`, `MATCH_PAT` and `TRENDBY` are refused, because the server cannot check their field names against the
-dictionary. `IN_HIERARCHY` with a real sys_id is accepted on the strength of its documentation only.
+Related-list queries (`RLQUERY … ENDRLQUERY`), tag conditions by id (`sys_tags.<id>`), catalog variables
+(`variables.<id>`), `MATCH_RGX`, `MATCH_PAT` and `TRENDBY` are refused, because the server cannot check their field
+names against the dictionary. `IN_HIERARCHY` with a real sys_id is accepted on the strength of its documentation
+only.
+
+The refusal of a choice label looks at the English labels of fields of the queried table, and of fields a database
+view takes from its tables. A field reached by a dot-walk is not checked, and the answer says so.

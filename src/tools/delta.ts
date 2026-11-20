@@ -5,7 +5,7 @@ import { DELTA_GAPS } from '../limitations.js'
 import { assertPlainValue } from '../query.js'
 import { clip, fail, listing, listShape, ok, rowSchema, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { BY_SYSTEM_ACCOUNT, NOT_BY_SYSTEM_ACCOUNT, READ_ONLY, type Context } from './shared.js'
+import { BY_SYSTEM_ACCOUNT, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
 
 export function registerDeltaTool(server: McpServer, ctx: Context) {
   const { sn } = ctx
@@ -58,7 +58,7 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
           .regex(/^\d{4}-\d{2}-\d{2}$/)
           .optional()
           .describe('Only changes last made on or after this day, YYYY-MM-DD (UTC).'),
-        peopleOnly: z.boolean().default(false).describe('true leaves out rows captured under system accounts (system, guest, ServiceNow maintenance logins).'),
+        peopleOnly: z.boolean().default(false).describe('true leaves out rows no person is on: first captured and last changed by a system account (system, guest, ServiceNow maintenance logins).'),
         limit: z.number().int().min(1).max(200).default(50),
         offset: z.number().int().min(0).default(0),
       },
@@ -71,7 +71,7 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
         capturedBySystemAccounts: z
           .number()
           .nullable()
-          .describe('Rows of the whole filter that were captured under a system account, not by a person. null if unknown.'),
+          .describe('Rows of the whole filter that no person is on: first captured and last changed by a system account. null if unknown.'),
         updates: z.array(rowSchema),
         notCaptured: z.array(z.string()).describe('What sys_update_xml does not record. Say "captured customizations", never "all".'),
       },
@@ -87,9 +87,9 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
           nameContains ? `nameLIKE${nameContains}` : '',
           changedBy ? `sys_created_by=${changedBy}^ORsys_updated_by=${changedBy}` : '',
           since ? `sys_updated_on>=${since} 00:00:00` : '',
-          peopleOnly ? NOT_BY_SYSTEM_ACCOUNT : '',
         ].filter(Boolean)
-        const filter = [...withoutType, type ? `type=${type}` : ''].filter(Boolean).join('^')
+        const scope = (conditions: string[]) => (peopleOnly ? withPeopleOnly(conditions.join('^')) : conditions.join('^'))
+        const filter = scope([...withoutType, type ? `type=${type}` : ''].filter(Boolean))
 
         const warnings: string[] = []
         const [page, byType, bySystem] = await Promise.all([
@@ -107,7 +107,7 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
 
         if (!byType) warnings.push('The counts per type could not be read (Aggregate API). The list itself is valid.')
         if (page.total === 0 && type) {
-          const known = await typeCounts(withoutType.join('^'))
+          const known = await typeCounts(scope(withoutType))
           if (known?.length) {
             warnings.push(`No row has the type "${type}". The type must be the exact label. Types under this filter: ${known.map((item) => item.type).join(', ')}.`)
           }

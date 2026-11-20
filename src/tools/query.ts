@@ -1,45 +1,91 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Row } from '../client.js'
+import type { Column } from '../dictionary.js'
 import { validation } from '../errors.js'
 import { assertTableName } from '../query.js'
-import { clip, fail, listing, listShape, ok, rawOf, redact, rowSchema, source, tidy } from '../result.js'
+import { clip, fail, listing, listShape, ok, rawOf, rowSchema, source, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { explainEmpty, guardFields, READ_ONLY, SECRET_NOTE, SECRET_TYPES, type Context, type Guard } from './shared.js'
+import { explainEmpty, guardFields, LOOKS_SECRET, READ_ONLY, SECRET_NOTE, SECRET_TYPES, type Context, type Guard } from './shared.js'
 
 /** System properties of these types hold credentials. Their value is never passed on. */
 const SECRET_PROPERTY_TYPES = new Set(['password', 'password2'])
 
-export function registerQueryTool(server: McpServer, ctx: Context) {
-  /** The fields of this answer that hold secrets, by their type in the dictionary. */
-  async function secretFields(table: string, fields: string[] | undefined, guard: Guard, warnings: string[]): Promise<Set<string>> {
-    const secret = new Set<string>()
-    if (fields?.length) {
-      for (const field of fields) {
-        if (SECRET_TYPES.has(guard.resolved.get(field)?.type ?? '')) secret.add(field)
-      }
-      if (!fields.some((field) => guard.resolved.has(field))) {
-        warnings.push('The field types could not be read, so fields that hold secrets could not be recognised and withheld.')
-      }
-      return secret
-    }
+const filled = (value: unknown) => value !== '' && value !== null && value !== undefined
+const list = (names: Set<string>) => [...names].sort().join(', ')
 
-    const columns = await ctx.dict.columns(table).catch(() => null)
-    if (!columns) warnings.push('The field types could not be read, so fields that hold secrets could not be recognised and withheld.')
-    for (const column of columns?.values() ?? []) {
-      if (SECRET_TYPES.has(column.type)) secret.add(column.name)
+export function registerQueryTool(server: McpServer, ctx: Context) {
+  /** The dictionary entry of each field an answer can carry, and whether every one of them is known. */
+  async function describeFields(table: string, fields: string[] | undefined, guard: Guard): Promise<{ known: Map<string, Column>; complete: boolean }> {
+    if (fields?.length) {
+      return { known: guard.resolved, complete: fields.every((field) => guard.resolved.has(field)) }
     }
-    return secret
+    const set = await ctx.dict.columnSet(table).catch(() => null)
+    return { known: set?.columns ?? new Map(), complete: Boolean(set) && !set?.partial }
+  }
+
+  /**
+   * Takes out of the rows what must not leave the server: values of fields that
+   * hold secrets, and the names behind references into a table that is closed on
+   * this machine. Where the type of a field cannot be read, its name decides.
+   */
+  function withhold(table: string, rows: Row[], known: Map<string, Column>, complete: boolean, warnings: string[]): Row[] {
+    const byType = new Set<string>()
+    const byName = new Set<string>()
+    const closed = new Set<string>()
+    let properties = 0
+    let untyped = 0
+
+    const cleaned = rows.map((row) => {
+      const out: Row = {}
+      for (const [key, value] of Object.entries(row)) {
+        const column = known.get(key)
+        const fromProperties = column?.definedOn === 'sys_properties' && (column.sourceField ?? column.name) === 'value' && table !== 'sys_properties'
+        if (column ? SECRET_TYPES.has(column.type) || fromProperties : LOOKS_SECRET.test(key)) {
+          if (filled(value)) (column ? byType : byName).add(key)
+          out[key] = filled(value) ? SECRET_NOTE : value
+        } else if (column?.type === 'reference' && column.reference && !ctx.sn.allows(column.reference) && value && typeof value === 'object') {
+          closed.add(key)
+          out[key] = rawOf(value)
+        } else {
+          out[key] = value
+        }
+      }
+
+      // A system property says by its type whether its value is a secret.
+      if (table === 'sys_properties' && filled(out.value) && out.value !== SECRET_NOTE) {
+        const typed = 'type' in row
+        if (typed ? SECRET_PROPERTY_TYPES.has(rawOf(row.type)) : LOOKS_SECRET.test(rawOf(row.name))) {
+          out.value = SECRET_NOTE
+          if (typed) properties++
+          else untyped++
+        }
+      }
+      return out
+    })
+
+    if (byType.size) warnings.push(`Withheld because the field holds a secret: ${list(byType)}.`)
+    if (byName.size) warnings.push(`Withheld because the type of the field could not be read and its name suggests a secret: ${list(byName)}.`)
+    if (!complete) {
+      warnings.push('The types of some fields could not be read (the dictionary is not fully readable for this account). A field that holds a secret is then recognised by its name only.')
+    }
+    if (properties) warnings.push(`The value of ${properties} system propert${properties === 1 ? 'y' : 'ies'} was withheld, because the property holds a secret.`)
+    if (untyped) warnings.push(`The value of ${untyped} system propert${untyped === 1 ? 'y' : 'ies'} was withheld: the type was not returned, and the name suggests a secret.`)
+    if (closed.size) warnings.push(`The names behind references into a table that is closed on this machine were left out: ${list(closed)}.`)
+    return cleaned
   }
 
   /** Rows per value of one field, through the Aggregate API. An unknown field would be ignored there too, and counted as one group. */
   async function countPerValue(table: string, query: string, groupBy: string, limit: number) {
     const guard = await guardFields(ctx, table, query, [groupBy])
-    if (SECRET_TYPES.has(guard.resolved.get(groupBy)?.type ?? '')) {
+    const column = guard.resolved.get(groupBy)
+    if (column ? SECRET_TYPES.has(column.type) : LOOKS_SECRET.test(groupBy)) {
       throw validation(`"${groupBy}" holds a secret. Its values are not listed, also not as groups.`, table)
     }
 
-    const groups = (await ctx.sn.groupCount(table, groupBy, query, true)).sort((a, b) => b.count - a.count)
+    // The label of a group is the name behind a reference. Not asked for where that table is closed on this machine.
+    const labels = !(column?.type === 'reference' && column.reference && !ctx.sn.allows(column.reference))
+    const groups = (await ctx.sn.groupCount(table, groupBy, query, labels)).sort((a, b) => b.count - a.count)
     const shown = groups.slice(0, limit)
     return ok({
       ...source(ctx.sn, [...guard.warnings]),
@@ -132,19 +178,9 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         const leftOut = first ? (fields ?? []).filter((field) => !(field in first)) : []
         if (leftOut.length) warnings.push(`The instance left out the requested field(s) ${leftOut.join(', ')}.`)
 
-        const secret = await secretFields(table, fields, guard, warnings)
-        let withheld = 0
-        const rows = page.records.map((record) => {
-          let row = redact(displayValue ? tidy(record) : record, secret, SECRET_NOTE)
-          if (table === 'sys_properties' && SECRET_PROPERTY_TYPES.has(rawOf(row.type)) && row.value) {
-            row = { ...row, value: SECRET_NOTE }
-            withheld++
-          }
-          if (hidesPropertyType) delete row.type
-          return row
-        })
-        if (secret.size) warnings.push(`Withheld because the field holds a secret: ${[...secret].join(', ')}.`)
-        if (withheld) warnings.push(`The value of ${withheld} system propert${withheld === 1 ? 'y' : 'ies'} was withheld, because the property holds a secret.`)
+        const { known, complete } = await describeFields(table, fields, guard)
+        const rows = withhold(table, displayValue ? page.records.map(tidy) : page.records, known, complete, warnings)
+        if (hidesPropertyType) rows.forEach((row) => delete row.type)
 
         if (page.total === 0 && guard.parsed.conditions.length) {
           warnings.push(...(await explainEmpty(ctx, table, guard).catch(() => [])))
