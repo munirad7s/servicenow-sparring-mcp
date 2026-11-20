@@ -122,6 +122,12 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
       if (info?.kind === 'database_view') {
         // A view has no class of its own. Each table it joins brings its child tables along, under its prefix.
         for (const member of info.members ?? []) {
+          // A view that joins another view, or something the instance does not know as a table: whose rows it
+          // holds cannot be established one level down, so it is not read while tables are closed.
+          const joined = await dict.table(member.table).catch(() => null)
+          if (!joined || joined.kind === 'database_view') {
+            throw blocked(`"${table}" is a database view that joins "${member.table}", which is ${joined ? 'a view itself' : 'not known as a table'}: with tables closed on this machine it cannot be established whose rows it holds.`, table)
+          }
           const condition = await classCondition(member.table, `${member.prefix}_sys_class_name`)
           if (condition) conditions.push(condition)
         }

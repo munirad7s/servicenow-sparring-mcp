@@ -740,6 +740,19 @@ test('a database view that joins a parent table leaves out the rows of its close
   const data = await answer('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
   assert.equal(sentTo('task_with_sla')[0].query, 'tsk_sys_class_nameNOT INincident^ORtsk_sys_class_nameISEMPTY')
   assert.match(data.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
+
+  // A view that joins another view is not followed one level down, so whose rows it holds is not established.
+  const nested: Route[] = [
+    { table: 'sys_db_object', exact: 'name=outer_view', rows: [] },
+    { table: 'sys_db_view', query: 'name=outer_view', rows: [{ sys_id: 'e'.repeat(32), name: 'outer_view', label: 'Outer' }] },
+    { table: 'sys_db_view_table', query: `view=${'e'.repeat(32)}`, rows: [{ table: 'task_with_sla', variable_prefix: 'in' }] },
+    { table: 'outer_view', rows: [{ in_tsk_number: 'INC1' }] },
+  ]
+  const outer = await connect(familyWorld([below, ...nested, ...view]), { tables: { allow: [], deny: ['incident'] } })
+  const refused = await outer.call('sn_query', { table: 'outer_view' })
+  assert.equal(refused.data.error, 'blocked')
+  assert.match(refused.data.message, /"outer_view" is a database view that joins "task_with_sla", which is a view itself/)
+  assert.equal(outer.sentTo('outer_view').length, 0)
 })
 
 test('the name and the payload of a captured change are kept back where its record is in a closed table', async () => {
