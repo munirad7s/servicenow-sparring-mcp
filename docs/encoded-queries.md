@@ -225,6 +225,18 @@ Also measured:
 - The entry for a deleted application file (`sys_metadata_delete`) keeps the name and the update name of the
   record that was deleted. One instance had 2,010 such entries; the update names of 400 of them began with 48
   tables, none with `sys_metadata_delete`.
+- The table of deleted records (`sys_audit_delete`) shows the name of the record that was deleted as its own
+  display value, and other tables point into it: `sys_audit_relation.audit_delete` on 83,948 rows of one instance.
+  59 of 60 such references showed the name of the deleted record. The log of archived records (`sys_archive_log`)
+  does the same, 20 of 20, and the entries for deleted application files 71 of 100. With a table closed, 20 of 20
+  cells of such a reference carried the name of a deleted record of it, and a count per reference its label,
+  until the server left those names out as well.
+- The display field of a table can itself be a reference: 673 tables of one instance show a reference, a list or
+  a document id as their own name (604, 9 and 60), 46 of them a user. A reference into such a table shows the
+  name behind the second reference: of 60 fields with filled references into one of them, 48 did, 340 of 459
+  cells. With a table closed, the name of one of its records came back two tables away: 10 of 10, 20 of 20 and 2
+  of 2 cells in three trials, with a label on every counted group, until the server followed the display field.
+  14 of 842 dictionary overrides move the display field of a table.
 - Three kinds of records are captured under a name that begins with another word than their table: the choices
   of a field as `sys_choice_<table>_<field>`, a record of `sys_choice_set`; the related lists of a form as
   `sys_ui_related_<table>_<view>`, a record of `sys_ui_related_list`; and a version of a workflow under the name

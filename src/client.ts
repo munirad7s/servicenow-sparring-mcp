@@ -35,11 +35,12 @@ export interface Gate {
   enter(table: string, query: string, paths: string[]): Promise<string>
   /**
    * Whether the display value of a field can be the name of a record in a closed table: "closed" if it points
-   * into one, "untold" if it cannot be told where it points. "shown" asks about the display value as it is
+   * into one, "copies" if it points into an open table whose rows are named after records of other tables,
+   * "untold" if it cannot be told where it points. "shown" asks about the display value as it is
    * passed on, where a field of a kind that is not known to show nothing of other records counts as "untold".
    * Without it the question is whether a comparison with text, or a sort, works on such names.
    */
-  hidesNames(table: string, path: string, shown?: boolean): Promise<'closed' | 'untold' | null>
+  hidesNames(table: string, path: string, shown?: boolean): Promise<'closed' | 'copies' | 'untold' | null>
 }
 
 export interface Page<T = Row> {
@@ -212,7 +213,7 @@ export class ServiceNowClient {
 
   /** Takes the display value off every field whose name could be that of a record in a closed table. */
   private async withoutClosedNames(gate: Gate, table: string, records: Row[]): Promise<void> {
-    const verdicts = new Map<string, 'closed' | 'untold' | null>()
+    const verdicts = new Map<string, 'closed' | 'copies' | 'untold' | null>()
     const notes = currentCall()?.closed
     for (const row of records) {
       for (const [key, value] of Object.entries(row)) {
@@ -223,7 +224,7 @@ export class ServiceNowClient {
         if (!verdicts.has(key)) verdicts.set(key, await gate.hidesNames(table, key, true))
         const verdict = verdicts.get(key)
         if (!verdict) continue
-        ;(verdict === 'closed' ? notes?.names : notes?.untold)?.add(key)
+        ;(verdict === 'closed' ? notes?.names : verdict === 'copies' ? notes?.copies : notes?.untold)?.add(key)
         row[key] = raw
       }
     }
@@ -280,7 +281,7 @@ export class ServiceNowClient {
     // The label of a group is the name behind a reference: not asked for where that could be a record of a closed table.
     const hidden = gate && labels ? await gate.hidesNames(table, groupBy, true) : null
     const display = labels && !hidden
-    if (hidden) (hidden === 'closed' ? currentCall()?.closed.names : currentCall()?.closed.untold)?.add(groupBy)
+    if (hidden) (hidden === 'closed' ? currentCall()?.closed.names : hidden === 'copies' ? currentCall()?.closed.copies : currentCall()?.closed.untold)?.add(groupBy)
 
     const params = new URLSearchParams({ sysparm_count: 'true', sysparm_group_by: groupBy })
     if (query) params.set('sysparm_query', query)

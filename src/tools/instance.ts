@@ -65,8 +65,8 @@ export const SOURCES: Array<{ table: string; usedBy: string }> = [
  */
 export const FILTERED_BY: Array<{ table: string; fields: string[] }> = [
   { table: 'sys_db_object', fields: ['name', 'super_class.name'] },
-  { table: 'sys_dictionary', fields: ['name', 'element'] },
-  { table: 'sys_dictionary_override', fields: ['name'] },
+  { table: 'sys_dictionary', fields: ['name', 'element', 'display'] },
+  { table: 'sys_dictionary_override', fields: ['name', 'display_override'] },
   { table: 'sys_documentation', fields: ['name', 'element', 'language'] },
   { table: 'sys_choice', fields: ['name', 'element', 'language', 'inactive'] },
   { table: 'sys_db_view', fields: ['name'] },

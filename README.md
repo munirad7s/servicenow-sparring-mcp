@@ -205,6 +205,19 @@ provider, the data leaves your network. Five things limit what can go that way:
     row says which, read as a row of `sys_metadata` it does not, so that table answers without those rows. The
     entry for a deleted application file keeps the name of the record that was deleted and is treated the same
     way. A text search is refused on a table that holds such names, and on one that points to it.
+  - Some of the tables that hold such names show them as their own: measured, a reference into the table of
+    deleted records shows the name of the record that was deleted, one into the log of archived records the name
+    of the archived record, and one into the entries for deleted application files the name of the deleted file.
+    Behind a reference nothing says which table that record was of. So while tables are closed, the name behind
+    a reference into one of these tables is left out, it cannot be compared with text or sorted by, and the answer
+    says to read the names from the table itself, where each one is judged by the table of its record.
+  - A table can show a record it points to as its own name: its display field is then a reference. Measured: 673
+    tables of one instance do, and a reference into such a table shows the name behind that second reference (48
+    of 60 fields). With users closed, ten of ten cells of a field two tables away carried the name of a user. So
+    the server reads what the table behind a reference shows as its name, and follows it from table to table.
+    Where that leads into a closed table, or to a record of any table, the name is left out like one behind a
+    reference into a closed table. Where it cannot be told what a row shows (the entries cannot be read, or a
+    dictionary override moves the display field), the name is left out as well.
   - The text of comments and work notes is rows of `sys_journal_field`: it is left out where that table is closed.
   - The server's own look-ups follow the same rules. Five tables are read without them, because the rules are
     decided from them: `sys_db_object`, `sys_db_view`, `sys_db_view_table`, `sys_dictionary` and, for the parts
@@ -272,7 +285,9 @@ many. The npm scripts do not write it.
   closed, what a table is a child or a parent of, and that the instance applies the conditions it relies on.
   Measured on a fresh server: 15 requests to list the 1,349 tables below a closed one, 18 for the first query on
   the parent of a closed table, then 1 for the next and 2 for the first on another table. With a long list of the
-  only tables that may be read, a first `sn_instance` took 172.
+  only tables that may be read, a first `sn_instance` took 172. A read with display values costs two requests
+  for each table its filled references point into, once in ten minutes: that is how the server learns what a row
+  of that table shows as its name.
 - One call sends at most 500 requests and ends with an error after that. A call needs that many only where it
   names hundreds of things that each have to be looked up. A request whose address would be longer than 8,000
   characters is not sent: measured, an instance took 8,218 and answered HTTP 414 to 8,223, and a caret, a comma
@@ -338,11 +353,11 @@ account can read each one, and finally the release, the Aggregate API and the ro
 be installed on the instance.
 
 It also asks the instance about each field the server filters by in queries it writes itself: those of
-`sn_delta`, `sn_origin`, `sn_upgrade_skips` and `sn_plugins`, and those it reads the dictionary with, 61 fields of
+`sn_delta`, `sn_origin`, `sn_upgrade_skips` and `sn_plugins`, and those it reads the dictionary with, 63 fields of
 22 tables. It asks for the rows where the field is empty and filled at once. An instance that applies the
 condition answers with none. One that does not know the field drops the condition and answers with rows; the
 functions would then answer unfiltered there, and `doctor` ends with 1 and names the field. A field of a table
-the account cannot read is not asked about. On the test instance 58 of the 61 could be asked, and all 58 are
+the account cannot read is not asked about. On the test instance 60 of the 63 could be asked, and all 60 are
 applied.
 
 Which roles the account needs depends on the access rules of your instance. Start with a read-only account and let

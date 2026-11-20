@@ -629,7 +629,7 @@ test('a closed table gives away no names through a list of references, an unknow
   const untyped = await connect([{ table: 'sys_dictionary', query: 'nameINincident,task', status: 403 }, ...dictionaryRoutes, { table: 'incident', rows }], closed)
   const all = await untyped.answer('sn_query', { table: 'incident', displayValue: true })
   assert.deepEqual(all.records, [{ number: 'INC1', caller_id: ID, watch_list: `${ID},${ID}` }])
-  assert.match(all.warnings.join(' '), /could not be told which table these fields point to, so their display values were left out: caller_id, watch_list/)
+  assert.match(all.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name, so their display values were left out: caller_id, watch_list/)
 })
 
 test('a value of the wrong kind is refused: the instance would not reject it', async () => {
@@ -907,7 +907,7 @@ test('the name behind a reference is left out where the record can be a row of a
   assert.deepEqual(read.records, [{ number: 'INC1', u_contact: ID, u_owner: ID, u_watchers: ID }])
   assert.match(read.warnings.join(' '), /closed on this machine were left out: u_contact\./)
   // A reference or a list whose target did not come back can point anywhere.
-  assert.match(read.warnings.join(' '), /could not be told which table these fields point to, so their display values were left out: u_owner, u_watchers/)
+  assert.match(read.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name, so their display values were left out: u_owner, u_watchers/)
   assert.doesNotMatch(JSON.stringify(read), /Abel|Beth|Carol/)
 
   const counted = await answer('sn_query', { table: 'incident', groupBy: 'u_contact' })
@@ -1880,6 +1880,154 @@ test('an update name is taken for a record of a closed table in every way it can
   const open = fakeInstance([])
   assert.equal(await isClosedRecord(createContext(open.sn), `sys_user_${ID}`), false)
   assert.equal(open.calls.length, 0)
+})
+
+test('the name behind a reference into a table that is named after other records is left out', async () => {
+  // Measured: the table of deleted records shows the name of the record that was deleted as its own name, and
+  // 83,948 rows of another table point into it. Read from the table of deleted records, a name is judged by the
+  // table of its record. Behind a reference nothing says which table that was: with a table closed, 20 of 20
+  // cells carried the name of a deleted record of it, and a count per reference its label.
+  const world: Route[] = [
+    closedTables(tableRow('sys_user', 'User')),
+    { table: 'sys_db_object', exact: 'name=sys_audit_relation', rows: [tableRow('sys_audit_relation', 'Audit Relation')] },
+    { table: 'sys_db_object', exact: 'name=sys_audit_delete', rows: [tableRow('sys_audit_delete', 'Deleted Record')] },
+    { table: 'sys_db_object', exact: 'name=u_gone', rows: [tableRow('u_gone', 'Gone', 'sys_audit_delete')] },
+    { table: 'sys_db_object', exact: 'name=ar_sys_audit_delete', rows: [tableRow('ar_sys_audit_delete', 'Archive')] },
+    {
+      table: 'sys_dictionary',
+      query: 'nameINsys_audit_relation',
+      rows: [
+        column('sys_audit_relation', 'audit_delete', 'reference', 'sys_audit_delete'),
+        // A table below it, and its archive, hold rows of the same kind.
+        column('sys_audit_relation', 'u_gone', 'reference', 'u_gone'),
+        column('sys_audit_relation', 'u_old', 'reference', 'ar_sys_audit_delete'),
+        column('sys_audit_relation', 'tablename'),
+      ],
+    },
+    { table: 'sys_dictionary', query: 'nameINar_sys_audit_delete', rows: [column('ar_sys_audit_delete', 'display_value'), column('ar_sys_audit_delete', 'tablename')] },
+    { table: 'sys_dictionary', query: 'nameINsys_audit_delete', rows: [column('sys_audit_delete', 'display_value'), column('sys_audit_delete', 'tablename')] },
+    { table: 'sys_dictionary', query: 'nameINu_gone', rows: [column('sys_audit_delete', 'display_value'), column('sys_audit_delete', 'tablename')] },
+    ...dictionaryRoutes,
+    { table: 'sys_audit_relation', api: 'stats', rows: [{ stats: { count: '3' }, groupby_fields: [{ field: 'audit_delete', value: ID, display_value: 'Abel Tuter' }] }] },
+    { table: 'sys_audit_relation', rows: [{ tablename: 'sys_user_grmember', audit_delete: labelled(ID, 'Abel Tuter'), u_gone: labelled(ID, 'Beth Anglin'), u_old: labelled(ID, 'Carol Coughlin') }] },
+  ]
+  const noUsers = { tables: { allow: [], deny: ['sys_user'] } }
+  const { answer, call, sentTo } = await connect(world, noUsers)
+
+  const read = await answer('sn_query', { table: 'sys_audit_relation', fields: ['tablename', 'audit_delete', 'u_gone', 'u_old'], displayValue: true })
+  assert.deepEqual(read.records, [{ tablename: 'sys_user_grmember', audit_delete: ID, u_gone: ID, u_old: ID }])
+  assert.doesNotMatch(JSON.stringify(read), /Abel|Beth|Carol/)
+  assert.match(read.warnings.join(' '), /point into a table whose rows are named after records of other tables, so their display values were left out: audit_delete, u_gone, u_old\./)
+  // A count per reference comes without the names, and the instance is not asked for them.
+  const counted = await answer('sn_query', { table: 'sys_audit_relation', groupBy: 'audit_delete' })
+  assert.deepEqual(counted.groups, [{ value: ID, count: 3 }])
+  assert.equal(sentTo('sys_audit_relation', 'stats')[0].params.get('sysparm_display_value'), null)
+  // Comparing with text and sorting work on those names.
+  for (const query of ['audit_deleteSTARTSWITHAbel', 'ORDERBYaudit_delete', 'u_goneLIKEBeth']) {
+    const { data } = await call('sn_query', { table: 'sys_audit_relation', query, fields: ['tablename'] })
+    assert.equal(data.error, 'blocked', query)
+    assert.match(data.message, /whose rows are named after records of other tables, and tables are closed on this machine\. Comparing it with text or sorting by it works on the names/, query)
+  }
+  // A sys_id can be compared, and whether the field is filled can be asked.
+  assert.equal((await answer('sn_query', { table: 'sys_audit_relation', query: `audit_delete=${ID}^u_goneISNOTEMPTY`, fields: ['tablename'] })).returned, 1)
+
+  // Nothing is closed: the names stay.
+  const open = await connect(world)
+  const shown = await open.answer('sn_query', { table: 'sys_audit_relation', fields: ['audit_delete'], displayValue: true })
+  assert.match(JSON.stringify(shown.records), /Abel Tuter/)
+  assert.equal((await open.answer('sn_query', { table: 'sys_audit_relation', query: 'audit_deleteSTARTSWITHAbel', fields: ['tablename'] })).returned, 1)
+})
+
+test('the name behind a reference is left out where the table it points into shows the name of a record further on', async () => {
+  // Measured: 673 tables of one instance show a reference as their own name, and a reference into such a table
+  // shows the name behind that second reference (48 of 60 fields). With users closed, ten of ten cells of a field
+  // two tables away carried the name of a user, a count per value its label, and a sort by it was answered.
+  const one = (name: string, ...columns: Data[]): Route[] => [
+    { table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] },
+    { table: 'sys_dictionary', query: `nameIN${name}`, rows: columns },
+  ]
+  const shows = (table: string, field: string, type: string, target: string) => column(table, field, type, target, { display: 'true' })
+  const pointers = ['u_alloc', 'u_top', 'u_approval', 'u_named', 'u_moved', 'u_blind', 'u_far', 'u_noover', 'u_part', 'u_c1', 'u_ring', 'u_plain', 'u_d1']
+  // Tables that each show the next one: eight in a row, and five. The last shows a text of its own.
+  const row8 = Array.from({ length: 8 }, (_, index) => `u_c${index + 1}`)
+  const row5 = Array.from({ length: 5 }, (_, index) => `u_d${index + 1}`)
+  const inARow = (names: string[]) => names.flatMap((name, index) => one(name, index + 1 < names.length ? shows(name, 'u_next', 'reference', names[index + 1]) : column(name, 'name')))
+  const world: Route[] = [
+    closedTables(tableRow('sys_user', 'User')),
+    ...one('u_detail', column('u_detail', 'u_note'), ...pointers.map((name) => column('u_detail', name, 'reference', name))),
+    // Shows the user it belongs to as its own name.
+    ...one('u_alloc', shows('u_alloc', 'u_user', 'reference', 'sys_user'), column('u_alloc', 'u_code')),
+    // Shows a record that shows a user: two tables further on.
+    ...one('u_top', shows('u_top', 'u_alloc', 'reference', 'u_alloc')),
+    // Shows a record of any table.
+    ...one('u_approval', shows('u_approval', 'u_document', 'document_id', '')),
+    // Nothing is marked: the platform then takes a field by its name, and this one is a reference.
+    ...one('u_named', column('u_named', 'name', 'reference', 'sys_user'), column('u_named', 'u_code')),
+    // A dictionary override moves the display field: what a row shows is then not known.
+    ...one('u_moved', column('u_moved', 'u_code')),
+    { table: 'sys_dictionary_override', query: 'nameINu_moved', rows: [{ name: 'u_moved', element: 'u_user', display_override: 'true' }] },
+    // The entries cannot be read.
+    { table: 'sys_db_object', exact: 'name=u_blind', rows: [tableRow('u_blind', 'Blind')] },
+    { table: 'sys_dictionary', query: 'nameINu_blind', status: 403 },
+    // Whether an override moves the display field cannot be read, and an entry is hidden from the account.
+    ...one('u_noover', column('u_noover', 'name')),
+    { table: 'sys_dictionary_override', query: 'nameINu_noover', status: 403 },
+    { table: 'sys_db_object', exact: 'name=u_part', rows: [tableRow('u_part', 'Part')] },
+    { table: 'sys_dictionary', query: 'nameINu_part', rows: [column('u_part', 'name'), null] },
+    // Shows a record of the table whose entries cannot be read.
+    ...one('u_far', shows('u_far', 'u_blind', 'reference', 'u_blind')),
+    // Two tables that show each other, and nothing of a closed table.
+    ...one('u_ring', shows('u_ring', 'u_back', 'reference', 'u_ring2')),
+    ...one('u_ring2', shows('u_ring2', 'u_forth', 'reference', 'u_ring')),
+    // Shows a text of its own.
+    ...one('u_plain', column('u_plain', 'name'), column('u_plain', 'u_user', 'reference', 'sys_user')),
+    ...inARow(row8),
+    ...inARow(row5),
+    ...dictionaryRoutes,
+    { table: 'u_detail', api: 'stats', rows: [{ stats: { count: '3' }, groupby_fields: [{ field: 'u_alloc', value: ID, display_value: 'Abel Tuter' }] }] },
+    { table: 'u_detail', rows: [{ u_note: 'x', ...Object.fromEntries(pointers.map((name) => [name, labelled(ID, `Abel Tuter (${name})`)])) }] },
+  ]
+  const noUsers = { tables: { allow: [], deny: ['sys_user'] } }
+  const { answer, call, sentTo } = await connect(world, noUsers)
+
+  const read = await answer('sn_query', { table: 'u_detail', fields: ['u_note', ...pointers], displayValue: true })
+  const [row] = read.records
+  for (const name of ['u_alloc', 'u_top', 'u_approval', 'u_named', 'u_moved', 'u_blind', 'u_far', 'u_noover', 'u_part']) assert.equal(row[name], ID, name)
+  // Tables that show nothing of a closed table keep the names behind references into them: two that show each
+  // other, one that shows a text, and five in a row.
+  for (const name of ['u_ring', 'u_plain', 'u_d1']) assert.deepEqual(row[name], { value: ID, display: `Abel Tuter (${name})` }, name)
+  // No more than six tables are followed from one reference: beyond that, whose name it is counts as not told.
+  assert.equal(row.u_c1, ID)
+  assert.match(read.warnings.join(' '), /point into a table whose rows are named after records of other tables, so their display values were left out: u_alloc, u_approval, u_c1, u_named, u_top\./)
+  // What cannot be told one table further on is said as that, not as a name of another record.
+  assert.match(read.warnings.join(' '), /or what a row of that table shows as its name, so their display values were left out: u_blind, u_far, u_moved, u_noover, u_part\./)
+
+  const counted = await answer('sn_query', { table: 'u_detail', groupBy: 'u_alloc' })
+  assert.deepEqual(counted.groups, [{ value: ID, count: 3 }])
+  assert.equal(sentTo('u_detail', 'stats')[0].params.get('sysparm_display_value'), null)
+  for (const query of ['u_allocSTARTSWITHAbel', 'ORDERBYu_top', 'u_approvalLIKEAbel', 'ORDERBYDESCu_moved']) {
+    const { data } = await call('sn_query', { table: 'u_detail', query, fields: ['u_note'] })
+    assert.equal(data.error, 'blocked', query)
+    assert.match(data.message, /Comparing it with text or sorting by it works on the names/, query)
+  }
+  assert.equal((await answer('sn_query', { table: 'u_detail', query: 'u_plainSTARTSWITHAbel^ORDERBYu_ring', fields: ['u_note'] })).returned, 1)
+  // What a table shows is asked once per table, not with every call. A look-up that failed is tried again.
+  const asked = () => sentTo('sys_dictionary').filter((sent) => sent.query.includes('^display=true^ORelementIN') && !sent.query.includes('u_blind')).length
+  const before = asked()
+  await answer('sn_query', { table: 'u_detail', fields: ['u_note', ...pointers], displayValue: true })
+  assert.equal(asked(), before)
+
+  // Another table is closed: the user behind the reference may be shown, and what cannot be told still not.
+  const noIncidents = await connect([closedTables(tableRow('incident', 'Incident', 'task')), ...world.slice(1)], { tables: { allow: [], deny: ['incident'] } })
+  const [other] = (await noIncidents.answer('sn_query', { table: 'u_detail', fields: ['u_note', ...pointers], displayValue: true })).records
+  for (const name of ['u_alloc', 'u_top', 'u_named', 'u_ring', 'u_plain', 'u_d1']) assert.deepEqual(other[name], { value: ID, display: `Abel Tuter (${name})` }, name)
+  for (const name of ['u_approval', 'u_moved', 'u_blind', 'u_far', 'u_noover', 'u_part', 'u_c1']) assert.equal(other[name], ID, name)
+
+  // Nothing is closed: nothing is asked, and every name stays.
+  const open = await connect(world)
+  const [all] = (await open.answer('sn_query', { table: 'u_detail', fields: ['u_note', ...pointers], displayValue: true })).records
+  for (const name of pointers) assert.deepEqual(all[name], { value: ID, display: `Abel Tuter (${name})` }, name)
+  assert.equal(open.sentTo('sys_dictionary').filter((sent) => sent.query.includes('^display=true')).length, 0)
 })
 
 test('a text search is not a way to probe a field that holds a secret', async () => {
@@ -3003,14 +3151,19 @@ test('what a field shows is passed on only for kinds of fields that show nothing
     u_stage: labelled('waiting', 'Waiting for approval'),
     u_odd: labelled('x', 'Something else'),
   }
-  const world = [fields, { table: 'sys_db_object', exact: 'name=sys_attachment', rows: [tableRow('sys_attachment', 'Attachment')] }, ...dictionaryRoutes, { table: 'incident', rows: [row] }]
+  const attachment: Route[] = [
+    { table: 'sys_db_object', exact: 'name=sys_attachment', rows: [tableRow('sys_attachment', 'Attachment')] },
+    // What an attachment shows as its name is a field of its own, the name of the file.
+    { table: 'sys_dictionary', query: 'nameINsys_attachment', rows: [column('sys_attachment', 'file_name', 'string', '', { display: 'true' })] },
+  ]
+  const world = [fields, ...attachment, ...dictionaryRoutes, { table: 'incident', rows: [row] }]
   const wanted = { table: 'incident', fields: ['number', 'u_filter', 'u_document', 'u_stage', 'u_odd'], displayValue: true }
 
   const users = await connect(world, { tables: { allow: [], deny: ['sys_user'] } })
   const data = await users.answer('sn_query', wanted)
   // The attachment table is open, so the name of the file stays. The stage shows its label.
   assert.deepEqual(data.records, [{ number: 'INC1', u_filter: `caller_id=${ID}`, u_document: { value: ID, display: 'payroll-2026.xlsx' }, u_stage: { value: 'waiting', display: 'Waiting for approval' }, u_odd: 'x' }])
-  assert.match(data.warnings.join(' '), /could not be told which table these fields point to, so their display values were left out: u_filter, u_odd/)
+  assert.match(data.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name, so their display values were left out: u_filter, u_odd/)
   // Comparing the condition with text is a comparison with what is stored.
   assert.equal((await users.answer('sn_query', { table: 'incident', query: 'u_filterLIKEcaller_id', fields: ['number'] })).returned, 1)
 

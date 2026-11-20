@@ -55,6 +55,19 @@ const SHOWS_ITSELF = new Set(
 const COPIES_BELOW: Record<string, string[]> = { sys_metadata: ['sys_metadata_delete', 'sys_metadata_link'] }
 
 /**
+ * Tables whose rows show, as their own name, the name of a record of another table. Measured: a reference into the
+ * table of deleted records shows the name of the record that was deleted (59 of 60 cells), one into the log of
+ * archived records the name of the archived record (20 of 20), and one into the entries for deleted application
+ * files the name of the deleted file (71 of 100). A linked application file is named after the record it links
+ * to, and what one scope may use of another shows the name of that thing. Read from the table itself, each name
+ * is judged by the table of its record. Behind a reference nothing says which table that is, so there the name is
+ * left out while tables are closed.
+ */
+const NAMED_AFTER_OTHERS = new Set(['sys_audit_delete', 'sys_archive_log', 'sys_metadata_delete', 'sys_metadata_link', 'sys_scope_privilege'])
+/** As many tables as are followed from one reference to see whose name it shows in the end. */
+const MAX_NAMES_BEHIND = 6
+
+/**
  * As long as a query may be once it is written into the address of a request. Measured: an instance took an
  * address of 8,218 characters and answered HTTP 414 to one of 8,223, and a caret or a comma takes three of them.
  * The rest is left for the fields a request names.
@@ -209,6 +222,36 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
   async function mayHoldClosed(table: string): Promise<boolean> {
     if (!sn.restricted) return false
     return (await reason(table)) !== null || (await holdsClosedBelow(table))
+  }
+
+  /**
+   * Whose names a reference into a table shows. "closed": the table is closed, or has closed tables below it.
+   * "copies": the table is open, and a row of it is named after a record of another table that is closed, or that
+   * cannot be told. That is so for the tables listed above, and for a table whose display field is itself a
+   * reference: measured, a reference into such a table shows the name behind the second reference (48 of 60
+   * fields), so with users closed, ten of ten cells of a field two tables away carried the name of a user.
+   * "untold": what a row of the table shows as its name could not be read.
+   */
+  async function namesBehind(target: string, seen = new Set<string>()): Promise<'closed' | 'copies' | 'untold' | null> {
+    if (await mayHoldClosed(target)) return 'closed'
+    // Read as itself, as a table below it, as its archive or as a part of it.
+    const info = await dict.table(target).catch(unlessNoConnection(null))
+    const names = new Set(info?.chain ?? [target])
+    for (const name of names) for (const base of holdsRowsOf(name)) names.add(base)
+    if ([...names].some((name) => NAMED_AFTER_OTHERS.has(name))) return 'copies'
+
+    if (seen.has(target)) return null
+    seen.add(target)
+    const shown = await dict.displayReferences(target).catch(unlessNoConnection(null))
+    if (!shown) return 'untold'
+    for (const { reference } of shown) {
+      // A document id, or a reference without a table: the record it names can be of any table.
+      if (!reference || seen.size > MAX_NAMES_BEHIND) return 'copies'
+      const further = await namesBehind(reference, seen)
+      if (further === 'untold') return 'untold'
+      if (further) return 'copies'
+    }
+    return null
   }
 
   /**
@@ -371,7 +414,7 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
       if (!column?.type || column.type === 'document_id') return 'untold'
       // The display value of a journal field is the text of its entries, which are rows of sys_journal_field.
       const target = column.type === 'domain_id' ? 'domain' : JOURNALS.has(column.type) ? 'sys_journal_field' : ATTACHMENTS.has(column.type) ? 'sys_attachment' : column.reference
-      if (target) return (await mayHoldClosed(target)) ? 'closed' : null
+      if (target) return namesBehind(target)
       if (column.type === 'reference' || column.type === 'glide_list') return 'untold'
       // A comparison with text works on what such a field stores. What it shows is another matter.
       return shown && !SHOWS_ITSELF.has(column.type) ? 'untold' : null

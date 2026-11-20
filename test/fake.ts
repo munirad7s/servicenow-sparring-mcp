@@ -99,7 +99,18 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     if (route.body !== undefined) return new Response(route.body, { status, headers: { 'content-type': 'text/html' } })
     if (status !== 200) return json({ error: ERRORS[status] ?? { message: `HTTP ${status}`, detail: '' }, status: 'failure' }, status)
 
-    const rows = route.rows ?? []
+    // Asked which fields a row shows as its own name, an instance answers with the fields the dictionary marks as
+    // display and with those of a few names; asked whether an override moves the display field, with the overrides
+    // that do. The routes of a test list every field of a table, so the stand-in picks from them as an instance does.
+    const shownAs = table === 'sys_dictionary' ? /\^display=true(?:\^ORelementIN([a-z_,]+))?(?:\^ORDERBY|$)/.exec(query) : null
+    const namedAsDisplay = shownAs ? (shownAs[1]?.split(',') ?? []) : undefined
+    const movesDisplay = table === 'sys_dictionary_override' && query.endsWith('^display_override=true')
+    const rows = (route.rows ?? []).filter((row) => {
+      if (row === null) return true
+      if (namedAsDisplay) return row.display === 'true' || namedAsDisplay.includes(String(row.element))
+      if (movesDisplay) return row.display_override === 'true'
+      return true
+    })
     if (api === 'stats') {
       // Like the Aggregate API: a group carries its label only when display values were asked for.
       const labelled = parsed.searchParams.get('sysparm_display_value') === 'all'

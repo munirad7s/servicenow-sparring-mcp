@@ -150,6 +150,10 @@ const NO_SUCH_TABLE = ['zz__no_such_table_a', 'zz__no_such_table_b']
 const MAX_KNOWN_NAMES = 5_000
 /** How often at most the list of the parts of rotated tables is read anew because a name looks like a new part. */
 const PARTS_ANEW_MS = 60_000
+/** The fields the platform shows as the name of a row where the dictionary marks none, by their names. */
+const NAMED_AS_DISPLAY = ['name', 'u_name', 'number', 'u_number']
+/** Kinds of fields that show the name of another record. */
+const POINTS_ELSEWHERE = new Set(['reference', 'glide_list', 'document_id'])
 
 /**
  * The parents of a row of sys_db_object as they were asked for, nearest first. null if the row cannot be used: it
@@ -206,6 +210,7 @@ export class Dictionary {
   private readonly knownNames = new Map<string, { table: boolean; at: number }>()
   private readonly partLists = new Map<string, Entry<Map<string, string> | null>>()
   private partsReadAnew = 0
+  private readonly shownSets = new Map<string, Entry<Array<{ field: string; reference: string | null }> | null>>()
 
   /**
    * The client, for the lookups the gate of closed tables is built from: what a table is, what it extends, which
@@ -281,7 +286,7 @@ export class Dictionary {
    * For a database view, call it for the tables it joins as well.
    */
   forget(name: string): void {
-    for (const cache of [this.tables, this.columnSets, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.childSets]) cache.delete(name)
+    for (const cache of [this.tables, this.columnSets, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.childSets, this.shownSets]) cache.delete(name)
     for (const key of [...this.choiceLists.keys()]) if (key.startsWith(`${name}.`)) this.choiceLists.delete(key)
     // What a view was seen to carry belongs to its definition: a field taken off its list is asked about again.
     for (const key of [...this.carried.keys()]) if (key.startsWith(`${name}.`)) this.carried.delete(key)
@@ -641,6 +646,32 @@ export class Dictionary {
         if (row.table_name !== row['name.name']) parts.set(row.table_name, row['name.name'])
       }
       return parts
+    })
+  }
+
+  /**
+   * The fields a row of a table can show as its own name, where such a field points to another record: a
+   * reference, a list or a document id. A reference into the table then shows the name of that other record.
+   * Measured: 673 tables of one instance have such a display field, and of 60 fields that point into one of them,
+   * 48 showed the name behind the second reference. The display field is the one the dictionary marks, on the
+   * table or on a parent; without a mark the platform takes a field by its name. null where it cannot be told
+   * what a row shows: the entries could not be read completely, or a dictionary override moves the display field
+   * (14 of 842 overrides did), or the overrides could not be read.
+   */
+  displayReferences(table: string): Promise<Array<{ field: string; reference: string | null }> | null> {
+    assertTableName(table)
+    return this.cached(this.shownSets, table, async () => {
+      const info = await this.table(table)
+      if (!info || info.kind === 'database_view') return null
+      const chain = info.chain.join(',')
+      const entries = await this.sn.all<Record<string, string>>(
+        { table: 'sys_dictionary', query: `nameIN${chain}^display=true^ORelementIN${NAMED_AS_DISPLAY.join(',')}`, fields: ['name', 'element', 'internal_type', 'reference'] },
+        2_000,
+      )
+      if (!entries.complete || (entries.total !== null && entries.records.length < entries.total)) return null
+      const moved = await this.gated.query<Record<string, string>>({ table: 'sys_dictionary_override', query: `nameIN${chain}^display_override=true`, fields: ['sys_id'], limit: 1 }).catch(unlessNoConnection(null))
+      if (!moved || moved.total !== 0 || moved.records.length) return null
+      return entries.records.filter((row) => POINTS_ELSEWHERE.has(row.internal_type)).map((row) => ({ field: String(row.element), reference: isTableName(row.reference) ? row.reference : null }))
     })
   }
 

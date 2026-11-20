@@ -1066,7 +1066,13 @@ async function keepSecretsOutOfReach(
     for (const field of new Set(byName)) {
       const hidden = await ctx.closed.hidesNames(table, field)
       if (!hidden) continue
-      const where = hidden === 'closed' ? `${resolved.get(field)?.reference ?? 'a table'}, which is closed on this machine or has closed tables below it` : 'a table that cannot be told, and tables are closed on this machine'
+      const target = resolved.get(field)?.reference ?? 'a table'
+      const where =
+        hidden === 'closed'
+          ? `${target}, which is closed on this machine or has closed tables below it`
+          : hidden === 'copies'
+            ? `${target}, whose rows are named after records of other tables, and tables are closed on this machine`
+            : 'a table that cannot be told, and tables are closed on this machine'
       throw new ServiceNowError(
         `"${field}" points into ${where}. Comparing it with text or sorting by it works on the names of the records there, ` +
           'so those names could be found out by trying. Compare it with a sys_id (=, IN) or ask whether it is filled. Nothing was sent.',

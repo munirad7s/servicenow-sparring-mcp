@@ -35,7 +35,9 @@
  * For each table named, a server is started on which that table is closed, and
  * the instance is asked directly what belongs to the table: the tables below it,
  * the tables above it, the fields that point into it, the views that join it,
- * the captured changes to its records. Then the ways round that this script
+ * the captured changes to its records, the fields that point to its deleted
+ * and archived records, and the tables that show one of its records as their
+ * own name. Then the ways round that this script
  * knows are tried through the server. A row, a name or a count of the closed
  * table that comes back is a finding. A check counts as passed only where the
  * server refuses because of the closed table, or answers without anything of
@@ -701,8 +703,67 @@ async function closedTables(names: string[]): Promise<number> {
       if (!refused(await ask('sn_origin', { updateName: captured[0] }), 'sn_origin for a record of the closed table is refused')) finding('sn_origin by the update name of a record of the closed table is answered')
     }
 
+    // 6. Deleted and archived records of the family. The table that keeps them shows their names as its own, and
+    // other tables point into it: behind such a reference nothing says which table the record was of.
+    let kept = 0
+    for (const [keeper, tableField] of [['sys_audit_delete', 'tablename'], ['sys_archive_log', 'from_table']] as const) {
+      const pointers = await list('sys_dictionary', `reference=${keeper}^internal_type=reference^active=true^elementISNOTEMPTY`, ['name', 'element'], 50)
+      for (const { name: table, element: field } of pointers.slice(0, 4)) {
+        const [query] = await inFamily(`${field}.${tableField}IN<family>`)
+        if (!((await rowsThatMatch(table, query)) > 0)) continue
+        kept++
+        const shown = await ask('sn_query', { table, query, fields: [field], limit: 20, displayValue: true })
+        if (refused(shown, 'a read through a reference to a deleted or archived record is refused')) {
+          // Nothing came back.
+        } else if ((shown.data.records as Data[]).some((row) => row[field] && typeof row[field] === 'object' && (row[field].display ?? row[field].display_value))) {
+          finding(`${table}.${field}: cells carry the name of a deleted or archived record of the closed table`)
+        } else good('a reference to a deleted or archived record of the closed table comes without its name')
+        for (const probe of [`${query}^${field}STARTSWITHa`, `${query}^ORDERBY${field}`]) {
+          if (!refused(await ask('sn_query', { table, query: probe, fields: ['sys_id'], limit: 1 }), 'a text comparison or a sort by a reference to deleted or archived records is refused')) {
+            finding(`${table} with "${masked(probe).slice(-40)}" is answered, and it works on the names of deleted or archived records`)
+          }
+        }
+        const counted = await ask('sn_query', { table, query, groupBy: field, limit: 20, displayValue: true })
+        if (refused(counted, 'a count per reference to deleted or archived records is refused')) {
+          // Nothing came back.
+        } else if ((counted.data.groups as Data[]).some((group) => group.display)) finding(`${table} counted per ${field}: the groups carry names of deleted or archived records of the closed table`)
+        else good('a count per reference to deleted or archived records comes without names')
+      }
+    }
+
+    // 7. Tables that show a record of the family as their own name: a reference into such a table shows that name,
+    // two tables away from the closed one.
+    let chains = 0
+    for (const part of await inFamily('display=true^internal_type=reference^referenceIN<family>')) {
+      for (const middle of await list('sys_dictionary', part, ['name', 'element'], 100)) {
+        if (chains >= 4) break
+        for (const pointer of await list('sys_dictionary', `reference=${middle.name}^internal_type=reference^active=true^elementISNOTEMPTY`, ['name', 'element'], 10)) {
+          if (family.includes(pointer.name) || !((await rowsThatMatch(pointer.name, `${pointer.element}.${middle.element}ISNOTEMPTY`)) > 0)) continue
+          chains++
+          const { name: table, element: field } = pointer
+          const shown = await ask('sn_query', { table, query: `${field}ISNOTEMPTY`, fields: [field], limit: 20, displayValue: true })
+          if (refused(shown, 'a read of a field two tables away from the closed table is refused')) {
+            // Nothing came back.
+          } else if ((shown.data.records as Data[]).some((row) => row[field] && typeof row[field] === 'object' && (row[field].display ?? row[field].display_value))) {
+            finding(`${table}.${field}: cells carry the name of a record of the closed table, which ${middle.name} shows as its own`)
+          } else good('a reference into a table that shows a closed record as its own name comes without the name')
+          for (const probe of [`${field}STARTSWITHa`, `ORDERBY${field}`]) {
+            if (!refused(await ask('sn_query', { table, query: probe, fields: ['sys_id'], limit: 1 }), 'a text comparison or a sort two tables away from the closed table is refused')) {
+              finding(`${table} with "${probe}" is answered, and it works on names of the closed table that ${middle.name} shows as its own`)
+            }
+          }
+          const counted = await ask('sn_query', { table, groupBy: field, limit: 20, displayValue: true })
+          if (refused(counted, 'a count two tables away from the closed table is refused')) {
+            // Nothing came back.
+          } else if ((counted.data.groups as Data[]).some((group) => group.display)) finding(`${table} counted per ${field}: the groups carry names of the closed table`)
+          else good('a count two tables away from the closed table comes without names')
+          break
+        }
+      }
+    }
+
     requests += instance.requestCount
-    console.log(`\n${closed}: ${family.length} table(s) with those below it, ${parents.length} above, ${pointing.length} fields point into them (${tried.length} tried), ${views.size} views join them, ${captured.length} captured changes; ${findings.length - before} finding(s)`)
+    console.log(`\n${closed}: ${family.length} table(s) with those below it, ${parents.length} above, ${pointing.length} fields point into them (${tried.length} tried), ${views.size} views join them, ${captured.length} captured changes, ${kept} field(s) point to deleted or archived records of them, ${chains} to a table that shows one of them as its name; ${findings.length - before} finding(s)`)
   }
 
   console.log('')

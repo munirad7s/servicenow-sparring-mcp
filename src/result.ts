@@ -50,8 +50,16 @@ export function source(sn: ServiceNowClient, warnings: string[] = []) {
   }
   if (closed?.rowsLeftOut) add(ROWS_LEFT_OUT)
   if (closed?.names.size) add(`The names behind references into a table that is closed on this machine were left out: ${[...closed.names].sort().join(', ')}.`)
+  if (closed?.copies.size) {
+    add(
+      `Tables are closed on this machine, and these fields point into a table whose rows are named after records of other tables, so their display values were left out: ${[...closed.copies].sort().join(', ')}. ` +
+        'Read the names from that table itself: there each one is judged by the table of its record.',
+    )
+  }
   if (closed?.untold.size) {
-    add(`Tables are closed on this machine, and it could not be told which table these fields point to, so their display values were left out: ${[...closed.untold].sort().join(', ')}.`)
+    add(
+      `Tables are closed on this machine, and it could not be told which table these fields point to, or what a row of that table shows as its name, so their display values were left out: ${[...closed.untold].sort().join(', ')}.`,
+    )
   }
   return { instance: sn.host, fetchedAt: new Date().toISOString(), requests: currentCall()?.requests ?? 0, warnings }
 }
