@@ -289,3 +289,28 @@ test('the tables a long deny list closes are asked for in several requests, each
   await again.closedTables()
   assert.equal(calls.length, before)
 })
+
+test('the tables below a table are listed only where the answer can be trusted', async () => {
+  const below = (rows: Array<Record<string, string> | null>, extra: Partial<{ total: number; status: number }> = {}) => fakeInstance([{ table: 'sys_db_object', query: '^ORname=task', rows, ...extra }])
+  const task = tableRow('task', 'Task')
+  const incident = tableRow('incident', 'Incident', 'task')
+  const major = tableRow('u_major_incident', 'Major incident', 'incident', 'task')
+
+  const fine = below([task, incident, major])
+  assert.deepEqual(await new Dictionary(fine.sn).childTables('task'), ['incident', 'u_major_incident'])
+  // Every level of parents is asked for, and the table itself as proof that the query was applied.
+  assert.match(fine.calls[0].query, /^super_class\.name=task\^ORsuper_class\.super_class\.name=task\^OR.*\^ORname=task$/)
+  assert.deepEqual(await new Dictionary(below([task]).sn).childTables('task'), [])
+
+  // Not trusted: the table itself is missing from the answer, a row matches none of the conditions, rows are
+  // hidden, or the table of tables cannot be read. null means "assume that a closed table is among them".
+  for (const [name, world] of [
+    ['no proof', below([incident])],
+    ['a row that matches nothing', below([task, tableRow('problem', 'Problem')])],
+    ['hidden rows', below([task, incident, null])],
+    ['more than was read', below([task, incident], { total: 9_000 })],
+    ['not readable', below([], { status: 403 })],
+  ] as const) {
+    assert.equal(await new Dictionary(world.sn).childTables('task'), null, name)
+  }
+})
