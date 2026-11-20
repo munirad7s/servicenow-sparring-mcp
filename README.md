@@ -217,7 +217,9 @@ provider, the data leaves your network. Five things limit what can go that way:
     the server reads what the table behind a reference shows as its name, and follows it from table to table.
     Where that leads into a closed table, or to a record of any table, the name is left out like one behind a
     reference into a closed table. Where it cannot be told what a row shows (the entries cannot be read, or a
-    dictionary override moves the display field), the name is left out as well.
+    dictionary override moves the display field), the name is left out as well. The overrides are read from
+    `sys_dictionary_override` under the same rules as any table: a list that closes it, or does not name it,
+    takes the name off every reference, so name it on `SERVICENOW_TABLE_ALLOW` (`sys_*` does).
   - The text of comments and work notes is rows of `sys_journal_field`: it is left out where that table is closed.
   - The server's own look-ups follow the same rules. Five tables are read without them, because the rules are
     decided from them: `sys_db_object`, `sys_db_view`, `sys_db_view_table`, `sys_dictionary` and, for the parts

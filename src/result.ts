@@ -58,7 +58,7 @@ export function source(sn: ServiceNowClient, warnings: string[] = []) {
   }
   if (closed?.untold.size) {
     add(
-      `Tables are closed on this machine, and it could not be told which table these fields point to, or what a row of that table shows as its name, so their display values were left out: ${[...closed.untold].sort().join(', ')}.`,
+      `Tables are closed on this machine, and it could not be told which table these fields point to, or what a row of that table shows as its name (read from sys_dictionary and sys_dictionary_override), so their display values were left out: ${[...closed.untold].sort().join(', ')}.`,
     )
   }
   return { instance: sn.host, fetchedAt: new Date().toISOString(), requests: currentCall()?.requests ?? 0, warnings }

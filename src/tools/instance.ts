@@ -12,7 +12,7 @@ import { recentUpgrades } from './upgrade.js'
 export const SOURCES: Array<{ table: string; usedBy: string }> = [
   { table: 'sys_db_object', usedBy: 'sn_schema, field check' },
   { table: 'sys_dictionary', usedBy: 'sn_schema, field check' },
-  { table: 'sys_dictionary_override', usedBy: 'sn_schema, sn_dependencies' },
+  { table: 'sys_dictionary_override', usedBy: 'sn_schema, sn_dependencies, names behind references while tables are closed' },
   { table: 'sys_choice', usedBy: 'check of choice values, sn_upgrade_skips' },
   { table: 'sys_db_view', usedBy: 'sn_schema and field check for database views' },
   { table: 'sys_db_view_table_field', usedBy: 'sn_schema and field check for database views (the fields a view takes)' },

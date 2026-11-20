@@ -629,7 +629,7 @@ test('a closed table gives away no names through a list of references, an unknow
   const untyped = await connect([{ table: 'sys_dictionary', query: 'nameINincident,task', status: 403 }, ...dictionaryRoutes, { table: 'incident', rows }], closed)
   const all = await untyped.answer('sn_query', { table: 'incident', displayValue: true })
   assert.deepEqual(all.records, [{ number: 'INC1', caller_id: ID, watch_list: `${ID},${ID}` }])
-  assert.match(all.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name, so their display values were left out: caller_id, watch_list/)
+  assert.match(all.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name \(read from sys_dictionary and sys_dictionary_override\), so their display values were left out: caller_id, watch_list/)
 })
 
 test('a value of the wrong kind is refused: the instance would not reject it', async () => {
@@ -907,7 +907,7 @@ test('the name behind a reference is left out where the record can be a row of a
   assert.deepEqual(read.records, [{ number: 'INC1', u_contact: ID, u_owner: ID, u_watchers: ID }])
   assert.match(read.warnings.join(' '), /closed on this machine were left out: u_contact\./)
   // A reference or a list whose target did not come back can point anywhere.
-  assert.match(read.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name, so their display values were left out: u_owner, u_watchers/)
+  assert.match(read.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name \(read from sys_dictionary and sys_dictionary_override\), so their display values were left out: u_owner, u_watchers/)
   assert.doesNotMatch(JSON.stringify(read), /Abel|Beth|Carol/)
 
   const counted = await answer('sn_query', { table: 'incident', groupBy: 'u_contact' })
@@ -2000,7 +2000,7 @@ test('the name behind a reference is left out where the table it points into sho
   assert.equal(row.u_c1, ID)
   assert.match(read.warnings.join(' '), /point into a table whose rows are named after records of other tables, so their display values were left out: u_alloc, u_approval, u_c1, u_named, u_top\./)
   // What cannot be told one table further on is said as that, not as a name of another record.
-  assert.match(read.warnings.join(' '), /or what a row of that table shows as its name, so their display values were left out: u_blind, u_far, u_moved, u_noover, u_part\./)
+  assert.match(read.warnings.join(' '), /or what a row of that table shows as its name \(read from sys_dictionary and sys_dictionary_override\), so their display values were left out: u_blind, u_far, u_moved, u_noover, u_part\./)
 
   const counted = await answer('sn_query', { table: 'u_detail', groupBy: 'u_alloc' })
   assert.deepEqual(counted.groups, [{ value: ID, count: 3 }])
@@ -2022,6 +2022,14 @@ test('the name behind a reference is left out where the table it points into sho
   const [other] = (await noIncidents.answer('sn_query', { table: 'u_detail', fields: ['u_note', ...pointers], displayValue: true })).records
   for (const name of ['u_alloc', 'u_top', 'u_named', 'u_ring', 'u_plain', 'u_d1']) assert.deepEqual(other[name], { value: ID, display: `Abel Tuter (${name})` }, name)
   for (const name of ['u_approval', 'u_moved', 'u_blind', 'u_far', 'u_noover', 'u_part', 'u_c1']) assert.equal(other[name], ID, name)
+
+  // The overrides are read under the rules for closed tables like any table. A list that closes them leaves the
+  // server unable to tell what a row shows as its name, and the answer says which tables that is read from.
+  const noOverrides = await connect([closedTables(tableRow('sys_dictionary_override', 'Dictionary Override')), ...world.slice(1)], { tables: { allow: [], deny: ['sys_dictionary_override'] } })
+  const without = await noOverrides.answer('sn_query', { table: 'u_detail', fields: ['u_note', 'u_plain', 'u_ring'], displayValue: true })
+  assert.deepEqual(without.records, [{ u_note: 'x', u_plain: ID, u_ring: ID }])
+  assert.match(without.warnings.join(' '), /what a row of that table shows as its name \(read from sys_dictionary and sys_dictionary_override\), so their display values were left out: u_plain, u_ring\./)
+  assert.equal(noOverrides.sentTo('sys_dictionary_override').length, 0)
 
   // Nothing is closed: nothing is asked, and every name stays.
   const open = await connect(world)
@@ -3163,7 +3171,7 @@ test('what a field shows is passed on only for kinds of fields that show nothing
   const data = await users.answer('sn_query', wanted)
   // The attachment table is open, so the name of the file stays. The stage shows its label.
   assert.deepEqual(data.records, [{ number: 'INC1', u_filter: `caller_id=${ID}`, u_document: { value: ID, display: 'payroll-2026.xlsx' }, u_stage: { value: 'waiting', display: 'Waiting for approval' }, u_odd: 'x' }])
-  assert.match(data.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name, so their display values were left out: u_filter, u_odd/)
+  assert.match(data.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name \(read from sys_dictionary and sys_dictionary_override\), so their display values were left out: u_filter, u_odd/)
   // Comparing the condition with text is a comparison with what is stored.
   assert.equal((await users.answer('sn_query', { table: 'incident', query: 'u_filterLIKEcaller_id', fields: ['number'] })).returned, 1)
 
