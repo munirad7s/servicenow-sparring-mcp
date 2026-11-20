@@ -15,6 +15,7 @@ export const SOURCES: Array<{ table: string; usedBy: string }> = [
   { table: 'sys_dictionary_override', usedBy: 'sn_schema, sn_dependencies' },
   { table: 'sys_choice', usedBy: 'check of choice values, sn_upgrade_skips' },
   { table: 'sys_db_view', usedBy: 'sn_schema and field check for database views' },
+  { table: 'sys_documentation', usedBy: 'sn_schema (field labels)' },
   { table: 'sys_properties', usedBy: 'sn_instance' },
   { table: 'sys_user_has_role', usedBy: 'sn_instance (roles of this account)' },
   { table: 'v_plugin', usedBy: 'sn_plugins' },

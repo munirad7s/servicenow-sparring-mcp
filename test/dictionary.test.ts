@@ -160,6 +160,26 @@ test('dictionary overrides change the effective field, and overrides of several 
   assert.equal(effective?.overridesRead, true)
 })
 
+test('a child table can rename an inherited field', async () => {
+  const labels = [
+    { name: 'task', element: 'short_description', label: 'Short description', language: 'en' },
+    { name: 'task', element: 'number', label: 'Number', language: 'en' },
+    { name: 'incident', element: 'short_description', label: 'Summary', language: 'en' },
+  ]
+  const { sn } = fakeInstance([{ table: 'sys_documentation', rows: labels }, ...dictionaryRoutes])
+  const dict = new Dictionary(sn)
+
+  const onIncident = await dict.effectiveColumns('incident')
+  assert.equal(onIncident?.columns.find((item) => item.name === 'short_description')?.label, 'Summary')
+  assert.equal(onIncident?.columns.find((item) => item.name === 'number')?.label, 'Number')
+  assert.equal(onIncident?.labelsRead, true)
+
+  const unreadable = fakeInstance([{ table: 'sys_documentation', status: 403 }, ...dictionaryRoutes])
+  const fallback = await new Dictionary(unreadable.sn).effectiveColumns('incident')
+  assert.equal(fallback?.labelsRead, false)
+  assert.equal(fallback?.columns.find((item) => item.name === 'number')?.label, 'number')
+})
+
 test('a database view has the fields of the tables it joins, with their prefix', async () => {
   const { sn } = fakeInstance([
     { table: 'sys_db_object', query: 'name=incident_sla', rows: [] },

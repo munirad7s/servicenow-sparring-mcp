@@ -43,6 +43,8 @@ measurements.
 - **`sn_dependencies` listed client scripts, UI policies and data policies of a parent table that are not inherited,**
   and transform maps and inbound actions that target the parent. It showed sys_ids where an access control has an
   operation and a type.
+- `sn_schema` showed the label of the parent table where a child table has its own: on incident, "Close notes"
+  instead of "Resolution notes".
 - A table whose dictionary entry is hidden by an access rule was reported as "does not exist". A table whose name
   contains "acl" was reported as "access denied" when it did not exist.
 

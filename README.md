@@ -52,6 +52,8 @@ Every answer names where it came from, what it cost, and how complete it is:
 }
 ```
 
+More examples, also of refusals: [docs/examples.md](docs/examples.md).
+
 The Table API does not reject a condition it cannot use. It drops the condition and answers with every row, or it
 matches nothing. Both look like an answer. Five rules keep the evidence from lying:
 

@@ -50,6 +50,9 @@ const EXPLANATIONS = {
 
 const seconds = (stamp: string) => (stamp ? Date.parse(`${stamp.replace(' ', 'T')}Z`) / 1000 : NaN)
 
+/** Leaves out what is empty, so that the evidence stays short. */
+const compact = <T extends Row>(row: T): T => Object.fromEntries(Object.entries(row).filter(([, value]) => value !== '' && value !== null && value !== undefined)) as T
+
 export function registerOriginTool(server: McpServer, ctx: Context) {
   const { sn } = ctx
 
@@ -310,7 +313,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           divergence,
           created,
           capturedBy,
-          record: file && {
+          record: file && compact({
             sysId: rawOf(file.sys_id),
             table: ownTable || rawOf(file.sys_class_name),
             name: rawOf(file.sys_name),
@@ -323,7 +326,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             createdBy: rawOf(file.sys_created_by),
             updatedOn: rawOf(file.sys_updated_on),
             updatedBy: rawOf(file.sys_updated_by),
-          },
+          }),
           evidence: {
             customerUpdates: {
               table: 'sys_update_xml',
@@ -331,7 +334,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
               readable: updates !== null,
               total: updates?.total ?? null,
               firstCapturedOn: firstCapturedOn || null,
-              rows: updateRows.slice(0, 10),
+              rows: updateRows.slice(0, 5).map(compact),
             },
             versions: {
               table: 'sys_update_version',
@@ -339,8 +342,8 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
               readable: versions !== null,
               total: versions?.total ?? null,
               bySource: sources,
-              current,
-              rows: versionRows,
+              current: current && compact(current),
+              rows: versionRows.slice(0, 5).map(compact),
             },
             upgradeSkips: { table: 'upgrade_history_task', query: name ? skipsQuery : '', readable: skips !== null, total: skips?.total ?? null, rows: skipRows },
           },

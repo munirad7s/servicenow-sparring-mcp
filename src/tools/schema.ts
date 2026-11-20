@@ -78,6 +78,9 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
         if (effective && !effective.overridesRead) {
           warnings.push('sys_dictionary_override could not be read completely, so overrides of mandatory and read-only may be missing.')
         }
+        if (effective && !effective.labelsRead) {
+          warnings.push('sys_documentation could not be read completely, so a label can be the one of the parent table where this table has its own.')
+        }
         if (info.kind === 'remote_table') {
           warnings.push('This is a remote table. Reading its records runs a script on the instance, which usually calls another system.')
         }

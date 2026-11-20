@@ -85,6 +85,7 @@ export class Dictionary {
   private readonly tables = new Map<string, Entry<TableInfo | null>>()
   private readonly columnSets = new Map<string, Entry<ColumnSet | null>>()
   private readonly choiceLists = new Map<string, Entry<Choice[]>>()
+  private readonly labelSets = new Map<string, Entry<Map<string, string>>>()
 
   constructor(
     private readonly sn: ServiceNowClient,
@@ -103,12 +104,19 @@ export class Dictionary {
   }
 
   /** The fields as they behave on this table: inherited fields included, overrides applied. */
-  async effectiveColumns(name: string): Promise<{ columns: Column[]; complete: boolean; overridesRead: boolean } | null> {
+  async effectiveColumns(name: string): Promise<{ columns: Column[]; complete: boolean; overridesRead: boolean; labelsRead: boolean } | null> {
     const [info, base] = await Promise.all([this.table(name), this.columnSet(name)])
     if (!info || !base) return null
 
     const columns = new Map([...base.columns].map(([key, column]) => [key, { ...column }]))
-    if (info.kind === 'database_view') return { columns: [...columns.values()], complete: !base.partial, overridesRead: true }
+    if (info.kind === 'database_view') return { columns: [...columns.values()], complete: !base.partial, overridesRead: true, labelsRead: true }
+
+    // A child table can give an inherited field its own label: "Close notes" on task is "Resolution notes" on incident.
+    const labels = await this.cached(this.labelSets, name, () => this.loadLabels(info.chain)).catch(() => null)
+    for (const [element, label] of labels ?? []) {
+      const column = columns.get(element)
+      if (column && label) column.label = label
+    }
 
     let overridesRead = true
     try {
@@ -136,7 +144,28 @@ export class Dictionary {
       overridesRead = false
     }
 
-    return { columns: [...columns.values()], complete: !base.partial, overridesRead }
+    return { columns: [...columns.values()], complete: !base.partial, overridesRead, labelsRead: labels !== null }
+  }
+
+  /** The English label of each field, from the nearest table in the chain that has one. */
+  private async loadLabels(chain: string[]): Promise<Map<string, string>> {
+    const { records, total, complete } = await this.sn.all<Record<string, string>>({
+      table: 'sys_documentation',
+      query: `nameIN${chain.join(',')}^language=en^elementISNOTEMPTY`,
+      fields: ['name', 'element', 'label'],
+    })
+    if (!complete || (total !== null && records.length < total)) {
+      throw new ServiceNowError('The field labels are only partly readable.', 'acl', 'sys_documentation')
+    }
+
+    const labels = new Map<string, string>()
+    // Root first, so a label closer to the inspected table wins.
+    for (const table of [...chain].reverse()) {
+      for (const row of records) {
+        if (row.name === table && typeof row.element === 'string' && row.label) labels.set(row.element, String(row.label))
+      }
+    }
+    return labels
   }
 
   /**

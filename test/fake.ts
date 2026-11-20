@@ -160,6 +160,7 @@ export const dictionaryRoutes: Route[] = [
     rows: [column('sys_user', 'sys_id', 'GUID'), column('sys_user', 'name'), column('sys_user', 'email'), column('sys_user', 'user_password', 'password')],
   },
   { table: 'sys_dictionary_override', rows: [] },
+  { table: 'sys_documentation', rows: [] },
   {
     table: 'sys_choice',
     query: 'element=state',
