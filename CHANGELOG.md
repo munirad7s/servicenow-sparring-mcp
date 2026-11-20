@@ -3,6 +3,51 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## Unreleased
+
+A review of the fixes of 0.4.3, and this time before the release that carries the answers to it. It rated 10 of
+13 as holding for the case they were written for and not for another, with the same pattern as before: a rule
+that stood where the fault was found and not where every path runs through.
+
+### Security
+
+- **"No table of that name" could be older than the look that keeps the lists of tables fresh.** With a list of
+  the only tables that may be read, the name of a captured change is judged by the tables it can begin with.
+  Which of those names are tables was remembered for ten minutes, and that answer did not stand behind the look
+  at the table of tables. A table created in between, and not on the list, was not known: the name was read as
+  a record of an open table with a shorter name, and `sn_origin` passed on what an upgrade entry says about the
+  record. Every answer about the tables of an instance stands behind the look now, in the one place where such
+  answers are given: what a table is and extends, which names are tables, which tables are closed, which are
+  below a table, and which are parts of a rotated one.
+- **A secret in an element stayed where a list inside it never closed.** 0.4.3 took lists and objects behind a
+  key that looks like a secret out before it read the elements. A list that never closes is cut where it opens,
+  and cut first, it took the end of the element around it along: `<password>… "tokens":[</password>` kept what
+  stands in front of the list. Elements are read first again, as in 0.4.2. The other way round more is kept
+  back than had to be, never less.
+- **Text of the instance was shortened before it was read, in more places than the error of a request.** A
+  warning that quotes a value of the instance keeps sixty or eighty characters of it, and a long value of a row
+  is cut to fit an answer. Both are read for secrets first now, in the one function that quotes and the one
+  that cuts, whichever tool calls them.
+- A cell that came as an object or a list, where an instance sends a text or a value with what it shows for it,
+  is passed on as the text it is written as: read piece by piece, a key and its value were never seen together,
+  and `{"otp": 482913}` stayed.
+
+### Fixed
+
+- Counts under keys that become one key, because the same part was taken out of both, are added and not lost.
+- A sys_id written in capitals is traced by `sn_origin` like the one in small letters.
+- A company code that comes back without a value that can be read is a failed read: it was kept for ten minutes
+  as "not set".
+- A note that stands for something taken out is not cut in two where a long text is shortened.
+- `npm run compare`: a direct read that brings no list is no answer to hold anything against, also where the
+  status says 200, and a setting that cannot be read is not taken for "off".
+
+### Looked at, and left as it is
+
+- A table that the list of rotated tables names as a part of one rotation is taken as that, also where its name
+  reads like a part of another. A review pointed out that this goes wrong for ten minutes if a part is moved
+  from one rotation to another. No part is: an instance creates the parts of a rotation under its name.
+
 ## 0.4.3 (2026-11-20)
 
 Three reviews of 0.4.2, the day it came out: whether its fixes hold, which changes of one line no test would

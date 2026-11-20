@@ -80,8 +80,18 @@ export const unlessNoConnection =
  * without control characters. It is quoted as data wherever it is shown.
  */
 export function quoteInstanceText(text: unknown, max = 300): string {
-  const clean = String(text ?? '')
+  // Read before it is shortened: cut first, a secret that is recognised by where it ends would no longer be.
+  const clean = withoutSecrets(String(text ?? ''))
     .replace(/[\u0000-\u001f\u007f]+/g, ' ')
     .trim()
   return clean.length > max ? `${clean.slice(0, max)}…` : clean
+}
+
+let withoutSecrets: (text: string) => string = (text) => text
+/**
+ * Names what takes out of a text of the instance what looks like a secret. Set once by the server, so that every
+ * place that quotes the instance in a message or a warning goes through it, whichever tool it is in.
+ */
+export function readInstanceTextWith(reader: (text: string) => string): void {
+  withoutSecrets = reader
 }

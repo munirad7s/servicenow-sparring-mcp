@@ -271,7 +271,17 @@ export class Dictionary {
     // In an async function, so that a name that cannot be a table is a failed look-up like any other, which the
     // caller's catch sees, and not an exception thrown past it.
     assertTableName(name)
+    await this.lookedAt()
     return this.cached(this.tables, name, () => this.loadTable(name))
+  }
+
+  /**
+   * While tables are closed on this machine, whatever is remembered about which tables there are and what they
+   * extend is used only behind a look at the table of tables: here, where every such answer is given, and not at
+   * the places that happen to need one. Without closed tables nothing depends on it, and nothing is asked.
+   */
+  private lookedAt(): Promise<void> {
+    return this.gated.restricted ? this.tablesUnchanged() : Promise.resolve()
   }
 
   /**
@@ -281,6 +291,8 @@ export class Dictionary {
    */
   async knownTables(names: string[]): Promise<Set<string>> {
     const wanted = [...new Set(names)].filter(isTableName)
+    // "No table of that name" is an answer about the tables of the instance, and goes stale like the others.
+    await this.lookedAt()
     const now = Date.now()
     // The answer is put together from what this call reads, not read back from what is remembered: that is
     // bounded, and a name that had to make room while the others were asked would come back as "no table".
@@ -633,7 +645,7 @@ export class Dictionary {
 
     // Whoever asks for this list gets one that is no older than the last look at the table of tables: not only
     // the rules that decide about a request, also a tool that judges a name before it reads anything.
-    return this.tablesUnchanged().then(() => this.closedSetsRead())
+    return this.lookedAt().then(() => this.closedSetsRead())
   }
 
   private closedSetsRead(): Promise<Map<string, string[]>> {
@@ -722,7 +734,7 @@ export class Dictionary {
    */
   async rotatedParts(): Promise<{ parts: Map<string, string>; rotated: Set<string> } | null> {
     // A part is a table: a new one shows in the table of tables.
-    await this.tablesUnchanged()
+    await this.lookedAt()
     return this.cached(this.partLists, 'parts', async () => {
       const read = await this.sn.all<Record<string, string>>({ table: 'sys_table_rotation_schedule', fields: ['table_name', 'name.name'] }, 5_000).catch(unlessNoConnection(null))
       if (!read || !read.complete || (read.total !== null && read.records.length < read.total)) return null
@@ -761,7 +773,7 @@ export class Dictionary {
       const chain = info.chain.join(',')
       const entries = await this.sn.all<Record<string, string>>(
         { table: 'sys_dictionary', query: `nameIN${chain}^display=true^ORelementIN${NAMED_AS_DISPLAY.join(',')}`, fields: ['name', 'element', 'internal_type', 'reference'] },
-        2_000,
+        5_000,
       )
       if (!entries.complete || (entries.total !== null && entries.records.length < entries.total)) return null
       const moved = await this.gated.query<Record<string, string>>({ table: 'sys_dictionary_override', query: `nameIN${chain}^display_override=true`, fields: ['sys_id'], limit: 1 }).catch(unlessNoConnection(null))
@@ -825,7 +837,7 @@ export class Dictionary {
    */
   async childTables(table: string): Promise<Map<string, string[]> | null> {
     assertTableName(table)
-    await this.tablesUnchanged()
+    await this.lookedAt()
     return this.cached(this.childSets, table, async () => {
       const usable = await this.parentsUsable(false).catch(unlessNoConnection(false))
       if (!usable) return null

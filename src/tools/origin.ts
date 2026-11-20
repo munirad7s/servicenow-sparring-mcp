@@ -166,7 +166,9 @@ function companyPrefix(sn: ServiceNowClient): Promise<string> {
         const row = page.records.find((item) => item.name === 'glide.appcreator.company.code')
         // A property that matches and did not come back is hidden from this account. That is not "not set".
         if (!row && page.total !== 0) throw new ServiceNowError('The company code is hidden from this account, or the instance gave no total.', 'acl', 'sys_properties')
-        // As text, whatever the instance answered with, and not where its type says it holds a secret.
+        // The same for one that came back without a value that can be read: its value is hidden, or of a type
+        // that says it holds a secret. A failed read is not kept, and is no "not set" either.
+        if (row && plainValue(row) === undefined) throw new ServiceNowError('The company code came back without a readable value.', 'acl', 'sys_properties')
         return plainValue(row) ?? ''
       })
       .then((code) => (/^[a-z0-9]{1,40}$/i.test(code.trim()) ? `x_${code.trim().toLowerCase()}_` : '')))
@@ -265,7 +267,10 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
       },
       annotations: READ_ONLY,
     },
-    traced('sn_origin', async ({ sysId, updateName }) => {
+    traced('sn_origin', async ({ sysId: given, updateName }) => {
+      // A generated sys_id is 32 hexadecimal digits, stored in small letters. Written in capitals it is the same
+      // record: taken that way everywhere, so that no step treats it as an id of another kind.
+      const sysId = given && /^[0-9A-Fa-f]{32}$/.test(given) ? given.toLowerCase() : given
       try {
         if (!sysId && !updateName) throw validation('Give sysId or updateName.')
         if (sysId && updateName) throw validation('Give sysId or updateName, not both: they could name two different records.')

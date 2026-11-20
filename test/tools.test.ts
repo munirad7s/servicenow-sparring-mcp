@@ -4750,6 +4750,18 @@ test('sn_origin sends no request whose answer it would not use', async () => {
   assert.equal(flaky.sentTo('sys_properties').length, failures)
   await flaky.answer('sn_origin', { sysId: ID })
   assert.equal(flaky.sentTo('sys_properties').length, ++failures, 'asked again, not answered from a remembered failure')
+
+  // A property that comes back without a value that can be read, hidden or of a type that says it holds a secret,
+  // is a failed read as well: it is no "not set", and it is asked for again. Once readable, it is used.
+  for (const unreadable of [{ name: 'glide.appcreator.company.code' }, { name: 'glide.appcreator.company.code', value: 'acme', type: 'password2' }]) {
+    const routes: Route[] = [{ table: 'sys_properties', rows: [unreadable] }, ...origin('sys_store_app', [], [], { 'sys_scope.scope': 'x_acme_claims' })]
+    const hidden = await connect(routes)
+    const before = await hidden.answer('sn_origin', { sysId: ID })
+    assert.equal(before.provenance, 'installed_application')
+    assert.match(before.warnings.join(' '), /The company code of this instance could not be read/)
+    routes.unshift({ table: 'sys_properties', rows: [{ name: 'glide.appcreator.company.code', value: 'acme', type: 'string' }] })
+    assert.equal((await hidden.answer('sn_origin', { sysId: ID })).provenance, 'company_application')
+  }
 })
 
 test('sn_origin does not decide on evidence it sees only part of', async () => {
@@ -5782,10 +5794,13 @@ test('a list or an object behind a key that looks like a secret is taken out who
   assert.equal(clean(String.raw`{"body":"{\"secrets\":[\"TOP\\\"]SECRET\",\"x\"],\"name\":\"x\"}"}`).text, String.raw`{"body":"{\"secrets\":\"[withheld]\",\"name\":\"x\"}"}`)
   // What never closes holds the rest of the text.
   assert.equal(clean('{"name":"x","tokens":["TOPSECRET","OTHER"').text, '{"name":"x","tokens":"[withheld]"')
-  // The list is taken out before anything inside it is read: an element that only seems to open in it and close
-  // behind it takes nothing with it, and what is inside is counted once.
-  assert.deepEqual(clean('{"tokens":["<password>"],"label":"</password>","keep":"VISIBLE"}'), { text: '{"tokens":"[withheld]","label":"</password>","keep":"VISIBLE"}', withheld: 1 })
-  assert.deepEqual(clean('{"credentials":{"password":"x","pin":"<secret>y</secret>"}}'), { text: '{"credentials":"[withheld]"}', withheld: 1 })
+  // The elements are read first. A list that never closes is cut where it opens: cut before the elements were
+  // read, it would take the end of the element around it along, and what stands in that element would stay.
+  assert.equal(clean('<password>TOPSECRET "tokens":[</password>').text, '<password>[withheld]</password>')
+  assert.doesNotMatch(clean('<note>x</note><password>TOPSECRET {"tokens":["a"</password><name>n</name>').text, /TOPSECRET/)
+  // The other way round more is kept back than had to be: an element that seems to open inside a list and close
+  // behind it takes the bracket along, and the list is cut to the end of the text.
+  assert.equal(clean('{"tokens":["<password>"],"label":"</password>","keep":"VISIBLE"}').text, '{"tokens":"[withheld]"')
   // Each bracket is closed by its own kind: "}" inside a list of texts closes nothing, and neither does one outside a text.
   assert.equal(clean('{"tokens":["a}b"],"n":1}').text, '{"tokens":"[withheld]","n":1}')
   assert.equal(clean('{"tokens":[1,2},3],"n":1}').text, '{"tokens":"[withheld]","n":1}')
@@ -6464,4 +6479,64 @@ test('an HTML 413 is about one request rather than the whole instance call', asy
   const data = await app.answer('sn_instance')
   assert.equal(data.sources.sys_script, 'unknown')
   assert.equal(data.release.build, 'glide-zurich-example.zip')
+})
+
+test('what a message or a warning quotes of the instance is read for secrets before it is shortened', async () => {
+  // A stored value of a choice is quoted in the refusal of its label, cut to eighty characters. An element that
+  // closes behind the cut would no longer be recognised, so the text is read first.
+  const value = `<password>${'S3CRET'.repeat(30)}</password>`
+  const { call } = await connect([
+    { table: 'sys_choice', query: 'element=contact_type', rows: [{ name: 'task', element: 'contact_type', value, label: 'By phone', language: 'en' }] },
+    { table: 'sys_dictionary', query: 'nameINincident,task', rows: [column('task', 'number'), column('task', 'contact_type', 'string', '', { choice: '1' })] },
+    ...dictionaryRoutes,
+    { table: 'incident', rows: [{ number: 'INC1' }] },
+  ])
+  const refused = await call('sn_query', { table: 'incident', query: 'contact_type=By phone' })
+  assert.equal(refused.data.error, 'validation')
+  assert.match(refused.data.message, /"By phone" is the label of/)
+  assert.doesNotMatch(JSON.stringify(refused.data), /S3CRET/)
+})
+
+// What a review of the fixes of 0.4.3 found in them, before the next release.
+
+test('"no table of that name" is not older than the last look either, with a list of the only tables that may be read', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp = (total: number, changed: string): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: changed }], total })
+  const secret = `u_item_secret_${ID}`
+  const routes: Route[] = [
+    stamp(100, '2026-11-20 09:00:00'),
+    knownTables('u_item'),
+    { table: 'sys_db_object', exact: 'name=u_item', rows: [tableRow('u_item', 'Item')] },
+    { table: 'sys_db_object', query: '^ORname=u_item', rows: [tableRow('u_item', 'Item')] },
+    ...dictionaryRoutes,
+    ...origin(null, [], [], {}, [skip('Skipped Manual Merge')]),
+  ]
+  const allowed = { tables: { allow: ['sys_*', 'upgrade_history_task', 'u_item'], deny: [] } }
+  const { call } = await connect(routes, allowed)
+  // The name reads as a record of "u_item", which is on the list: no table "u_item_secret" exists.
+  assert.notEqual((await call('sn_origin', { updateName: secret })).data.error, 'blocked')
+  // Somebody creates that table. It is not on the list, so its records are closed, and after the next look the
+  // name is judged as one of them: an upgrade entry carries the readable name of the record.
+  routes.unshift(stamp(101, '2026-11-20 10:00:05'), knownTables('u_item', 'u_item_secret'), { table: 'sys_db_object', exact: 'name=u_item_secret', rows: [tableRow('u_item_secret', 'Secret item', 'u_private')] })
+  t.mock.timers.tick(31_000)
+  const later = await call('sn_origin', { updateName: secret })
+  assert.equal(later.data.error, 'blocked')
+  assert.doesNotMatch(JSON.stringify(later.data), /Example rule/)
+})
+
+test('counts under keys that become one key are added, and a sys_id in capitals is the same record', async () => {
+  const two = await connect(origin('sys_plugins', [change()], [version('current', '{"token":"A"}', '2026-03-01 10:00:00', 'abel'), version('previous', '{"token":"B"}', '2026-03-01 09:59:59')]))
+  assert.deepEqual((await two.answer('sn_origin', { sysId: ID })).evidence.versions.bySource, { '{"token":"[withheld]"}': 2 })
+
+  // Written in capitals, a generated sys_id is traced like the one in small letters.
+  const deleted = await connect(origin(null, [change({ action: 'DELETE' })], []))
+  assert.equal((await deleted.answer('sn_origin', { sysId: ID.toUpperCase() })).verdict, 'deleted_here')
+  assert.equal(deleted.sentTo('sys_update_xml')[0].query, `nameENDSWITH_${ID}^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id`)
+})
+
+test('a secret inside a cell that came as an object is read like one inside a text', async () => {
+  const { answer } = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1', u_data: { otp: 482913, note: 'x' } }] }])
+  const data = await answer('sn_query', { table: 'incident' })
+  assert.doesNotMatch(JSON.stringify(data), /482913/)
+  assert.equal(data.records[0].u_data, '{"otp":"[withheld]","note":"x"}')
 })

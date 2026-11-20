@@ -264,11 +264,7 @@ function scrubOnce(text: string): { text: string; withheld: number } {
   /** The same for elements written with entities: "&lt;password&gt;x&lt;/password&gt;", also with a CDATA section written that way. */
   const withoutEscaped = (source: string, wanted: (tag: string) => boolean, always: boolean): string => (source.includes('&lt;') ? without(source, wanted, always, ESCAPED_MARKUP) : source)
   const looksSecret = (tag: string) => LOOKS_SECRET.test(tag)
-  // A key whose value is a list or an object: all of it is the secret. "tokens": ["a", "b"] is the usual form.
-  // Taken out first, as a whole: what stands inside it is gone with it and is neither read nor counted again,
-  // and no later pass takes away the brackets this one goes by.
-  let out = withoutContainers(text, () => withheld++)
-  out = withoutEscaped(without(out, looksSecret, false), looksSecret, false)
+  let out = withoutEscaped(without(text, looksSecret, false), looksSecret, false)
   // An element that ends in itself holds no text, but an attribute of it can repeat one: a display value.
   out = out.replace(new RegExp(String.raw`<(${ELEMENT})(${ATTRIBUTES})\s*\/>`, 'g'), (whole, tag: string, attributes: string) => {
     if (!attributes.trim() || !looksSecret(tag)) return whole
@@ -358,6 +354,12 @@ function scrubOnce(text: string): { text: string; withheld: number } {
       return without
     })
   }
+  // A key whose value is a list or an object: all of it is the secret. "tokens": ["a", "b"] is the usual form.
+  // After the elements, not before them: a list that never closes is cut where it opens, and cut first it would
+  // take the end of an element around it along, and with that the mark the element is recognised by. The other
+  // way round an element can take a bracket of a list away, and then more is cut than had to be: that errs on
+  // the side of keeping back.
+  out = withoutContainers(out, () => withheld++)
   return { text: out, withheld }
 }
 

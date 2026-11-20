@@ -136,11 +136,6 @@ export class ServiceNowClient {
 
   /** Set by the server. Asked for every request while tables are closed on this machine. */
   gate: Gate | null = null
-  /**
-   * Takes out of a text of the instance what must not be passed on, before the text is shortened for a message:
-   * cut first, a secret that is recognised by where it ends would no longer be. Set by the server.
-   */
-  cleanText: (text: string) => string = (text) => text
 
   private auth: Auth
   /** Becomes true once the instance has accepted the credentials. Until then requests go one at a time. */
@@ -196,14 +191,19 @@ export class ServiceNowClient {
       const asked = fields?.length ? new Set(fields) : null
       // A row is an object of fields. A list in its place is no row of a table, whatever it holds.
       if (result.some((row) => Array.isArray(row))) throw unusableAnswer(`${this.host} answered with rows that are lists, not records.`, table)
-      const rows = result
-        .filter((row): row is T => row !== null && typeof row === 'object')
-        .map((row) => (asked ? (Object.fromEntries(Object.entries(row as object).filter(([key]) => asked.has(key))) as T) : row))
+      // A cell is a text, or a value with what the instance shows for it. Anything else no instance sends: it
+      // is passed on as the text it is written as, so that whatever reads a cell behind this reads it whole, a
+      // key together with its value.
       // What reads the rows afterwards goes as deep as they go. A row nested thousands of levels would end the call
       // with an error of the runtime, and not with a sentence about the answer.
-      if (rows.some((row) => nestedTooDeep(row, MAX_CELL_DEPTH))) {
+      if (result.some((row) => nestedTooDeep(row, MAX_CELL_DEPTH))) {
         throw unusableAnswer(`${this.host} answered with rows that are nested deeper than a row of a table is.`, table)
       }
+      const pair = (value: object) => !Array.isArray(value) && Object.keys(value).every((key) => key === 'value' || key === 'display_value' || key === 'link') && Object.values(value).every((part) => part === null || typeof part !== 'object')
+      const cell = (value: unknown) => (value !== null && typeof value === 'object' && !pair(value) ? JSON.stringify(value) : value)
+      const rows = result
+        .filter((row): row is T => row !== null && typeof row === 'object')
+        .map((row) => Object.fromEntries(Object.entries(row as object).flatMap(([key, value]) => (!asked || asked.has(key) ? [[key, cell(value)]] : []))) as T)
       return { records: rows, total: header !== null && /^\d+$/.test(header) ? Number(header) : null }
     })
     if (gate && display) await this.withoutClosedNames(gate, table, records as Row[])
@@ -547,7 +547,7 @@ export class ServiceNowClient {
     if (!response.ok || saysSo) {
       // A refusal by the instance itself means it is reachable and took the login. A 5xx or 429 can come from in front of it.
       if (saysSo && response.status < 500 && response.status !== 429) this.accepted = this.answered = true
-      const quoted = (part: unknown) => quoteInstanceText(typeof part === 'string' ? this.cleanText(part) : '')
+      const quoted = (part: unknown) => quoteInstanceText(typeof part === 'string' ? part : '')
       const message = quoted(saysSo ? refusal?.message : '')
       const detail = quoted(saysSo ? refusal?.detail : '')
       const said = message ? `: "${message}"${detail ? ` ("${detail}")` : ''}` : ''

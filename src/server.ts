@@ -3,6 +3,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { ServiceNowClient } from './client.js'
 import { closedTables } from './closed.js'
 import { Dictionary } from './dictionary.js'
+import { readInstanceTextWith } from './errors.js'
 import { INSTRUCTIONS, LIMITATIONS_DOCUMENT } from './limitations.js'
 import { registerDeltaTool } from './tools/delta.js'
 import { registerDependenciesTool } from './tools/dependencies.js'
@@ -20,11 +21,13 @@ export { NAME, VERSION } from './version.js'
  * What every tool works with: the client, the dictionary of the instance, and the rules for closed tables. The
  * client is given those rules as its gate, so that every request passes through them.
  */
+// Whatever quotes the instance in a message or a warning reads it for secrets first.
+readInstanceTextWith((text) => scrubSecrets(text).text)
+
 export function createContext(sn: ServiceNowClient): Context {
   const dict = new Dictionary(sn)
   const closed = closedTables(sn, dict)
   sn.gate = closed
-  sn.cleanText = (text) => scrubSecrets(text).text
   return { sn, dict, closed }
 }
 

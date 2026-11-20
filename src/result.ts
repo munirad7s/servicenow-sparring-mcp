@@ -173,10 +173,16 @@ export function clip<T>(records: T[], warnings: string[]): T[] {
   if (sizeOf(records) <= MAX_ANSWER_CHARS) return records
 
   const longValues = records.reduce((count, record) => count + countLong(record), 0)
-  const cutTo = (cap: number, counted: () => void) => (text: string) => {
+  const cutTo = (cap: number, counted: () => void) => (given: string) => {
+    // Read before it is cut: a secret is recognised by where it ends, and the cut takes the end away.
+    const text = scrubSecrets(given).text
     if (text.length <= cap) return text
     counted()
-    return `${text.slice(0, cap)} … [cut here: ${text.length - cap} more characters]`
+    // Not in the middle of a note that stands for something taken out.
+    const note = text.lastIndexOf('[withheld', cap)
+    const end = note >= 0 ? text.indexOf(']', note) + 1 : 0
+    const at = end > cap && end - cap <= 80 ? end : cap
+    return `${text.slice(0, at)} … [cut here: ${text.length - at} more characters]`
   }
   let shown = records
   const cap = longValues ? Math.max(LONG_VALUE_CHARS, Math.floor((MAX_ANSWER_CHARS * 0.8) / longValues)) : Infinity
@@ -260,7 +266,17 @@ export function ok(payload: Record<string, unknown>): ToolResult {
     }
     if (Array.isArray(value)) return value.map((item) => read(item))
     // A key can be a text of the instance as well: the source of a version, the value a count is made by.
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [read(name) as string, read(item, name)]))
+    if (value && typeof value === 'object') {
+      const out: Record<string, unknown> = {}
+      for (const [name, item] of Object.entries(value)) {
+        const key = read(name) as string
+        const cleaned = read(item, name)
+        // Two keys that differ only in what was taken out of them are one key now: counts are added, not lost.
+        const before = Object.hasOwn(out, key) ? out[key] : undefined
+        out[key] = typeof before === 'number' && typeof cleaned === 'number' ? before + cleaned : cleaned
+      }
+      return out
+    }
     return value
   }
   const answer = read(payload) as Record<string, unknown>

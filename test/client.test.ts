@@ -766,3 +766,10 @@ test('an error of an instance is an object with a message, and a row is an objec
   assert.match(odd.message, /rows that are lists/)
   assert.equal(await kindOf(() => lists.query({ table: 'incident' })), 'invalid_response')
 })
+
+test('a cell is a text or a value with what is shown for it, and anything else is passed on as text', async () => {
+  // No instance sends an object in place of a cell. What does is read as the text it is written as, so that a
+  // key and its value are read together by whatever looks for secrets behind this.
+  const sn = new ServiceNowClient(config, async () => json({ result: [{ number: 'INC1', caller_id: { value: 'abc', display_value: 'Abel Tuter' }, u_data: { otp: 482913 }, u_list: ['a', { b: 1 }] }] }))
+  assert.deepEqual((await sn.query({ table: 'incident' })).records, [{ number: 'INC1', caller_id: { value: 'abc', display_value: 'Abel Tuter' }, u_data: '{"otp":482913}', u_list: '["a",{"b":1}]' }])
+})

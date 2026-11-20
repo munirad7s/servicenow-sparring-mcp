@@ -321,8 +321,8 @@ for (const [table, queries] of PASSED) {
       // A field this instance lacks is no finding about the server.
       if (/^Unknown field/.test(String(mine.data.message))) count('left out: a field this instance does not have')
       else wrong.push(`refused as "${mine.data.error}", and should be passed on: ${table}  ${template}`)
-    } else if (theirs.status !== 200) {
-      wrong.push(`passed on, and the instance refuses it when asked directly (HTTP ${theirs.status}): ${table}  ${template}`)
+    } else if (theirs.status !== 200 || !theirs.rows) {
+      wrong.push(`passed on, and the instance refuses it when asked directly, or answers without a list (HTTP ${theirs.status}): ${table}  ${template}`)
     } else if (/hold a secret/.test(warnings)) {
       // The one intended difference: a comparison on the value of a property leaves out the properties that hold a
       // secret. The answer names the query with that condition, and its total can be smaller.
@@ -480,6 +480,11 @@ for (const [table, groupBy, query] of COUNTS) {
     continue
   }
   const theirs = await get(table, { sysparm_count: 'true', sysparm_group_by: groupBy, ...(query ? { sysparm_query: query } : {}) }, 'stats')
+  // No list is no "no groups": the direct count did not answer, and nothing can be held against it.
+  if (theirs.status !== 200 || !theirs.rows) {
+    miscounted.push(`${table} per ${groupBy}: the instance did not answer the count when asked directly (HTTP ${theirs.status})`)
+    continue
+  }
   // Measured: a table without rows can answer with one group of no rows. That is no group, here as for the server.
   const want = new Map<string, number>(((theirs.rows ?? []) as Data[]).map((group): [string, number] => [String(group.groupby_fields?.[0]?.value ?? ''), Number(group.stats?.count)]).filter(([, count]) => count !== 0))
   const got = new Map<string, number>(groups.map((group) => [String(group.value), Number(group.count)]))
@@ -574,8 +579,11 @@ for (const line of twice) console.log(`         ${line}`)
 const withList = [...new Set(((await get('sys_db_view_table_field', { sysparm_fields: 'view_table.view.name', sysparm_limit: 3_000 })).rows ?? []).map((row) => row['view_table.view.name']).filter(Boolean))]
 const droppedFields: string[] = []
 const undescribed: string[] = []
-// Set to "true", this property makes the instance answer a query it cannot use with no rows.
-const noRowsForUnusable = ((await get('sys_properties', { sysparm_query: 'name=glide.invalid_query.returns_no_rows', sysparm_fields: 'name,value', sysparm_limit: 1 })).rows ?? []).some((row) => row.name === 'glide.invalid_query.returns_no_rows' && row.value === 'true')
+// Set to "true", this property makes the instance answer a query it cannot use with no rows. Where it cannot be
+// read, that is not ruled out: only "not set" (no such property, by its total) and another value say that it is off.
+const property = await get('sys_properties', { sysparm_query: 'name=glide.invalid_query.returns_no_rows', sysparm_fields: 'name,value', sysparm_limit: 1 })
+const setTo = (property.rows ?? []).find((row) => row.name === 'glide.invalid_query.returns_no_rows')?.value
+const noRowsForUnusable = setTo !== undefined ? setTo === 'true' : !(property.status === 200 && property.rows && property.total === '0')
 let viewsTried = 0
 let applied = 0
 let refusedByInstance = 0

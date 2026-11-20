@@ -650,3 +650,52 @@ test('what was read about tables before the first look at the table of tables is
   await dictionary.tablesUnchanged()
   assert.deepEqual((await dictionary.table('u_open'))?.chain, ['u_open', 'u_private'])
 })
+
+test('with tables closed, every answer about the tables of the instance stands behind a look at the table of tables', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp = (total: number): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], total })
+  const routes: Route[] = [
+    stamp(100),
+    { table: 'sys_db_object', match: /^nameIN[^^]*\^ORDERBYsys_id$/, rows: [{ name: 'u_open' }] },
+    { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] },
+  ]
+  const closed = fakeInstance(routes, { tables: { allow: [], deny: ['u_private'] } })
+  const dictionary = new Dictionary(closed.sn)
+  const looks = () => closed.calls.filter(isLookAtTables).length
+
+  // Which names are tables, and what a table extends: each is asked behind a look, whichever comes first.
+  assert.deepEqual([...(await dictionary.knownTables(['u_open', 'u_new']))], ['u_open'])
+  assert.equal(looks(), 1)
+  assert.deepEqual((await dictionary.table('u_open'))?.chain, ['u_open'])
+  assert.equal(looks(), 1)
+
+  // A table is created, and another is moved under a closed one. Within thirty seconds both answers are as before.
+  routes.unshift(stamp(101), { table: 'sys_db_object', match: /^nameIN[^^]*\^ORDERBYsys_id$/, rows: [{ name: 'u_open' }, { name: 'u_new' }] }, { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open', 'u_private')] })
+  t.mock.timers.tick(20_000)
+  assert.deepEqual([...(await dictionary.knownTables(['u_open', 'u_new']))], ['u_open'])
+  // After them, the first question of either kind looks, and is answered from what the instance says now.
+  t.mock.timers.tick(11_000)
+  assert.deepEqual([...(await dictionary.knownTables(['u_open', 'u_new']))].sort(), ['u_new', 'u_open'])
+  assert.equal(looks(), 2)
+  assert.deepEqual((await dictionary.table('u_open'))?.chain, ['u_open', 'u_private'])
+
+  // The other order: what a table extends is asked first after a change.
+  routes.unshift(stamp(102), { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] })
+  t.mock.timers.tick(31_000)
+  assert.deepEqual((await dictionary.table('u_open'))?.chain, ['u_open'])
+  assert.equal(looks(), 3)
+
+  // The same for the tables below a table and for the parts of rotated tables: each is the first question once.
+  for (const first of [() => dictionary.childTables('u_open'), () => dictionary.rotatedParts()]) {
+    const before = looks()
+    t.mock.timers.tick(31_000)
+    await first().catch(() => null)
+    assert.equal(looks(), before + 1)
+  }
+
+  // Without closed tables nothing depends on it, and the table of tables is not asked.
+  const open = fakeInstance(routes)
+  await new Dictionary(open.sn).table('u_open')
+  await new Dictionary(open.sn).knownTables(['u_open'])
+  assert.equal(open.calls.filter(isLookAtTables).length, 0)
+})

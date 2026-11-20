@@ -74,6 +74,15 @@ test('a first row of many texts that are each short enough is cut to what an ans
   assert.equal(kept[0].u_name, note)
   assert.match(String(kept[0].u_f0), /^z{80} … \[cut here: 40 more characters\]$/)
   assert.match(told.join(' '), /700 of its values were cut to about 80 characters\. It is still about \d+,000 characters long\./)
+  // What is cut is read for secrets first: an element is recognised by where it ends, and the cut takes that away.
+  const secret = { u_note: `<password>${'S3CRET'.repeat(20_000)}</password>`, u_other: 'x'.repeat(70_000) }
+  const cut = clip([secret], [])
+  assert.doesNotMatch(JSON.stringify(cut), /S3CRET/)
+  assert.equal(cut[0].u_note, '<password>[withheld]</password>')
+  // And a note that stands for something taken out is not cut in two.
+  const edge: Record<string, string> = Object.fromEntries(Array.from({ length: 700 }, (_, index) => [`u_f${index}`, `${'p'.repeat(69)}<password>S</password>${'q'.repeat(60)}`]))
+  const whole = clip([edge], [])
+  assert.match(String(whole[0].u_f0), /^p{69}<password>\[withheld\] … \[cut here: \d+ more characters\]$/)
   // A row that fits is left alone.
   const small = { a: 'x'.repeat(1_000) }
   assert.deepEqual(clip([small], []), [small])
