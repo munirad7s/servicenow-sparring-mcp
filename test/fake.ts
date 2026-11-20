@@ -117,7 +117,15 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     const fields = parsed.searchParams.get('sysparm_fields')?.split(',')
     const display = parsed.searchParams.get('sysparm_display_value') === 'all'
 
-    const visible = rows.slice(offset, offset + limit).filter((row): row is Row => row !== null)
+    // Asked for one row that has a class, with its class ("<field>ISNOTEMPTY" and that field): an instance answers
+    // with a row that carries it, because that is what was asked for. A test that wants one which does not hand
+    // the field out says so with a route for exactly this query.
+    const classOf = /^([a-z0-9_.]+)ISNOTEMPTY$/.exec(query)?.[1]
+    const shows = classOf !== undefined && route.exact === undefined && parsed.searchParams.get('sysparm_fields') === `sys_id,${classOf}`
+    const visible = rows
+      .slice(offset, offset + limit)
+      .filter((row): row is Row => row !== null)
+      .map((row) => (shows && !(classOf in row) ? { ...row, [classOf]: table } : row))
     const page = visible.map((row) => {
       const kept = fields ? Object.fromEntries(Object.entries(row).filter(([key]) => fields.includes(key))) : row
       if (!display) return Object.fromEntries(Object.entries(kept).map(([key, value]) => [key, isPair(value) ? value.value : value]))

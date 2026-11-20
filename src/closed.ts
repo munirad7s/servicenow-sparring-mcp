@@ -251,7 +251,15 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     // "Is not one of" is what leaves the rows out, and it is asked by itself where a row shows its class: rows of
     // that class that are not of that class. A view that does not show the field cannot be asked this way.
     const shown = row?.records[0]?.[field]
-    if (kinds.includes('NOT IN') && isTableName(shown) && !nothing(await ask(`${field}=${shown}^${field}NOT IN${shown}`))) return { applied: false, lasting: false }
+    if (kinds.includes('NOT IN')) {
+      if (isTableName(shown)) {
+        if (!nothing(await ask(`${field}=${shown}^${field}NOT IN${shown}`))) return { applied: false, lasting: false }
+      } else if (lasting) {
+        // Rows have a class, and the one asked for did not come back with it: hidden from this account, or a field
+        // the instance does not hand out. Then "is not one of" cannot be asked, and it is not taken on trust.
+        return { applied: false, lasting: false }
+      }
+    }
     return { applied: true, lasting }
   }
   function appliesCondition(table: string, field: string, condition: string): Promise<boolean> {

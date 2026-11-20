@@ -980,7 +980,9 @@ test('a database view that joins a parent table leaves out the rows of its close
   // The questions that have to match nothing: the class empty and filled at once, and one of two names at once.
   // After them one row that has a class is asked for, to see that the view has such rows at all.
   const PROOF = 'tsk_sys_class_nameISEMPTY^tsk_sys_class_nameISNOTEMPTY'
-  const PROOFS = [PROOF, 'tsk_sys_class_nameINzz__no_such_class_a^tsk_sys_class_nameINzz__no_such_class_b', 'tsk_sys_class_nameISNOTEMPTY']
+  // The row that came back shows its class, and with it "is not one of" is asked by itself: rows of that class that
+  // are not of that class.
+  const PROOFS = [PROOF, 'tsk_sys_class_nameINzz__no_such_class_a^tsk_sys_class_nameINzz__no_such_class_b', 'tsk_sys_class_nameISNOTEMPTY', 'tsk_sys_class_name=task_with_sla^tsk_sys_class_nameNOT INtask_with_sla']
   const below = closedTables(tableRow('incident', 'Incident', 'task'))
   const { answer, sentTo, proofsFrom } = await connect(familyWorld([below, ...view]), { tables: { allow: [], deny: ['incident'] } })
   const data = await answer('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
@@ -1018,14 +1020,25 @@ test('rows of closed child tables are left out only after the instance showed th
   const closed = { tables: { allow: [], deny: ['incident'] } }
   // Asked once per table and field: rows whose class is empty and filled at once, and rows whose class is one
   // of two names at once. No row is either. After them one row that has a class is asked for.
-  const questions = (field: string) => [`${field}ISEMPTY^${field}ISNOTEMPTY`, `${field}INzz__no_such_class_a^${field}INzz__no_such_class_b`, `${field}ISNOTEMPTY`]
+  // The row shows its class, and with that class "is not one of" is asked by itself.
+  const questions = (field: string, shown = 'task') => [`${field}ISEMPTY^${field}ISNOTEMPTY`, `${field}INzz__no_such_class_a^${field}INzz__no_such_class_b`, `${field}ISNOTEMPTY`, `${field}=${shown}^${field}NOT IN${shown}`]
   const fine = await connect(world(), closed)
   await fine.answer('sn_query', { table: 'task', fields: ['number'] })
   await fine.answer('sn_query', { table: 'task', fields: ['number'] })
   assert.deepEqual(fine.proofsFrom('task'), questions('sys_class_name'))
   await fine.answer('sn_query', { table: 'task_sla', fields: ['task.number'] })
-  assert.deepEqual(fine.proofsFrom('task_sla'), questions('task.sys_class_name'))
+  assert.deepEqual(fine.proofsFrom('task_sla'), questions('task.sys_class_name', 'task_sla'))
   assert.equal(fine.sentTo('task_sla')[0].query, 'task.sys_class_nameNOT INincident^ORtask.sys_class_nameISEMPTY')
+
+  // Rows have a class, and the one asked for comes back without it, or not at all: hidden from this account. Then
+  // "is not one of", which is what leaves the rows out, cannot be asked by itself, and it is not taken on trust.
+  for (const rows of [[{ number: 'TASK1' }], [null]]) {
+    const unseen = await connect(world([{ table: 'task', exact: 'sys_class_nameISNOTEMPTY', rows }]), closed)
+    const refused = await unseen.call('sn_query', { table: 'task', fields: ['number'] })
+    assert.equal(refused.data.error, 'blocked', JSON.stringify(rows))
+    assert.match(refused.data.message, /could not be established that the instance applies a condition on "sys_class_name"/)
+    assert.equal(unseen.sentTo('task').length, 0)
+  }
 
   // An instance that drops the condition for this account answers the question with a row, and one that gives no
   // total leaves it open. Either way nothing is read: the rows of the closed table could not be left out.
@@ -1077,7 +1090,7 @@ test('a table without rows proves nothing about a condition, and its answer is n
   const filled = await connect(familyWorld([below, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
   await filled.answer('sn_query', { table: 'task', fields: ['number'] })
   await filled.answer('sn_query', { table: 'task', fields: ['number'] })
-  assert.equal(filled.proofsFrom('task').length, 3)
+  assert.equal(filled.proofsFrom('task').length, 4)
 
   // Nothing is asked of the table without a condition before the questions are answered: where one of them
   // matches a row, the row that has a class is not asked for either.
@@ -1109,10 +1122,10 @@ test('a proof that the instance applies a condition is kept for ten minutes, not
   await answer('sn_query', { table: 'task', fields: ['number'] })
   t.mock.timers.tick(9 * 60_000)
   await answer('sn_query', { table: 'task', fields: ['number'] })
-  assert.equal(proofsFrom('task').length, 3)
+  assert.equal(proofsFrom('task').length, 4)
   t.mock.timers.tick(2 * 60_000)
   await answer('sn_query', { table: 'task', fields: ['number'] })
-  assert.equal(proofsFrom('task').length, 6)
+  assert.equal(proofsFrom('task').length, 8)
 })
 
 test('the name and the payload of a captured change are kept back where its record is in a closed table', async () => {
