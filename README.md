@@ -394,7 +394,12 @@ for your own verdict. The sheet names records of your instance, so keep it to yo
 What was tested, and what was not:
 
 - Live against one instance on the Australia release, with an administrator account that did not have
-  `snc_read_only`. How narrower roles and that role change what the functions can read was not measured.
+  `snc_read_only`. How narrower roles and that role change what the functions can read was not measured. That
+  includes access rules that restrict which fields an account may filter by (`query_range`, `query_match`): the
+  test instance has more than 9,000 of them, and an administrator passes them all.
+- The test instance has no domain separation, no application installed from a company's own repository, and an
+  account that reads English. What the server does for those cases follows the documentation and is covered by
+  unit tests only.
 - On another release, run `npm run doctor` and `npm run smoke` first.
 - Signing in with a token is covered by unit tests only.
 - CI runs the unit tests on Linux, Windows and macOS.

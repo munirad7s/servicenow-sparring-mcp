@@ -174,7 +174,7 @@ export class Dictionary {
       fields: ['name', 'element', 'label'],
     })
     if (!complete || (total !== null && records.length < total)) {
-      throw new ServiceNowError('The field labels are only partly readable.', 'acl', 'sys_documentation')
+      throw new ServiceNowError('The field labels could not be read completely: rows are hidden from this account, or there are more than 5,000.', 'acl', 'sys_documentation')
     }
 
     const labels = new Map<string, string>()
@@ -277,7 +277,7 @@ export class Dictionary {
         2_000,
       )
       if (!complete || (total !== null && records.length < total)) {
-        throw new ServiceNowError(`The choices of "${field}" are only partly readable.`, 'acl', 'sys_choice')
+        throw new ServiceNowError(`The choices of "${field}" could not be read completely: rows are hidden from this account, or there are more than 2,000.`, 'acl', 'sys_choice')
       }
       const owner = info.chain.find((name) => records.some((row) => row.name === name))
       return records
