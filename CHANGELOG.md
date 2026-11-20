@@ -7,6 +7,15 @@ answer; such changes are listed under "Changed".
 
 ### Fixed
 
+- **`sn_origin` gave up on a record that stores no update name.** Measured: a third of the application files of
+  an instance store none, because they were never captured. Dictionary entries and labels were already found by
+  what they describe. For any other class the answer was `unknown`, with the claim that such a record is captured
+  as part of another one. That is true for the parts of flows and actions, and wrong for 10,804 files of the test
+  instance, among them 6,079 roles of access controls and 2,765 access controls: the other records of those
+  classes are named `<table>_<sys_id>`, and changes to them are captured under such names. `sn_origin` now reads
+  the first and the last five names of the class. Where all are built that way, it judges the record under the
+  name it would get and says so; where no record of the class carries a name, or the names follow another rule,
+  the verdict stays `unknown` and the warning says which of the two it is. Such a call costs 6 requests, not 1.
 - **A list of counts that was cut did not say so.** `sn_delta` and `sn_upgrade_skips` list the thirty largest
   groups of `byType` (and `byDisposition`). Where there were more, the rest was left out without a word, and a sum
   over the list came out below `total`. Both now say how many groups there are, and `sn_delta` how many rows the

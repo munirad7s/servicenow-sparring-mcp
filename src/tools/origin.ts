@@ -56,6 +56,26 @@ const FILE_FIELDS = [
   'sys_updated_by',
 ]
 
+/** As many named records of a class as are looked at, from each end of the names, to learn how the class names its records. */
+const PEERS = 5
+
+/**
+ * What stands before the sys_id in the update names of a class, if all of them are built that way: "<prefix>_<sys_id>".
+ * Measured: the records of a table are named by one rule, most by this one, and the prefix is the table. A row of
+ * another class, or one without a name, was not asked for: then a condition was not applied, and nothing is concluded.
+ */
+function prefixOfNames(kind: string, rows: Array<Record<string, string>>): string | null {
+  const prefixes = new Set<string>()
+  for (const row of rows) {
+    const id = String(row.sys_id ?? '')
+    const name = String(row.sys_update_name ?? '')
+    if (row.sys_class_name !== kind || !SAFE_ID.test(id) || !name.endsWith(`_${id}`)) return null
+    prefixes.add(name.slice(0, -id.length - 1))
+  }
+  const [prefix] = prefixes
+  return prefixes.size === 1 && isTableName(prefix) ? prefix : null
+}
+
 /** true if rows that match were not returned: access rules hide them from the account. */
 const hidesRows = (page: Page<unknown> | null) =>
   Boolean(page && page.total !== null && page.records.length < Math.min(page.limit, Math.max(page.total - page.offset, 0)))
@@ -328,7 +348,34 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         const namedByContent = NAMED_BY_CONTENT.get(kind)
         if (file && !name) {
           if (!namedByContent) {
-            warnings.push('This record carries no update name. Records of this kind are captured as part of another record, or not at all, so its change history cannot be looked up.')
+            // Most tables name a record "<table>_<sys_id>", and a record that was never captured stores no name.
+            // Where other records of its class are named like that, the name this one would get is known. The first
+            // and the last names of the class are looked at. A name built from words begins with a table name, and
+            // those begin with any letter, a sys_id with 0 to f: a class that names records another way mostly
+            // shows at the end of that list.
+            const named = `sys_class_name=${kind}^sys_update_nameISNOTEMPTY`
+            const ends = !isTableName(kind)
+              ? 'no_class'
+              : fileId
+              ? await Promise.all(
+                  ['ORDERBY', 'ORDERBYDESC'].map((order) => sn.query<Record<string, string>>({ table: 'sys_metadata', query: `${named}^${order}sys_update_name`, fields: ['sys_id', 'sys_class_name', 'sys_update_name'], limit: PEERS })),
+                ).catch(kindOf)
+              : 'invalid_response'
+            // Both ends have to show records: where one came back empty although records match, nothing is concluded.
+            const prefix = typeof ends !== 'string' && ends.every((end) => end.records.length > 0) ? prefixOfNames(kind, ends.flatMap((end) => end.records)) : null
+            if (typeof ends !== 'string' && ends.every((end) => end.total === 0 && !end.records.length)) {
+              warnings.push(`This record carries no update name, and neither does any other record of ${kind} on this instance. Records of this kind are captured as part of another record, or not at all, so its change history cannot be looked up.`)
+            } else if (prefix) {
+              name = `${prefix}_${fileId}`
+              warnings.push(`This record carries no update name. Other records of ${kind} are named "${prefix}_<sys_id>" on this instance, so its history was looked up under the name it would get: "${name}".`)
+            } else if (ends === 'no_class') {
+              warnings.push('This record carries no update name and names no class of its own, so the name it would get is not known and its change history cannot be looked up.')
+            } else {
+              warnings.push(
+                `This record carries no update name, and the name it would get could not be told from other records of ${kind}` +
+                  `${typeof ends === 'string' ? ` (${ends})` : ': they are named by another rule, or could not be read'}, so its change history cannot be looked up.`,
+              )
+            }
           } else {
             const own = fileId
               ? await sn.query<Record<string, string>>({ table: kind, query: `sys_id=${fileId}`, fields: ['name', 'element', 'language'], limit: 1 }).catch(kindOf)

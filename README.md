@@ -393,8 +393,12 @@ undecided case stays undecided. In a platform package a file made here is rare (
 test instance), so there a captured change means `customized` unless the dates show that the file was made with
 its first capture.
 
-Two kinds of record need a detour. A dictionary entry or a field label that was never captured stores no update
-name; asked for by the name it would get, it is found by the table and field that name describes. And the entry of
+Three kinds of record need a detour. A dictionary entry or a field label that was never captured stores no update
+name; asked for by the name it would get, it is found by the table and field that name describes. A record of
+another class that stores no name is looked up under the name its class gives its records: the first and the last
+five names of the class are read, and where all of them are built as `<table>_<sys_id>`, the record is judged
+under the name it would get. A warning says so. Where no record of the class carries a name, or the names follow
+another rule, the verdict is `unknown`. And the entry of
 a system field belongs to no package, because the platform generates it together with the table: for it, the
 package of the table answers the first question, and the answer says so. The system fields are `sys_id`,
 `sys_created_on`, `sys_created_by`, `sys_updated_on`, `sys_updated_by`, `sys_mod_count`, `sys_class_name`,
@@ -424,11 +428,21 @@ On one instance of the Australia release, with `npm run origin-check`:
   name and the verdict is `unknown`. This is not an independent confirmation for all 77: 36 of them have no
   customer update at all, and `sn_origin` knows about them only because it reads what the upgrade found. Before it
   did, it called those 36 out-of-the-box.
-- **Random application files, five samples:** 7 of 200, 12 of 200, 14 of 198, 23 of 198 and 29 of 300 are
-  `unknown`, the rest `out_of_box_as_captured` but for a handful that were made or changed here. The share
-  differs that much between samples, so read it as "about one in thirteen". The unknown ones carry no update
-  name of their own or belong to no package: parts of flows and actions and the role lists of access controls,
-  which are captured with their parent, and the tables of the text index.
+- **Random application files, six samples:** 7 of 200, 12 of 200, 14 of 198, 23 of 198, 29 of 300 and 27 of 297
+  are `unknown`, the rest `out_of_box_as_captured` but for a handful that were made or changed here. The share
+  differs that much between samples, so read it as "about one in thirteen". Nearly all of the unknown ones belong
+  to no package, or only to the global scope (26 of the 27 in the last sample): the parts of flows and actions,
+  access controls and their roles, entries and labels of fields that are no system fields, and the tables of the
+  text index.
+- **Records without a stored name.** A third of all application files (390,091 of 1,236,273) store no update
+  name. 326,132 of them are dictionary entries and labels, found by what they describe. Of the other 63,959,
+  10,804 are of a class whose other records are named `<table>_<sys_id>`: roles of access controls (6,079),
+  access controls (2,765), tables (702), views (181) and 21 smaller classes. They are looked up under that name.
+  For up to 120 of them per class, nothing was recorded under it, while other records of the same classes have
+  such entries (64 captured changes to roles of access controls, 557 to access controls). 53,134 are of one of
+  21 classes of which no record carries a name, mostly the parts of flows and actions: no captured change and no
+  version on the instance is named after one of these classes, so they stay `unknown`. 19 are of a class that
+  names its records another way (lists and choice sets).
 - **195 random captured changes:** 97 `customer_created`, 70 `customized`, 27 `custom_application_file`, 1
   `deleted_here`. Of the 70 customized records, 59 were captured under system accounts and 11 by people.
 - **This release against the one before, on the same 670 records** (the files the upgrade skipped, 300

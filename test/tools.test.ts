@@ -1431,6 +1431,20 @@ test('a list of counts that is cut says so', async () => {
   // Thirty types or fewer: the list is the whole of it, and nothing is said.
   const few = await connect([...dictionaryRoutes, { table: 'sys_update_xml', rows: [] }, stats('sys_update_xml', { 'Business Rule': 2 })])
   assert.doesNotMatch((await few.answer('sn_delta')).warnings.join(' '), /largest of/)
+  // The line is drawn at thirty: one type more is said, thirty are not.
+  for (const [length, said] of [[30, false], [31, true]] as const) {
+    const edge = await connect([...dictionaryRoutes, { table: 'sys_update_xml', rows: [] }, stats('sys_update_xml', Object.fromEntries(Array.from({ length }, (_, index) => [`Type ${index}`, 5])))])
+    assert.equal(/byType lists the 30 largest of 31 types\. The other 1 have 5 row/.test((await edge.answer('sn_delta')).warnings.join(' ')), said, String(length))
+  }
+
+  // The same for the entries of upgrades, per type and per disposition.
+  const manyTypes = stats('upgrade_history_task', Object.fromEntries(Array.from({ length: 31 }, (_, index) => [`Type ${index}`, 3])), undefined, 'upgrade_detail.type')
+  const skips = await connect([manyTypes, ...upgradeRoutes])
+  const listed = await skips.answer('sn_upgrade_skips', {})
+  assert.equal(listed.byType.length, 30)
+  assert.match(listed.warnings.join(' '), /byType lists the 30 largest of 31 groups: "total" counts every entry, a sum over byType does not/)
+  assert.doesNotMatch(listed.warnings.join(' '), /byDisposition lists/)
+  assert.doesNotMatch((await (await connect(upgradeRoutes)).answer('sn_upgrade_skips', {})).warnings.join(' '), /largest of/)
 })
 
 test('with a deny list, what stands before the sys_id of each name on a page is asked for once', async () => {
@@ -1699,6 +1713,21 @@ test('a record in a closed table is not read by the other tools either, and its 
   assert.match(stopped.data.message, /This sys_id stands for a record in a table that is closed on this machine/)
   assert.equal(traced.sentTo('sys_update_version').length + traced.sentTo('upgrade_history_task').length, 0)
   assert.deepEqual(traced.sentTo('sys_update_xml').map((sent) => sent.query), [`nameENDSWITH_${ID}^ORDERBYDESCsys_updated_on`])
+
+  // A record that stores no name gets the one its class gives its records. Where that name begins with a closed
+  // table, nothing is read under it either.
+  const OTHER = 'f'.repeat(32)
+  const unnamed = await connect(
+    [
+      ...world,
+      { table: 'sys_metadata', query: 'sys_update_nameISNOTEMPTY', rows: [{ sys_id: OTHER, sys_class_name: 'sys_ui_action', sys_update_name: `sys_script_${OTHER}` }] },
+      ...origin('sys_plugins', [], [], { sys_update_name: '', sys_class_name: 'sys_ui_action' }),
+    ],
+    closed,
+  )
+  const derived = await unnamed.call('sn_origin', { sysId: ID })
+  assert.equal(derived.data.error, 'blocked')
+  assert.equal(unnamed.sentTo('sys_update_xml').length + unnamed.sentTo('sys_update_version').length + unnamed.sentTo('upgrade_history_task').length, 0)
 })
 
 test('a field of an encrypted type is withheld and cannot be compared', async () => {
@@ -3430,6 +3459,9 @@ test('sn_origin says so when the table that would answer for a system field cann
   assert.deepEqual({ verdict: ours.verdict, provenance: ours.provenance }, { verdict: 'custom_application_file', provenance: 'company_application' })
 })
 
+/** The answer of an instance on which no record of a class carries an update name. */
+const noneNamed: Route = { table: 'sys_metadata', query: 'sys_update_nameISNOTEMPTY', rows: [] }
+
 test('sn_origin says why, whenever it does not decide', async () => {
   const cases: Array<[string, Route[], RegExp]> = [
     // Measured: one application file in nine belongs to no package, and almost none of those was ever captured.
@@ -3439,7 +3471,7 @@ test('sn_origin says why, whenever it does not decide', async () => {
     ['global scope, untouched', origin('sys_scope', [], []), /belongs to the global scope and not to a package/],
     ['changed inside an installed application', origin('sys_store_app', [], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')]), /delivered and then changed, or created here/],
     ['hidden from the account', [{ table: 'sys_metadata', rows: [null] }], /The record exists, but this account may not read it/],
-    ['a part of another record', origin('sys_plugins', [], [], { sys_update_name: '', sys_class_name: 'sys_hub_action_input' }), /no update name of it could be used/],
+    ['a part of another record', [noneNamed, ...origin('sys_plugins', [], [], { sys_update_name: '', sys_class_name: 'sys_hub_action_input' })], /no update name of it could be used/],
     ['evidence not readable', [{ table: 'sys_metadata', rows: [file('sys_plugins')] }, { table: 'sys_update_xml', status: 403 }, { table: 'sys_update_version', rows: [] }, stats('sys_update_version', {})], /part of the evidence is missing, hidden, or came without a total/],
     ['known to an upgrade only', origin(null, [], [], {}, [skip('Skipped Manual Merge')]), /no record answers to it/],
   ]
@@ -3497,11 +3529,82 @@ test('sn_origin: a dictionary entry or label that was never captured has no stor
   const label = await connect([{ table: 'sys_documentation', rows: [{ sys_id: ID, name: 'incident', element: '', language: 'en' }] }, ...origin('sys_plugins', [], [], { sys_update_name: '', sys_class_name: 'sys_documentation' })])
   assert.equal((await label.answer('sn_origin', { sysId: ID })).record.updateName, 'sys_documentation_incident__en')
 
-  // Other kinds of record without a name are parts of another record: nothing can be looked up.
-  const part = await connect(origin('sys_plugins', [], [], { sys_update_name: '', sys_class_name: 'sys_hub_action_input' }))
+  // A class of which no record has a name is captured as part of another record: nothing can be looked up.
+  const part = await connect([noneNamed, ...origin('sys_plugins', [], [], { sys_update_name: '', sys_class_name: 'sys_hub_action_input' })])
   const unknown = await part.answer('sn_origin', { sysId: ID })
   assert.equal(unknown.verdict, 'unknown')
-  assert.match(unknown.warnings.join(' '), /carries no update name/)
+  assert.match(unknown.warnings.join(' '), /carries no update name, and neither does any other record of sys_hub_action_input/)
+  assert.equal(part.sentTo('sys_update_xml').length, 0)
+})
+
+test('sn_origin: a record without a stored name is looked up under the name its class gives its records', async () => {
+  // Measured: 10,806 application files of one instance store no name while the other records of their class are
+  // named "<table>_<sys_id>", among them 6,079 roles of access rules and 2,765 access rules.
+  const role = { sys_update_name: '', sys_class_name: 'sys_security_acl_role' }
+  const OTHER = 'ffffffffffffffffffffffffffffffff'
+  const peer = (id: string, name = `sys_security_acl_role_${id}`, kind = 'sys_security_acl_role') => ({ sys_id: id, sys_class_name: kind, sys_update_name: name })
+  const peers = (...rows: Data[]): Route => ({ table: 'sys_metadata', query: 'sys_update_nameISNOTEMPTY', rows })
+  const derived = `sys_security_acl_role_${ID}`
+
+  const delivered = await connect([peers(peer('1'.repeat(32)), peer(OTHER)), ...origin('sys_plugins', [], [], role)])
+  const data = await delivered.answer('sn_origin', { sysId: ID })
+  assert.deepEqual({ verdict: data.verdict, divergence: data.divergence, name: data.record.updateName }, { verdict: 'out_of_box_as_captured', divergence: 'no_customer_changes_captured', name: derived })
+  assert.match(data.warnings.join(' '), new RegExp(`carries no update name\\. Other records of sys_security_acl_role are named "sys_security_acl_role_<sys_id>".*"${derived}"`))
+  assert.equal(delivered.sentTo('sys_update_xml')[0].query, `name=${derived}^ORDERBYDESCsys_updated_on`)
+  // The first and the last names of the class are asked for.
+  assert.deepEqual(delivered.sentTo('sys_metadata').slice(1).map((entry) => entry.query), ['ORDERBY', 'ORDERBYDESC'].map((order) => `sys_class_name=sys_security_acl_role^sys_update_nameISNOTEMPTY^${order}sys_update_name`))
+
+  // What was captured under that name decides, as for any other record.
+  const changed = await connect([peers(peer(OTHER)), ...origin('sys_plugins', [change({ name: derived })], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')], role)])
+  assert.equal((await changed.answer('sn_origin', { sysId: ID })).divergence, 'customer_changes_captured')
+
+  // A class that names its records by what they describe: no name is made up for it.
+  const cases: Array<[string, Route[]]> = [
+    ['named by what it describes', [peers(peer(OTHER), peer('2'.repeat(32), 'sys_security_acl_role_incident_read'))]],
+    ['a name of another record', [peers(peer(OTHER, `sys_security_acl_role_${'3'.repeat(32)}`))]],
+    ['two prefixes', [peers(peer(OTHER), peer('2'.repeat(32), `sys_security_acl_${'2'.repeat(32)}`))]],
+    // A row of another class was not asked for: the condition on the class was not applied.
+    ['a row of another class', [peers(peer(OTHER, `sys_script_${OTHER}`, 'sys_script'))]],
+    ['a prefix that is no table name', [peers(peer(OTHER, `sys-acl_${OTHER}`))]],
+    // Records match, and none came back: hidden from the account.
+    ['hidden peers', [{ table: 'sys_metadata', query: 'sys_update_nameISNOTEMPTY', rows: [null, null] }]],
+    ['no total', [{ table: 'sys_metadata', query: 'sys_update_nameISNOTEMPTY', rows: [], noTotal: true }]],
+    ['not readable', [{ table: 'sys_metadata', query: 'sys_update_nameISNOTEMPTY', status: 403 }]],
+  ]
+  for (const [label, routes] of cases) {
+    const { answer, sentTo } = await connect([...routes, ...origin('sys_plugins', [], [], role)])
+    const undecided = await answer('sn_origin', { sysId: ID })
+    assert.equal(undecided.verdict, 'unknown', label)
+    assert.match(undecided.warnings.join(' '), label === 'not readable' ? /could not be told from other records of sys_security_acl_role \(acl\)/ : /could not be told from other records of sys_security_acl_role: they are named by another rule, or could not be read/, label)
+    assert.equal(sentTo('sys_update_xml').length, 0, label)
+  }
+
+  // A record that names no class: there is no other record to learn the name from, and nothing is asked.
+  const classless = await connect(origin('sys_plugins', [], [], { sys_update_name: '', sys_class_name: '' }))
+  const nameless = await classless.answer('sn_origin', { sysId: ID })
+  assert.equal(nameless.verdict, 'unknown')
+  assert.match(nameless.warnings.join(' '), /names no class of its own/)
+  assert.equal(classless.sentTo('sys_metadata').length, 1)
+
+  // One end of the names shows records and the other none: the class is not judged by half of what was asked.
+  const half = (other: Route) => [{ table: 'sys_metadata', query: 'ORDERBYsys_update_name', rows: [peer(OTHER)] }, other, ...origin('sys_plugins', [], [], role)]
+  for (const other of [{ table: 'sys_metadata', query: 'ORDERBYDESCsys_update_name', rows: [] }, { table: 'sys_metadata', query: 'ORDERBYDESCsys_update_name', rows: [null] }]) {
+    const lopsided = await connect(half(other))
+    const undecided = await lopsided.answer('sn_origin', { sysId: ID })
+    assert.equal(undecided.verdict, 'unknown')
+    assert.match(undecided.warnings.join(' '), /could not be told from other records of sys_security_acl_role/)
+    assert.doesNotMatch(undecided.warnings.join(' '), /neither does any other record/)
+    assert.equal(lopsided.sentTo('sys_update_xml').length, 0)
+  }
+
+  // A prefix that is the table the class extends is taken as it is found.
+  const parent = await connect([peers(peer(OTHER, `sys_security_acl_${OTHER}`)), ...origin('sys_plugins', [], [], role)])
+  assert.equal((await parent.answer('sn_origin', { sysId: ID })).record.updateName, `sys_security_acl_${ID}`)
+
+  // An instance that cannot be reached while the names are read ends the call: it is no missing piece of evidence.
+  const gone = await connect([{ table: 'sys_metadata', query: 'sys_update_nameISNOTEMPTY', unreachable: true }, ...origin('sys_plugins', [], [], role)])
+  const failed = await gone.call('sn_origin', { sysId: ID })
+  assert.deepEqual({ isError: failed.isError, error: failed.data.error }, { isError: true, error: 'network' })
 })
 
 test('sn_origin finds a never-captured field or label by the update name it would get', async () => {
