@@ -351,8 +351,11 @@ export class Dictionary {
       const SENTINEL = 'sys_db_object'
       const untrusted = (why: string) =>
         new ServiceNowError(`Tables are closed on this machine, and the list of their child tables could not be established (${why}). Nothing was sent.`, 'blocked', SENTINEL)
-      const terms = ['name', ...PARENT_FIELDS].flatMap((path) => [names.length ? `${path}IN${names.join(',')}` : '', ...wanted.map((prefix) => `${path}STARTSWITH${prefix}`)].filter(Boolean))
-      // A long deny list is asked for in several requests, so that no query grows beyond what a URL carries.
+      // A long deny list is asked for in several requests, so that no query grows beyond what a URL carries: the
+      // names in groups, and the conditions in as many queries as it takes.
+      const groups: string[][] = []
+      for (let at = 0; at < names.length; at += 40) groups.push(names.slice(at, at + 40))
+      const terms = ['name', ...PARENT_FIELDS].flatMap((path) => [...groups.map((group) => `${path}IN${group.join(',')}`), ...wanted.map((prefix) => `${path}STARTSWITH${prefix}`)])
       const queries: string[][] = [[]]
       for (const term of terms) {
         if (queries.at(-1)!.join('^OR').length + term.length > 2_500 && queries.at(-1)!.length) queries.push([])

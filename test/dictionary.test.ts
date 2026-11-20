@@ -251,3 +251,41 @@ test('choices defined only on a parent table apply to the child', async () => {
   const { sn } = fakeInstance([{ table: 'sys_choice', query: 'element=priority', rows: [{ name: 'task', value: '1', label: 'Critical', language: 'en' }] }, ...dictionaryRoutes])
   assert.deepEqual(await new Dictionary(sn).choices('incident', 'priority'), [{ value: '1', label: 'Critical', language: 'en' }])
 })
+
+test('the tables a long deny list closes are asked for in several requests, each of which proves itself', async () => {
+  // Sixty names of thirty characters: more than one query should carry.
+  const names = Array.from({ length: 130 }, (_, index) => `u_closed_table_number_${String(index).padStart(8, '0')}`)
+  const child = tableRow('u_child_of_the_last', 'Child', names[59])
+  const { sn, calls } = fakeInstance(
+    [
+      // Every request is answered with the same rows: the table of tables as proof, one closed table and its child.
+      { table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [tableRow(names[59], 'Closed'), child, tableRow('sys_db_object', 'Table')] },
+    ],
+    { tables: { allow: [], deny: [...names, 'sn_hr_*'] } },
+  )
+  const closed = await new Dictionary(sn).closedTables()
+  assert.deepEqual([...closed.keys()].sort(), [names[59], 'u_child_of_the_last'].sort())
+  assert.deepEqual(closed.get('u_child_of_the_last'), ['u_child_of_the_last', names[59]])
+
+  const asked = calls.filter((call) => call.table === 'sys_db_object')
+  assert.ok(asked.length > 1, `${asked.length} requests`)
+  for (const call of asked) {
+    assert.ok(call.query.length < 3_500, `a query of ${call.query.length} characters`)
+    assert.ok(call.query.endsWith('^ORname=sys_db_object'), 'each asks for the table of tables as proof')
+  }
+  // Every level of parents is asked for, for the names and for the pattern.
+  const whole = asked.map((call) => call.query).join('^OR')
+  for (const path of ['name', 'super_class.name', 'super_class.super_class.super_class.super_class.super_class.super_class.super_class.super_class.name']) {
+    assert.ok(whole.includes(`${path}IN${names[0]},`), path)
+    // The names go in groups, so that one condition alone never outgrows a query.
+    assert.ok(whole.includes(`${path}IN${names[120]},`), path)
+    assert.ok(whole.includes(`${path}STARTSWITHsn_hr_`), path)
+  }
+  // Asked once, then remembered.
+  await new Dictionary(sn).closedTables()
+  const again = new Dictionary(sn)
+  await again.closedTables()
+  const before = calls.length
+  await again.closedTables()
+  assert.equal(calls.length, before)
+})
