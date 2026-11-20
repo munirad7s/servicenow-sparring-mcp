@@ -235,7 +235,9 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
    * in one query would prove nothing.
    *
    * A table without rows answers every question with none, also the one it would have dropped. Such an answer
-   * is taken for this request, where it gives nothing away, and not remembered for the next.
+   * is taken for this request, where it gives nothing away, and not remembered for the next. An instance that
+   * answers a field it cannot use with no rows looks the same, so where no row shows a class it is asked for a
+   * row with or without one: none, of a table that has rows, and the condition is not relied on.
    */
   const proofs = new Map<string, { at: number; applied: Promise<boolean> }>()
   async function prove(table: string, field: string, kinds: string[]): Promise<{ applied: boolean; lasting: boolean }> {
@@ -248,7 +250,15 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     // Only now is a row asked for that the questions above did not have to match nothing: one that has a class.
     // Where a question failed, no such request goes out. Without such a row no row of a closed class is there.
     const row = await ask(`${field}ISNOTEMPTY`, ['sys_id', field])
-    const lasting = Boolean(row && (row.records.length > 0 || (row.total ?? 0) > 0))
+    const some = (page: Awaited<ReturnType<typeof ask>>) => Boolean(page && (page.records.length > 0 || (page.total ?? 0) > 0))
+    const lasting = some(row)
+    if (!lasting) {
+      // No row has a class. That is also what an instance answers that cannot use the field and is set to answer
+      // such a query with no rows (glide.invalid_query.returns_no_rows): every question above then matches nothing,
+      // and so would the request, which would say "no rows" of a table that has some. So the instance has to show
+      // a row that has a class or has none, or else that the table has no row at all.
+      if (!some(await ask(`${field}ISEMPTY^OR${field}ISNOTEMPTY`)) && !nothing(await ask(''))) return { applied: false, lasting: false }
+    }
     // "Is not one of" is what leaves the rows out, and it is asked by itself where a row shows its class: rows of
     // that class that are not of that class. A view that does not show the field cannot be asked this way.
     const shown = row?.records[0]?.[field]

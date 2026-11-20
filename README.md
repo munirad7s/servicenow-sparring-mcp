@@ -175,7 +175,10 @@ provider, the data leaves your network. Five things limit what can go that way:
     beginning with two, and, where a row shows its class, of that class and not of it. Where one of these matches
     anything, the request is not sent. These questions are requests to the table itself: they ask for a sys_id
     and, at last, for the class of one row, and nothing of the answers is passed on. A table without rows proves
-    nothing this way, so its answer holds for that one request and is not remembered.
+    nothing this way, so its answer holds for that one request and is not remembered. An instance that is set to
+    answer a query it cannot use with no rows looks like a table without rows here, so where no row shows a class
+    the table is asked for a row with or without one: none, from a table that has rows, and the request is not
+    sent, because it would come back empty.
   - The name behind a reference is left out where the record can be a row of a closed table: the reference points
     into one, or into a table that has one below it, or it cannot be told where it points. This goes for single
     references, lists and the labels of counted groups. Such a reference can be compared with a sys_id, but not

@@ -146,7 +146,10 @@ export function isProof(call: Call): boolean {
   // One row that has a class, with its class: `<field>ISNOTEMPTY`, asking for the sys_id and that field.
   const field = /^([a-z0-9_.]+)ISNOTEMPTY$/.exec(call.query)?.[1]
   const oneRow = field !== undefined && call.params.get('sysparm_fields') === `sys_id,${field}` && call.params.get('sysparm_limit') === '1' && call.api === 'table'
-  return impossible || oneRow
+  // Where no row showed a class: one row that has a class or has none, and after it any row at all.
+  const oneId = call.params.get('sysparm_fields') === 'sys_id' && call.params.get('sysparm_limit') === '1' && call.api === 'table'
+  const either = /^([a-z0-9_.]+)ISEMPTY\^OR\1ISNOTEMPTY$/.test(call.query)
+  return impossible || oneRow || (oneId && (either || call.query === ''))
 }
 
 /**

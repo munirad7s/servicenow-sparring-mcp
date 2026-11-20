@@ -1085,7 +1085,24 @@ test('a table without rows proves nothing about a condition, and its answer is n
   const empty = await connect(familyWorld([below, { table: 'task', rows: [] }]), closed)
   await empty.answer('sn_query', { table: 'task', fields: ['number'] })
   await empty.answer('sn_query', { table: 'task', fields: ['number'] })
-  assert.equal(empty.proofsFrom('task').length, 6, 'asked again for the second query')
+  // Two questions that have to match nothing and one for a row with a class. No row has one, so the table is asked
+  // for a row with or without a class, and then for any row at all.
+  const EITHER = 'sys_class_nameISEMPTY^ORsys_class_nameISNOTEMPTY'
+  assert.deepEqual(empty.proofsFrom('task').slice(0, 5), ['sys_class_nameISEMPTY^sys_class_nameISNOTEMPTY', 'sys_class_nameINzz__no_such_class_a^sys_class_nameINzz__no_such_class_b', 'sys_class_nameISNOTEMPTY', EITHER, ''])
+  assert.equal(empty.proofsFrom('task').length, 10, 'asked again for the second query')
+
+  // An instance can be set to answer a query it cannot use with no rows (glide.invalid_query.returns_no_rows). Where
+  // it cannot use the class, every question matches nothing, and so would the request: "no rows", of a table that
+  // has some. No row with or without a class, and yet a row: the condition is not relied on.
+  const silent = await connect(familyWorld([below, { table: 'task', match: /sys_class_name/, rows: [] }, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
+  const unusable = await silent.call('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(unusable.data.error, 'blocked')
+  assert.match(unusable.data.message, /could not be established that the instance applies a condition on "sys_class_name"/)
+  assert.equal(silent.sentTo('task').length, 0)
+  // Rows whose class is empty are rows all the same: the field is used, and the request goes out.
+  const classless = await connect(familyWorld([below, { table: 'task', exact: 'sys_class_nameISNOTEMPTY', rows: [] }, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
+  assert.equal((await classless.answer('sn_query', { table: 'task', fields: ['number'] })).returned, 1)
+  assert.equal(classless.proofsFrom('task').at(-1), EITHER)
   // With a row in the table the proof holds, and is asked for once.
   const filled = await connect(familyWorld([below, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
   await filled.answer('sn_query', { table: 'task', fields: ['number'] })
