@@ -224,7 +224,7 @@ npm install
 `npm install` also builds the server into `dist/`.
 
 Without a checkout, `npx` can fetch and build it from GitHub. The first start takes about fifteen seconds; add
-`#v0.3.1` to the name to stay on one release. Checked on Linux with npm 11.
+`#v0.3.2` to the name to stay on one release. Checked on Linux with npm 11.
 
 ```bash
 npx -y github:munirad7s/servicenow-sparring-mcp --version
@@ -279,7 +279,7 @@ Any client that starts a local MCP server over stdio works. The usual configurat
 }
 ```
 
-- Without a checkout: `"command": "npx"` and `"args": ["-y", "github:munirad7s/servicenow-sparring-mcp#v0.3.1"]`.
+- Without a checkout: `"command": "npx"` and `"args": ["-y", "github:munirad7s/servicenow-sparring-mcp#v0.3.2"]`.
 - On Windows, write paths with forward slashes or doubled backslashes: `"C:/tools/instance.env"`.
 - A desktop app may not see a `node` that a version manager installed. Then give the full path of the `node`
   program as `command`.
@@ -463,8 +463,12 @@ What was tested, and what was not:
   unit tests only.
 - Tables closed on the machine were tried live with three lists (a deny list of one table, one of a table with
   child tables and a pattern, and an allow list): the rows, names and counts came out as described, and
-  `npm run smoke` repeats the first of them. That is a trial on one instance, not a proof: the rules are in
-  `src/closed.ts`, and the unit tests hold them.
+  `npm run smoke` repeats the first of them. Two more trials: with the table closed that stands eight levels above
+  the deepest tables of the instance, all 1,349 tables below it were found in five requests; and a database view
+  of 44 rows, 7 of them of a closed child table, answered with 37. That is a trial on one instance, not a proof:
+  the rules are in `src/closed.ts`, and the unit tests hold them. What an account sees that may not read what a
+  table extends was not tried, because the test account is an administrator: the server asks for proof that it can
+  and closes everything without it.
 - On another release, run `npm run doctor` and `npm run smoke` first.
 - Signing in with a token is covered by unit tests only.
 - CI runs the unit tests on Linux, Windows and macOS.

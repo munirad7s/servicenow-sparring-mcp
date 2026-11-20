@@ -59,6 +59,10 @@ test('the only file the server writes is the audit log', () => {
 test('the version is the same everywhere', () => {
   assert.equal(VERSION, JSON.parse(read('package.json')).version)
   assert.match(read('CHANGELOG.md'), new RegExp(`^## ${VERSION.replaceAll('.', '\\.')} `, 'm'))
+  // The README tells how to stay on one release: that release is this one.
+  const pinned = [...read('README.md').matchAll(/#v(\d+\.\d+\.\d+)/g)].map((match) => match[1])
+  assert.ok(pinned.length > 0)
+  assert.deepEqual([...new Set(pinned)], [VERSION])
 })
 
 test('the README names every function the server has, and no other', () => {

@@ -150,7 +150,6 @@ export class Dictionary {
    */
   forget(name: string): void {
     for (const cache of [this.tables, this.columnSets, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.childSets]) cache.delete(name)
-    this.parentChecks.clear()
     for (const key of [...this.choiceLists.keys()]) if (key.startsWith(`${name}.`)) this.choiceLists.delete(key)
   }
 

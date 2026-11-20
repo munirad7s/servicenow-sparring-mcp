@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Dictionary } from '../src/dictionary.js'
 import { ServiceNowError } from '../src/errors.js'
-import { column, dictionaryRoutes, fakeInstance, showsParents, tableRow } from './fake.js'
+import { column, dictionaryRoutes, fakeInstance, showsParents, tableRow, type Route } from './fake.js'
 
 test('a table knows its parents and its kind', async () => {
   const { sn } = fakeInstance(dictionaryRoutes)
@@ -363,12 +363,13 @@ test('an account that is not shown what a table extends gets no list of child ta
   // The lists are built from conditions on the parent of a table. An instance that drops them for this account
   // would answer with the table that was named and none of its child tables, and nothing would show it.
   const task = tableRow('task', 'Task')
-  for (const [name, proof] of [
+  const proofs: Array<[string, Route]> = [
     ['no row', { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', rows: [] }],
     ['a row without its parent', { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', rows: [{ name: 'incident' }] }],
     ['not readable', { table: 'sys_db_object', exact: 'super_class.nameISNOTEMPTY', status: 403 }],
-  ] as const) {
-    const routes = [proof, { table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [task, tableRow('sys_db_object', 'Table')] }, { table: 'sys_db_object', query: '^ORname=task', rows: [task] }]
+  ]
+  for (const [name, proof] of proofs) {
+    const routes: Route[] = [proof, { table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [task, tableRow('sys_db_object', 'Table')] }, { table: 'sys_db_object', query: '^ORname=task', rows: [task] }]
     const denying = new Dictionary(fakeInstance(routes, { tables: { allow: [], deny: ['task'] } }).sn)
     await assert.rejects(denying.closedTables(), (error: unknown) => error instanceof ServiceNowError && error.kind === 'blocked' && /did not show this account which table a table extends/.test(error.message), name)
     assert.equal(await new Dictionary(fakeInstance(routes).sn).childTables('task'), null, name)
