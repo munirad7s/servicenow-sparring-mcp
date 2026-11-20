@@ -379,6 +379,20 @@ const COPIES_OF_RECORDS = new Set(['sys_metadata_link'])
 export const copiesRecords = (table: string): boolean => withBases(table).some((base) => COPIES_OF_RECORDS.has(base))
 
 /**
+ * Records that are captured under a name that begins with another word than their table. Measured on an instance,
+ * over 6,631 captured changes and the application files of 1,998 classes: the choices of a field are captured as
+ * "sys_choice_<table>_<field>" and are a record of sys_choice_set, the related lists of a form as
+ * "sys_ui_related_<table>_<view>" (sys_ui_related_list), and a version of a workflow under the name of the
+ * workflow, "wf_workflow_<sys_id>" (wf_workflow_version). A name that begins with the word on the left can stand
+ * for a record of the tables on the right, so those have to be open as well.
+ */
+const NAMED_BY_ANOTHER_RULE: Record<string, string[]> = {
+  sys_choice: ['sys_choice_set'],
+  sys_ui_related: ['sys_ui_related_list'],
+  wf_workflow: ['wf_workflow_version'],
+}
+
+/**
  * What stands before a generated sys_id at the end of an update name. Mostly that is the table of the record, but
  * not always. Measured: "sys_ui_form_sections_<sys_id>" is a record of sys_ui_form, and no table is called
  * sys_ui_form_sections; "sys_ui_list_control_<sys_id>" is a record of the table sys_ui_list_control.
@@ -464,8 +478,10 @@ export async function isClosedRecord(ctx: Context, updateName: string, page?: Re
   if (!denied) return true
   const closedByName = (table: string) => withBases(table).some((base) => ctx.sn.denies(base) || COPIES_OF_RECORDS.has(base) || denied.has(base))
   const listed = Boolean(ctx.sn.openClasses())
+  // The tables a name of this beginning stands for by another rule than "the name begins with the table".
+  const others = cuts.flatMap((cut) => NAMED_BY_ANOTHER_RULE[cut] ?? [])
   // Nothing the name can begin with is closed by name, and no list says that only some tables may be read.
-  if (!listed && !cuts.some(closedByName)) return false
+  if (!listed && ![...cuts, ...others].some(closedByName)) return false
 
   // "sys_script_include_<sys_id>" is no business rule: where a table of that name stands before the sys_id, the
   // record is of that table and of no shorter one.
@@ -475,12 +491,12 @@ export async function isClosedRecord(ctx: Context, updateName: string, page?: Re
   // asked about again, row by row.
   const known = page ? (needed.every((cut) => page.asked.has(cut)) ? page.tables : null) : await ctx.dict.knownTables(needed).catch(unlessNoConnection(null))
   const candidates = exact && known?.has(exact) ? [exact] : cuts
-  if (candidates.some(closedByName)) return true
+  if ([...candidates, ...others].some(closedByName)) return true
   if (!listed) return false
 
   const found = candidates.filter((table) => known?.has(table))
   if (!found.length) return true
-  for (const table of found) {
+  for (const table of [...found, ...others]) {
     if ((await ctx.closed.reason(table)) !== null) return true
   }
   return false
@@ -510,6 +526,9 @@ const RECORD_NAMES = new Map<string, Record<string, NameKey>>([
   ['sys_archive_log', { display_value: { key: 'from_table', holds: 'table' } }],
   // Measured: a linked application file is named after the record it links to. The field is one it inherits.
   ['sys_metadata_link', { sys_name: { key: 'tablename', holds: 'table' } }],
+  // Measured: the entry for a deleted application file keeps the name and the update name of the record that was
+  // deleted (2,010 entries on one instance; the update names of 400 began with 48 tables, none with its own).
+  ['sys_metadata_delete', { sys_name: { key: 'sys_update_name', holds: 'update_name' } }],
   // Measured: what one scope may use of another is a table, a script include, or a class of the platform
   // ("scriptable"), which is no record.
   ['sys_scope_privilege', { target_name: { key: 'target_type', holds: 'table', notTables: ['scriptable'] } }],

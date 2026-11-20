@@ -1785,6 +1785,23 @@ test('an update name is taken for a record of a closed table in every way it can
   assert.equal(await isClosedRecord(dropped, 'u_old_bonus_schedule_x'), true)
   assert.equal(await isClosedRecord(dropped, NAME), false)
 
+  // Measured: three kinds of records are captured under a name that begins with another word than their table.
+  // The choices of a field are a record of sys_choice_set, the related lists of a form one of
+  // sys_ui_related_list, and a version of a workflow is captured under the name of the workflow.
+  const otherwise = [
+    ['sys_choice_set', 'sys_choice_incident_state'],
+    ['sys_ui_related_list', 'sys_ui_related_incident_default'],
+    ['wf_workflow_version', `wf_workflow_${ID}`],
+  ] as const
+  for (const [table, name] of otherwise) {
+    const without = deny([table], closedTables(tableRow(table, table)))
+    assert.equal(await isClosedRecord(without, name), true, name)
+    // Another table of that beginning is closed: the name stands for none of its records.
+    assert.equal(await isClosedRecord(deny(['sys_choice_x'], closedTables(tableRow('sys_choice_x', 'Other'))), name), false, name)
+  }
+  // The word the rule begins with has to be a whole beginning of the name.
+  assert.equal(await isClosedRecord(deny(['sys_choice_set'], closedTables(tableRow('sys_choice_set', 'Choice Set'))), 'sys_choices_incident_state'), false)
+
   // With a list of the only tables that may be read, the table has to be found and be open.
   const scripts: Route[] = ['sys_script', 'sys_script_include', 'sys_documentation', 'sys_dictionary'].map((name) => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name, 'sys_metadata')] }))
   const world = [knownTables('incident', 'task', 'sys_script', 'sys_script_include', 'sys_documentation', 'sys_dictionary', 'customer_contact'), ...scripts, ...dictionaryRoutes]
@@ -1800,6 +1817,12 @@ test('an update name is taken for a record of a closed table in every way it can
   assert.equal(await isClosedRecord(listed, 'sys_script_include_my_util'), true)
   // No table of that name is known to the instance: what the record is cannot be told.
   assert.equal(await isClosedRecord(listed, 'sys_no_such_table_x'), true)
+  // The choices of a field are captured as "sys_choice_<table>_<field>" and are a record of sys_choice_set: the
+  // table the name begins with is on the list, the table of the record has to be on it as well.
+  const choiceTables: Route[] = ['sys_choice', 'sys_choice_set'].map((name) => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] }))
+  const choices = (allow: string[]) => createContext(fakeInstance([knownTables('sys_choice', 'incident'), ...choiceTables, ...dictionaryRoutes], { tables: { allow, deny: [] } }).sn)
+  assert.equal(await isClosedRecord(choices(['sys_choice', 'incident', 'task', 'sys_d*']), 'sys_choice_incident_state'), true)
+  assert.equal(await isClosedRecord(choices(['sys_choice', 'sys_choice_set', 'incident', 'task', 'sys_d*']), 'sys_choice_incident_state'), false)
   // The table is found however many words follow it: a label and a dictionary entry are named after what they describe.
   assert.equal(await isClosedRecord(listed, 'sys_documentation_incident_short_description_en'), false)
   assert.equal(await isClosedRecord(listed, 'sys_dictionary_incident_u_my_custom_field'), false)
@@ -1926,11 +1949,11 @@ test('a record in a closed table is not read by the other tools either, and its 
   // Asked for by its sys_id, the table of application files is read without the rows of the closed table, so the
   // record is not found, and the answer says that rows were left out.
   const filtered = await connect(
-    [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_metadata_link,sys_script', rows: [] }, ...origin('sys_plugins', [], [], {}, [skip('Skipped')])],
+    [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_metadata_delete,sys_metadata_link,sys_script', rows: [] }, ...origin('sys_plugins', [], [], {}, [skip('Skipped')])],
     closed,
   )
   const answer = await filtered.answer('sn_origin', { sysId: ID })
-  assert.equal(filtered.sentTo('sys_metadata')[0].query, `sys_id=${ID}^sys_class_nameNOT INsys_metadata_link,sys_script^ORsys_class_nameISEMPTY`)
+  assert.equal(filtered.sentTo('sys_metadata')[0].query, `sys_id=${ID}^sys_class_nameNOT INsys_metadata_delete,sys_metadata_link,sys_script^ORsys_class_nameISEMPTY`)
   assert.equal(answer.record, null)
   assert.match(answer.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
   assert.doesNotMatch(JSON.stringify(answer), /Example rule/)
@@ -1940,7 +1963,7 @@ test('a record in a closed table is not read by the other tools either, and its 
 
   // A captured change gives the record away by its name. Found that way, nothing more is read of it.
   const traced = await connect(
-    [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_metadata_link,sys_script', rows: [] }, { table: 'sys_update_xml', query: `nameENDSWITH_${ID}`, rows: [{ name: NAME }] }, ...origin('sys_plugins', [change()], [], {}, [skip('Skipped')])],
+    [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_metadata_delete,sys_metadata_link,sys_script', rows: [] }, { table: 'sys_update_xml', query: `nameENDSWITH_${ID}`, rows: [{ name: NAME }] }, ...origin('sys_plugins', [change()], [], {}, [skip('Skipped')])],
     closed,
   )
   // The list of what an upgrade skipped names the record of a closed table by its file, not by its readable name.
@@ -2754,7 +2777,7 @@ test('a linked application file does not give away the record it links to', asyn
 
   // Read as rows of the parent table, nothing says which table the record is of. The parent answers without them.
   const parent = await closed.answer('sn_query', { table: 'sys_metadata', query: 'sys_nameSTARTSWITHA', fields: ['sys_name'] })
-  assert.equal(closed.sentTo('sys_metadata')[0].query, 'sys_nameSTARTSWITHA^sys_class_nameNOT INsys_metadata_link^ORsys_class_nameISEMPTY')
+  assert.equal(closed.sentTo('sys_metadata')[0].query, 'sys_nameSTARTSWITHA^sys_class_nameNOT INsys_metadata_delete,sys_metadata_link^ORsys_class_nameISEMPTY')
   assert.match(parent.warnings.join(' '), /were left out by a condition on sys_class_name/)
 
   // A reference into the table of application files can point to such a file, whose name is that of the record it
@@ -2768,6 +2791,27 @@ test('a linked application file does not give away the record it links to', asyn
   const shown = await reviewing.answer('sn_query', { table: 'u_review', fields: ['u_note', 'u_file'], displayValue: true })
   assert.deepEqual(shown.records, [{ u_note: 'x', u_file: ID }])
   assert.match(shown.warnings.join(' '), /were left out: u_file/)
+
+  // Measured: the entry for a deleted application file keeps the name and the update name of the record that was
+  // deleted. Its update name says which table that record was of.
+  const deleted = [
+    { sys_name: 'Abel Tuter', sys_update_name: `sys_user_${ID}`, sys_class_name: 'sys_metadata_delete' },
+    { sys_name: 'Example rule', sys_update_name: NAME, sys_class_name: 'sys_metadata_delete' },
+  ]
+  const entries: Route[] = [
+    { table: 'sys_db_object', exact: 'name=sys_metadata_delete', rows: [tableRow('sys_metadata_delete', 'Deleted Application File', 'sys_metadata')] },
+    { table: 'sys_dictionary', query: 'nameINsys_metadata_delete,sys_metadata', rows: [column('sys_metadata', 'sys_name'), column('sys_metadata', 'sys_update_name'), column('sys_metadata', 'sys_class_name', 'sys_class_name')] },
+    { table: 'sys_metadata_delete', rows: deleted },
+  ]
+  const gone = await connect([...entries, ...world], { tables: { allow: [], deny: ['sys_user'] } })
+  const kept = await gone.answer('sn_query', { table: 'sys_metadata_delete', fields: ['sys_name', 'sys_update_name'] })
+  assert.deepEqual(kept.records.map((row: Data) => row.sys_name), [WITHHELD, 'Example rule'])
+  // Asked for without the update name beside it, nothing says which record it was.
+  const bare = await gone.answer('sn_query', { table: 'sys_metadata_delete', fields: ['sys_name'] })
+  assert.doesNotMatch(JSON.stringify(bare.records), /Abel Tuter/)
+  assert.equal((await gone.call('sn_query', { table: 'sys_metadata_delete', query: 'sys_nameSTARTSWITHAbel' })).data.error, 'blocked')
+  const nothingClosed = await connect([...entries, ...world])
+  assert.deepEqual((await nothingClosed.answer('sn_query', { table: 'sys_metadata_delete', fields: ['sys_name'] })).records.map((row: Data) => row.sys_name), ['Abel Tuter', 'Example rule'])
 
   // Nothing is closed: the names stay, and the parent is read as it is.
   const open = await connect(world)

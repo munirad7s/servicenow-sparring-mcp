@@ -132,6 +132,10 @@ Also measured:
   `ORDERBY` on a reference sorts by the display value. Where the referenced table is closed on the machine that
   runs the server, the server therefore refuses a text comparison with the reference, and a sort by it.
 - A string is compared without regard to case: `category=Inquiry` finds `inquiry`.
+- An underscore in a value is an underscore, not "any one character" as in the pattern of a database:
+  `nameSTARTSWITHsys_` on the table of tables returned 2,294 names, all of which begin with `sys_`, where 154 more
+  begin with `sys` and another character. `nameLIKEs_a` returned 444 names, not the 1,505 a pattern would match,
+  and `nameENDSWITH_list` 23, not 37.
 - `ref_<child table>.<field>` on a parent table reaches a field of the child table.
 - `=` without a value is applied as "is empty", and `!=` without a value as "is not empty", on text, reference,
   number, date and boolean fields alike. `=NULL` and `!=NULL` mean the same: 717 of 771 users had no login time
@@ -217,6 +221,18 @@ Also measured:
 - A linked application file (`sys_metadata_link`) is named after the record it links to: its `sys_name`, a field
   it inherits from `sys_metadata`, is the display name of that record, and its payload is the whole record in a
   CDATA section. Of 92 on one instance, 16 linked to records of one table and carried their names.
+- The entry for a deleted application file (`sys_metadata_delete`) keeps the name and the update name of the
+  record that was deleted. One instance had 2,010 such entries; the update names of 400 of them began with 48
+  tables, none with `sys_metadata_delete`.
+- Three kinds of records are captured under a name that begins with another word than their table: the choices
+  of a field as `sys_choice_<table>_<field>`, a record of `sys_choice_set`; the related lists of a form as
+  `sys_ui_related_<table>_<view>`, a record of `sys_ui_related_list`; and a version of a workflow under the name
+  of the workflow, `wf_workflow_<sys_id>`, a record of `wf_workflow_version`. Measured over 6,631 captured
+  changes, whose payload names the table of the record, and over the application files of 1,998 classes. Where
+  tables are closed, the server takes a name of such a beginning for a record of those tables as well. An
+  instance can have more rules of this kind than this one had records of.
+- Update names have few beginnings a table could be named by. Of 76,000 names (captured changes, versions and
+  application files) none had more than fifteen, and the most a page of two hundred had between them was 433.
 - What a field shows beside its stored value depends on its kind. Of the 167 kinds of fields of one instance, 35
   showed something else for at least one row: a reference, a list and an attachment field the name of a record;
   a condition a sentence with the names behind its sys_ids; a choice, a class and a stage their label; dates,

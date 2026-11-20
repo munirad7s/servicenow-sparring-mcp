@@ -192,9 +192,14 @@ provider, the data leaves your network. Five things limit what can go that way:
     as the instance compares it, and a table the deny list names counts whether or not the instance still has
     it. Mostly a name is `<table>_<sys_id>`, but what stands before a sys_id is taken for the table only where
     the instance has a table of that name: measured, `sys_ui_form_sections_<sys_id>` is a record of
-    `sys_ui_form`. A linked application file is a copy of a record of another table: read from its own table the
-    row says which, read as a row of `sys_metadata` it does not, so that table answers without those rows. A
-    text search is refused on a table that holds such names, and on one that points to it.
+    `sys_ui_form`. Three kinds of records are captured under a name that begins with another word than their
+    table, and the server knows those: the choices of a field (`sys_choice_set`), the related lists of a form
+    (`sys_ui_related_list`) and the versions of a workflow (`wf_workflow_version`). They were found on one
+    instance; another can have more, and closing such a table then does not keep the names of its captured
+    changes back. A linked application file is a copy of a record of another table: read from its own table the
+    row says which, read as a row of `sys_metadata` it does not, so that table answers without those rows. The
+    entry for a deleted application file keeps the name of the record that was deleted and is treated the same
+    way. A text search is refused on a table that holds such names, and on one that points to it.
   - The text of comments and work notes is rows of `sys_journal_field`: it is left out where that table is closed.
   - The server's own look-ups follow the same rules. Five tables are read without them, because the rules are
     decided from them: `sys_db_object`, `sys_db_view`, `sys_db_view_table`, `sys_dictionary` and, for the parts

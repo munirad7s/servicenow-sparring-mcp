@@ -48,10 +48,11 @@ const SHOWS_ITSELF = new Set(
 /**
  * Tables whose rows are copies of records of other tables, by the parent they are rows of. Measured: a linked
  * application file (sys_metadata_link) carries the name of the record it links to as its own name, and the record
- * as its payload. Read from its own table, the row says which table that record is of. Read as a row of the
- * parent it does not, so while tables are closed the parent answers without these rows.
+ * as its payload; the entry for a deleted application file (sys_metadata_delete) keeps the name of the record that
+ * was deleted. Read from its own table, the row is judged by what says which table that record is of. Read as a
+ * row of the parent it is not, so while tables are closed the parent answers without these rows.
  */
-const COPIES_BELOW: Record<string, string[]> = { sys_metadata: ['sys_metadata_link'] }
+const COPIES_BELOW: Record<string, string[]> = { sys_metadata: ['sys_metadata_delete', 'sys_metadata_link'] }
 
 /**
  * As long as a query may be once it is written into the address of a request. Measured: an instance took an
