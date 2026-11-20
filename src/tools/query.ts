@@ -214,9 +214,21 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     // The label of a group is the name behind a reference. The client leaves it out where that name could be the name
     // of a record in a closed table, and the answer says so.
     const counted = await ctx.sn.groupCountSent(table, groupBy, guard.query, true)
-    const groups = counted.groups.sort((a, b) => b.count - a.count)
-    const shown = groups.slice(offset, offset + limit)
+    // Groups of the same size in the order of their values: each page is asked for anew, and the instance promises
+    // no order among equals, so a group could come twice or not at all.
+    const groups = counted.groups.sort((a, b) => b.count - a.count || (a.value < b.value ? -1 : a.value > b.value ? 1 : 0))
     const warnings = [...guard.warnings]
+    // A value to count by is text from a record like any other: what looks like a secret in it is taken out, and
+    // long values are cut.
+    let inText = 0
+    const cleaned = groups.slice(offset, offset + limit).map((group) => {
+      const value = scrubSecrets(group.value)
+      const display = group.display === undefined ? null : scrubSecrets(group.display)
+      inText += value.withheld + (display?.withheld ?? 0)
+      return { ...group, value: value.text, ...(display ? { display: display.text } : {}) }
+    })
+    if (inText) warnings.push(`${inText} value(s) inside a text were withheld: the name of the element suggests a secret.`)
+    const shown = clip(cleaned, warnings)
     if (column?.type === 'glide_list') {
       warnings.push(`"${groupBy}" is a list. It is counted by its whole content: a row with "a,b" and a row with "a" are two groups. This does not say how often each entry occurs.`)
     }

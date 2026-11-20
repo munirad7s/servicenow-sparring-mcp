@@ -142,13 +142,14 @@ provider, the data leaves your network. Five things limit what can go that way:
   - A closed table is not asked for, and it is not reached through a dot-walk or a database view. `sn_schema`
     and `sn_dependencies` do not describe it either.
   - A child table of a closed table is closed too, because its rows are rows of that table, and so is a child of
-    that child, under whatever name. The server asks the instance once which tables are below the closed ones,
-    eight levels down, and sends nothing where it cannot establish that list. With `SERVICENOW_TABLE_ALLOW` this
+    that child, under whatever name. The server asks the instance which tables are below the closed ones,
+    however deep, and sends nothing where it cannot establish that list. With `SERVICENOW_TABLE_ALLOW` this
     means: a table on the list is closed all the same if a table between it and the one you query is not on it.
   - What the instance lists neither as a table nor as a database view counts as closed, and so does a database
     view that joins another view: nothing says whose rows it holds.
   - A parent table answers without the rows of its closed child tables. The same holds where a query walks a
-    reference into such a parent, or reads it through a database view.
+    reference into such a parent, or reads it through a database view. A view is first asked a question that has
+    to match nothing; where it matches, the instance does not apply the condition there, and the view is not read.
   - The name behind a reference is left out where the record can be a row of a closed table: the reference points
     into one, or into a table that has one below it, or it cannot be told where it points. This goes for single
     references, lists and the labels of counted groups. Such a reference can be compared with a sys_id, but not
@@ -165,10 +166,18 @@ provider, the data leaves your network. Five things limit what can go that way:
 
   A closed table is reported as "could not be checked".
 
-  What closing a table does not cover: a plain text field that happens to carry something from it, such as the
-  user name in `sys_created_by` or the author in the text of a journal entry; and tables that record the content
-  of others, such as `sys_audit`, `sys_history_line`, `sys_journal_field` and `live_profile`. Close those as well
-  if they matter.
+  What is closed is the rows of a table and the names of its records. Closing a table does not cover:
+
+  - **How the table is built.** Its fields, labels and choices are records of `sys_dictionary`,
+    `sys_documentation` and `sys_choice`, and the rules on it are records of `sys_script` and the like.
+    `sn_schema` and `sn_dependencies` refuse a closed table, but a query on those tables answers.
+  - **That a record of an open table points to a closed one.** The sys_id stays in the row and can be counted
+    by; the name behind it is left out. The same goes for the update name of a captured change
+    (`<table>_<sys_id>`): it says that a record was changed, not what the record holds.
+  - **Text that happens to carry something from it,** such as the user name in `sys_created_by` or the author in
+    the text of a journal entry.
+  - **Tables that record the content of others,** such as `sys_audit`, `sys_history_line`, `sys_journal_field`
+    and `live_profile`. Close those as well if they matter.
 
 Record content that comes back (names, descriptions, scripts, error texts) is data from the instance. The server
 tells the agent to treat it as data, never as an instruction, and it cuts long values. It cannot make an agent obey.

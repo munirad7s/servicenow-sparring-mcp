@@ -786,11 +786,25 @@ test('a database view that joins a parent table leaves out the rows of its close
     { table: 'sys_db_view_table', rows: [{ table: 'task', variable_prefix: 'tsk' }, { table: 'task_sla', variable_prefix: 'sla' }] },
     { table: 'task_with_sla', rows: [{ tsk_number: 'TASK1' }] },
   ]
+  // The question that has to match nothing: the class empty and filled at once.
+  const PROBE = 'tsk_sys_class_nameISEMPTY^tsk_sys_class_nameISNOTEMPTY'
+  const applied: Route = { table: 'task_with_sla', exact: PROBE, rows: [] }
   const below = closedTables(tableRow('incident', 'Incident', 'task'))
-  const { answer, sentTo } = await connect(familyWorld([below, ...view]), { tables: { allow: [], deny: ['incident'] } })
+  const { answer, sentTo } = await connect(familyWorld([below, applied, ...view]), { tables: { allow: [], deny: ['incident'] } })
   const data = await answer('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
-  assert.equal(sentTo('task_with_sla')[0].query, 'tsk_sys_class_nameNOT INincident^ORtsk_sys_class_nameISEMPTY')
+  assert.deepEqual(sentTo('task_with_sla').map((sent) => sent.query), [PROBE, 'tsk_sys_class_nameNOT INincident^ORtsk_sys_class_nameISEMPTY'])
   assert.match(data.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
+  // Asked once per view, not with every query.
+  await answer('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
+  assert.equal(sentTo('task_with_sla').filter((sent) => sent.query === PROBE).length, 1)
+
+  // A view can list the fields it shows. Where the instance drops a condition on the class, the question matches
+  // rows, and then nothing is read: the rows of the closed table could not be left out.
+  const dropping = await connect(familyWorld([below, ...view]), { tables: { allow: [], deny: ['incident'] } })
+  const dropped = await dropping.call('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
+  assert.equal(dropped.data.error, 'blocked')
+  assert.match(dropped.data.message, /could not be established that the instance applies a condition on "tsk_sys_class_name"/)
+  assert.deepEqual(dropping.sentTo('task_with_sla').map((sent) => sent.query), [PROBE])
 
   // A view that joins another view is not followed one level down, so whose rows it holds is not established.
   const nested: Route[] = [
@@ -954,6 +968,17 @@ test('a text search is not a way to probe a field that holds a secret', async ()
   const byName = await connect([...untyped, { table: 'sys_user', rows: [{ name: 'Abel' }] }])
   assert.match((await byName.call('sn_query', { table: 'sys_user', query: '123TEXTQUERY321=hash', fields: ['name'] })).data.message, /fields that hold secrets \(user_password\)/)
 
+  // The table of properties is held to the same checks. Leaving out the properties of a password type covers
+  // their values, not a field of the table that cannot be read or that points into a closed table.
+  const properties = (fields: Route): Route[] => [{ table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] }, fields, ...dictionaryRoutes, { table: 'sys_properties', rows: [{ name: 'glide.war' }] }]
+  const noFields = await connect(properties({ table: 'sys_dictionary', query: 'nameINsys_properties', status: 403 }))
+  assert.match((await noFields.call('sn_query', { table: 'sys_properties', query: '123TEXTQUERY321=zurich' })).data.message, /could not be read completely/)
+  assert.equal(noFields.sentTo('sys_properties').length, 0)
+  const owned = { table: 'sys_dictionary', query: 'nameINsys_properties', rows: [column('sys_properties', 'name'), column('sys_properties', 'value'), column('sys_properties', 'type'), column('sys_properties', 'u_owner', 'reference', 'sys_user')] }
+  const pointing = await connect(properties(owned), { tables: { allow: [], deny: ['sys_user'] } })
+  assert.match((await pointing.call('sn_query', { table: 'sys_properties', query: '123TEXTQUERY321=Abel' })).data.message, /"u_owner" points into a table that is closed/)
+  assert.equal(pointing.sentTo('sys_properties').length, 0)
+
   // Measured: a text search finds a record by the name behind one of its references. With the table of those records
   // closed, it would be a way to try out their names.
   const closed = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }], { tables: { allow: [], deny: ['sys_user'] } })
@@ -1006,6 +1031,20 @@ test('a record in a closed table is not read by the other tools either, and its 
   assert.equal(answer.record, null)
   assert.match(answer.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
   assert.doesNotMatch(JSON.stringify(answer), /Example rule/)
+  // Not "no such record": it can be one of the rows that were left out.
+  assert.equal(answer.verdict, 'unknown')
+  assert.match(answer.warnings.join(' '), /Application files of tables that are closed on this machine were left out of the look-up/)
+
+  // A captured change gives the record away by its name. Found that way, nothing more is read of it.
+  const traced = await connect(
+    [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_script', rows: [] }, { table: 'sys_update_xml', query: `nameENDSWITH_${ID}`, rows: [{ name: NAME }] }, ...origin('sys_plugins', [change()], [], {}, [skip('Skipped')])],
+    closed,
+  )
+  const stopped = await traced.call('sn_origin', { sysId: ID })
+  assert.equal(stopped.data.error, 'blocked')
+  assert.match(stopped.data.message, /This sys_id stands for a record in a table that is closed on this machine/)
+  assert.equal(traced.sentTo('sys_update_version').length + traced.sentTo('upgrade_history_task').length, 0)
+  assert.deepEqual(traced.sentTo('sys_update_xml').map((sent) => sent.query), [`nameENDSWITH_${ID}^ORDERBYDESCsys_updated_on`])
 })
 
 test('a field of an encrypted type is withheld and cannot be compared', async () => {
@@ -1119,6 +1158,67 @@ test('a name where a reference needs a sys_id is refused when it is to be left o
   const hidden = await connect([{ table: 'sys_user', status: 403 }, ...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
   const unsure = await hidden.answer('sn_query', { table: 'incident', query: 'assigned_to!=Abel Tuter', fields: ['number'] })
   assert.match(unsure.warnings.join(' '), /"Abel Tuter" does not look like one, and it could not be checked whether a record has it/)
+
+  // Every value of a list is looked at, however many there are: one request for all, and the one that is no record is named.
+  const many = await connect([
+    { table: 'sys_user', exact: 'sys_idINglobal,admin,guest,Bad Name', rows: [{ sys_id: 'global' }, { sys_id: 'admin' }, { sys_id: 'guest' }] },
+    { table: 'sys_user', exact: 'sys_id=Bad Name', rows: [] },
+    ...dictionaryRoutes,
+    { table: 'incident', rows: [{ number: 'INC1' }] },
+  ])
+  const fourth = await many.call('sn_query', { table: 'incident', query: 'assigned_toNOT INglobal, admin,guest,Bad Name', fields: ['number'] })
+  assert.equal(fourth.data.error, 'validation')
+  assert.match(fourth.data.message, /no record there has the sys_id "Bad Name"/)
+  assert.equal(many.sentTo('incident').length, 0)
+  assert.equal(many.sentTo('sys_user').length, 2)
+
+  // Rows of the referenced table are closed on this machine, and left out of every answer about it. A look-up would
+  // say "no such record" of one that is there, so none is made, and the answer says so.
+  const partly = await connect(familyWorld([closedTables(tableRow('customer_contact', 'Contact', 'sys_user')), { table: 'incident', rows: [{ number: 'INC1' }] }]), { tables: { allow: [], deny: ['customer_contact'] } })
+  const kept = await partly.answer('sn_query', { table: 'incident', query: 'caller_id!=vip_contact_1', fields: ['number'] })
+  assert.match(kept.warnings.join(' '), /"vip_contact_1" does not look like one, and it was not looked up, because rows of that table are closed on this machine/)
+  assert.equal(partly.sentTo('sys_user').length, 0)
+})
+
+test('"is empty" covers an "is not" only where the two are joined with ^OR', async () => {
+  const { answer } = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  const note = /leaves out rows where the field is empty \(assigned_to\)/
+  // Joined with ^OR, the empty rows are asked for. In another part of the query they are not: the note stays.
+  assert.doesNotMatch((await answer('sn_query', { table: 'incident', query: `assigned_to!=${ID}^ORassigned_toISEMPTY`, fields: ['number'] })).warnings.join(' '), note)
+  assert.match((await answer('sn_query', { table: 'incident', query: `assigned_to!=${ID}^NQassigned_toISEMPTY`, fields: ['number'] })).warnings.join(' '), note)
+  assert.match((await answer('sn_query', { table: 'incident', query: `assigned_to!=${ID}^active=true^ORassigned_toISEMPTY`, fields: ['number'] })).warnings.join(' '), note)
+})
+
+test('groups of the same size keep their order from page to page, and a secret in a value is taken out', async () => {
+  const groups = stats('incident', { zebra: 2, apple: 2, mango: 5, '{"api_key":"sk-live-123"}': 2 }, undefined, 'short_description')
+  const { answer } = await connect([groups, ...dictionaryRoutes])
+  const first = await answer('sn_query', { table: 'incident', groupBy: 'short_description', limit: 2 })
+  const second = await answer('sn_query', { table: 'incident', groupBy: 'short_description', limit: 2, offset: 2 })
+  assert.deepEqual([...first.groups, ...second.groups].map((group: Data) => group.value), ['mango', 'apple', 'zebra', '{"api_key":"[withheld]"}'])
+  assert.match(second.warnings.join(' '), /1 value\(s\) inside a text were withheld/)
+  assert.equal(first.nextOffset, 2)
+})
+
+test('a login the instance rejects is reported as that, also while tables are closed', async () => {
+  // Not being able to log in is not a closed table: no function turns it into "blocked".
+  // With a deny list the first thing asked is which tables it closes, with a list of the only open tables what the
+  // table itself is: both ways the rejected login has to come through as it is.
+  for (const tables of [{ allow: [], deny: ['sys_user'] }, { allow: ['incident', 'task', 'sys_*', 'upgrade_history_task'], deny: [] }]) {
+    const { call } = await connect([{ table: 'sys_db_object', status: 401 }], { tables })
+    for (const [tool, args] of [['sn_query', { table: 'incident', fields: ['number'] }], ['sn_schema', { table: 'incident' }], ['sn_instance', {}], ['sn_origin', { updateName: NAME }]] as const) {
+      const { data, isError } = await call(tool, args)
+      assert.equal(isError, true, tool)
+      assert.equal(data.error, 'auth', `${tool} with ${JSON.stringify(tables)}: ${data.message}`)
+    }
+  }
+})
+
+test('a day that does not exist is not sent as a date', async () => {
+  const { call, calls } = await connect([])
+  const { data } = await call('sn_delta', { since: '2026-02-31' })
+  assert.equal(data.error, 'validation')
+  assert.match(data.message, /"since" is not a day that exists/)
+  assert.equal(calls.length, 0)
 })
 
 test('a word on a choice that stores numbers is refused with the list of its values', async () => {
@@ -1330,6 +1430,16 @@ test('secrets are taken out of a text that carries a record', () => {
   assert.equal(scrubSecrets('var x = gs.getProperty("glide.smtp.password");').withheld, 0)
 })
 
+test('a secret is found in JSON inside a JSON string, and behind a type written as CDATA', () => {
+  // The inner text has escapes of its own: "=" as =, "/" as \/, a quote as \".
+  const nested = scrubSecrets(String.raw`{"cfg":"{\"api_key\":\"abc\\u003ddef\",\"name\":\"x\"}"}`)
+  assert.equal(nested.text, String.raw`{"cfg":"{\"api_key\":\"[withheld]\",\"name\":\"x\"}"}`)
+  assert.equal(scrubSecrets(String.raw`{"cfg":"{\"token\":\"a\\/b\\\"c\"}"}`).text, String.raw`{"cfg":"{\"token\":\"[withheld]\"}"}`)
+  const cdata = scrubSecrets('<sys_properties><name>glide.smtp.setting</name><type><![CDATA[password2]]></type><value>topsecret</value></sys_properties>')
+  assert.equal(cdata.withheld, 1)
+  assert.match(cdata.text, /<value>\[withheld\]<\/value>/)
+})
+
 test('the tables of the records a payload carries are all found', () => {
   assert.deepEqual(payloadTables('<record_update table="sys_user" data-action="x"><sys_user action="INSERT_OR_UPDATE"><name>A</name></sys_user></record_update>'), ['sys_user'])
   assert.deepEqual(payloadTables("<record_update><sys_metadata_link action=\"INSERT_OR_UPDATE\"/><sys_user action='DELETE'>x</sys_user></record_update>"), ['sys_metadata_link', 'sys_user'])
@@ -1338,6 +1448,11 @@ test('the tables of the records a payload carries are all found', () => {
   assert.deepEqual(payloadTables('no record in here'), [])
   // Measured: a deleted record is kept as XML under the name of its table, without a wrapper and without an action.
   assert.deepEqual(payloadTables('<?xml version="1.0" encoding="UTF-8"?><sys_user><name>Abel Tuter</name><sys_id>1</sys_id></sys_user>'), ['sys_user'])
+  // What stands directly inside a wrapper is a record, whether it says what was done to it or not.
+  assert.deepEqual(payloadTables('<record_update table="sys_metadata_link"><sys_user><name>x</name></sys_user></record_update>').sort(), ['sys_metadata_link', 'sys_user'])
+  assert.deepEqual(payloadTables('<?xml version="1.0"?><unload unload_date="2026-11-20 00:00:00"><incident><number>INC1</number></incident><sys_user/></unload>').sort(), ['incident', 'sys_user'])
+  // Deeper down it is a field, also where it is called like a table. Text in CDATA is no element, and a ">" in an attribute ends none.
+  assert.deepEqual(payloadTables('<record_update><incident action="INSERT_OR_UPDATE"><x a="1>2"/><task>abc</task><note><![CDATA[</incident><sys_user>]]></note></incident></record_update>'), ['incident'])
 })
 
 test('the payload of a captured change is passed on without its secrets, and cannot be searched', async () => {
@@ -1916,6 +2031,31 @@ test('sn_origin: a record that was deleted once and made again is not called del
 
   const gone = await connect([{ table: 'sys_metadata', rows: [] }, { table: 'sys_update_xml', rows: [...rows].reverse() }, { table: 'sys_update_version', rows: [] }])
   assert.equal((await gone.answer('sn_origin', { updateName: name })).verdict, 'deleted_here')
+
+  // Without a total from the instance, a newer change that is hidden cannot be ruled out, so "deleted" is not said.
+  const blind = await connect([{ table: 'sys_metadata', rows: [] }, { table: 'sys_update_xml', rows: [...rows].reverse(), noTotal: true }, { table: 'sys_update_version', rows: [] }])
+  const unsure = await blind.answer('sn_origin', { updateName: name })
+  assert.equal(unsure.verdict, 'unknown')
+  assert.match(unsure.warnings.join(' '), /newest captured change in view is a delete, but a newer one that is hidden from this account could not be ruled out/)
+})
+
+test('sn_origin: where the table of application files gives no total, the record is still read as an application file', async () => {
+  // "No rows" without a total is not "no such file". Read from its own table, the record brings its package along.
+  const routes: Route[] = [
+    { table: 'sys_metadata', rows: [], noTotal: true },
+    { table: 'sys_db_object', query: 'name=sys_script', rows: [tableRow('sys_script', 'Business Rule', 'sys_metadata')] },
+    { table: 'sys_dictionary', query: 'nameINsys_script,sys_metadata', rows: [column('sys_metadata', 'sys_package', 'reference', 'sys_package'), column('sys_script', 'name')] },
+    { table: 'sys_script', rows: [file('sys_plugins')] },
+    { table: 'sys_update_xml', rows: [change()] },
+    { table: 'sys_update_version', rows: [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')] },
+    stats('sys_update_version', { sys_update_set: 1 }),
+    { table: 'upgrade_history_task', query: 'upgrade_detail.file_name=', rows: [] },
+  ]
+  const { answer, sentTo } = await connect(routes)
+  const data = await answer('sn_origin', { updateName: NAME })
+  assert.ok(sentTo('sys_script')[0].params.get('sysparm_fields')!.split(',').includes('sys_package'))
+  // A record of a platform package that was changed here, not one that was created here.
+  assert.deepEqual({ provenance: data.provenance, verdict: data.verdict }, { provenance: 'vendor', verdict: 'customized' })
 })
 
 test('sn_origin finds the current version among many, and does not vouch for a source it does not know', async () => {
@@ -2619,7 +2759,17 @@ test('sn_upgrade_skips says who captured the changes to each skipped record, and
   await answer('sn_upgrade_skips', { excludeErrors: true })
   assert.equal(sentTo('upgrade_history_task').at(-1)!.query, `upgrade_detail.upgrade_history=${UP.family}^upgrade_detail.dispositionIN4,10^ORDERBYDESCsys_created_on`)
   await answer('sn_upgrade_skips', { excludeErrors: true, onlySkipped: false })
-  assert.equal(sentTo('upgrade_history_task').at(-1)!.query, `upgrade_detail.upgrade_history=${UP.family}^upgrade_detail.dispositionNOT IN9^ORDERBYDESCsys_created_on`)
+  // Measured: "NOT IN" leaves out the rows where the field is empty. An entry without a disposition is no failure.
+  assert.equal(sentTo('upgrade_history_task').at(-1)!.query, `upgrade_detail.upgrade_history=${UP.family}^upgrade_detail.dispositionNOT IN9^ORupgrade_detail.dispositionISEMPTY^ORDERBYDESCsys_created_on`)
+  // Where the instance does not list its codes, a built-in list says what a failure is, and the answer says so.
+  const noCodes = await connect(routes.filter((route) => route.table !== 'sys_choice'))
+  assert.match((await noCodes.answer('sn_upgrade_skips', { excludeErrors: true, onlySkipped: false })).warnings.join(' '), /built-in list was used to find the files an upgrade could not apply/)
+  // Every "skipped" a failure: then the two inputs together ask for nothing, and that is said instead of sent.
+  const onlyFailures = await connect([{ table: 'sys_choice', query: 'element=disposition', rows: [{ value: '9', label: 'Skipped Error' }, { value: '2', label: 'Updated' }] }, ...routes])
+  const nothing = await onlyFailures.call('sn_upgrade_skips', { excludeErrors: true })
+  assert.equal(nothing.data.error, 'validation')
+  assert.match(nothing.data.message, /leaves nothing to ask for/)
+  assert.equal(onlyFailures.sentTo('upgrade_history_task').length, 0)
 
   // Where the captured changes cannot be read, the entries carry no answer to "who", and the answer says so.
   const blind = await connect([{ table: 'sys_update_xml', api: 'stats', status: 403 }, ...routes.filter((route) => route.table !== 'sys_update_xml')])

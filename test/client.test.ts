@@ -2,8 +2,9 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ServiceNowClient, type AuditEntry } from '../src/client.js'
 import { ServiceNowError } from '../src/errors.js'
+import { createContext } from '../src/server.js'
 import { traced } from '../src/trace.js'
-import { config, fakeInstance } from './fake.js'
+import { config, dictionaryRoutes, fakeInstance } from './fake.js'
 
 const failure = async (run: () => Promise<unknown>): Promise<ServiceNowError> => {
   try {
@@ -400,6 +401,18 @@ test('every request is written to the audit log with the tool that asked, and no
   const odd = new ServiceNowClient(config, async () => json({ result: { a: 1 } }), { audit: (entry) => entries.push(entry) })
   await kindOf(() => odd.query({ table: 'incident' }))
   assert.equal(entries.pop()?.status, 'invalid_response')
+
+  // A request the rules for closed tables refuse names an open table. It is logged all the same, as it was asked.
+  const refused: AuditEntry[] = []
+  const gated = fakeInstance(dictionaryRoutes, { tables: { allow: [], deny: ['sys_user'] } }, (entry) => refused.push(entry))
+  createContext(gated.sn)
+  assert.equal(await kindOf(() => gated.sn.query({ table: 'incident', query: 'caller_id.name=x', fields: ['number'] })), 'blocked')
+  assert.equal(await kindOf(() => gated.sn.groupCount('incident', 'caller_id.name')), 'blocked')
+  assert.deepEqual(
+    refused.filter((entry) => entry.table === 'incident').map((entry) => `${entry.api} ${entry.query || '-'} ${entry.fields}: ${entry.status}, sent ${entry.sent}`),
+    ['table caller_id.name=x number: blocked, sent 0', 'stats - caller_id.name: blocked, sent 0'],
+  )
+  assert.equal(gated.calls.filter((call) => call.table === 'incident').length, 0)
 
   assert.equal(entries.length, 2)
   assert.deepEqual({ ...entries[0], time: '', ms: 0 }, { time: '', tool: 'sn_query', api: 'table', table: 'incident', query: 'active=true', fields: null, status: 200, sent: 1, rows: 1, total: 9, ms: 0 })

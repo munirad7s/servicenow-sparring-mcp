@@ -145,6 +145,18 @@ Also measured:
 - `^NQ` works in the Aggregate API as in the Table API: the groups of a query with two parts added up to the
   3,619 rows the Table API counted, not to the sum of the parts.
 - A condition written behind an `ORDERBY` is applied.
+- `^OR` binds to the condition before it, tighter than `^`, in the Table API and in the Aggregate API alike. Of 82
+  incidents, 10 were inactive with priority 1 and 4 had priority 2, all of them active:
+  `active=false^priority=1^ORpriority=2` matched 10 in both, not 14, and so did the same conditions in another
+  order. The conditions the server adds to a query rest on this.
+- Tables go deep. Of the 10,806 tables of one instance, 5 have a parent eight levels up and none has one nine
+  levels up. The server reads eight levels in one request and asks again for what is below a table it finds at
+  the eighth.
+- A database view can list the fields it shows of a table (104 of 558 views do). A condition on the class of a
+  joined table, `<prefix>_sys_class_name`, was applied on views whose list leaves that field out: a view of 44
+  rows, 7 of them incidents, answered with 37 where incidents were left out. The server does not rely on it. Before
+  it leaves rows out of a view this way, it asks the view for rows whose class is empty and filled at once, which
+  has to match nothing.
 - A journal field comes back empty unless display values are asked for: the stored value of `work_notes` had
   length 0 where its display value had 1,020 characters. The entries are rows of `sys_journal_field`. The server
   says so when such a field is read without `displayValue`.

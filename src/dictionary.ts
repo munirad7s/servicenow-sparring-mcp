@@ -1,5 +1,5 @@
 import type { Page, QueryOptions, Row, ServiceNowClient } from './client.js'
-import { ServiceNowError } from './errors.js'
+import { noConnection, ServiceNowError, unusableAnswer } from './errors.js'
 import { assertTableName, isTableName } from './query.js'
 
 export interface Column {
@@ -241,6 +241,7 @@ export class Dictionary {
     try {
       for (const member of (await this.table(table))?.members ?? []) check.reached.add(member.table)
     } catch (error) {
+      if (noConnection(error)) throw error
       unavailable(`the dictionary could not be read (${error instanceof ServiceNowError ? error.kind : 'unknown'})`)
     }
 
@@ -253,13 +254,13 @@ export class Dictionary {
           const last = index === segments.length - 1
 
           if (!last && segment.startsWith('ref_') && isTableName(segment.slice(4))) {
-            const child = await this.table(segment.slice(4))
             // Measured: the instance also takes "ref_<the table itself>.". That is no way around a check made on the
-            // plain name, so it is refused here, whatever else can or cannot be read of the dictionary.
-            if (child && child.name === current) {
+            // plain name, so it is refused by the name alone, before anything is read of the dictionary.
+            if (segment.slice(4) === current) {
               check.unknown.push({ field: path, table: current, segment, reason: `"${segment}." names the table itself: write the field without it`, suggestions: [] })
               break
             }
+            const child = await this.table(segment.slice(4))
             if (child && child.chain.includes(current)) {
               current = child.name
               check.reached.add(current)
@@ -298,6 +299,7 @@ export class Dictionary {
           }
         }
       } catch (error) {
+        if (noConnection(error)) throw error
         unavailable(`the dictionary could not be read (${error instanceof ServiceNowError ? error.kind : 'unknown'})`)
       }
     }
@@ -342,7 +344,10 @@ export class Dictionary {
   /**
    * Every table the deny list of this machine closes, each with its parents: the tables it names, the tables its
    * patterns match, and the child tables of all of them, whatever they are called. A child table holds rows of its
-   * parent, so a query on a grandparent answers with them. Looks eight levels down. Empty without a deny list.
+   * parent, so a query on a grandparent answers with them. Empty without a deny list.
+   *
+   * One request sees eight levels down. Measured on one instance of 10,806 tables: 5 have a parent eight levels up,
+   * none nine. Where a table is found at the eighth level, the tables below it are asked for in turn.
    *
    * Fails if the list cannot be trusted: a table missing from it would not be kept out. The query asks for the row
    * of sys_db_object itself as well. Where that row does not come back, the instance did not apply the query as
@@ -357,32 +362,65 @@ export class Dictionary {
       const SENTINEL = 'sys_db_object'
       const untrusted = (why: string) =>
         new ServiceNowError(`Tables are closed on this machine, and the list of their child tables could not be established (${why}). Nothing was sent.`, 'blocked', SENTINEL)
-      // A long deny list is asked for in several requests, so that no query grows beyond what a URL carries: the
-      // names in groups, and the conditions in as many queries as it takes.
-      const groups: string[][] = []
-      for (let at = 0; at < names.length; at += 40) groups.push(names.slice(at, at + 40))
-      const terms = ['name', ...PARENT_FIELDS].flatMap((path) => [...groups.map((group) => `${path}IN${group.join(',')}`), ...wanted.map((prefix) => `${path}STARTSWITH${prefix}`)])
-      const queries: string[][] = [[]]
-      for (const term of terms) {
-        if (queries.at(-1)!.join('^OR').length + term.length > 2_500 && queries.at(-1)!.length) queries.push([])
-        queries.at(-1)!.push(term)
+      const closed = new Map<string, string[]>()
+
+      /**
+       * The tables that carry one of these names, or match one of these patterns, at their own name or at one of
+       * eight parents. Returns those found with the name at the eighth parent: what is below them was out of sight.
+       */
+      const read = async (given: string[], patterns: string[], counts: (name: string) => boolean): Promise<string[]> => {
+        // A long list is asked for in several requests, so that no query grows beyond what a URL carries: the
+        // names in groups, and the conditions in as many queries as it takes.
+        const groups: string[][] = []
+        for (let at = 0; at < given.length; at += 40) groups.push(given.slice(at, at + 40))
+        const terms = ['name', ...PARENT_FIELDS].flatMap((path) => [...groups.map((group) => `${path}IN${group.join(',')}`), ...patterns.map((prefix) => `${path}STARTSWITH${prefix}`)])
+        const queries: string[][] = [[]]
+        for (const term of terms) {
+          if (queries.at(-1)!.join('^OR').length + term.length > 2_500 && queries.at(-1)!.length) queries.push([])
+          queries.at(-1)!.push(term)
+        }
+
+        const deepest = new Set<string>()
+        for (const part of queries) {
+          const query = `${part.join('^OR')}^ORname=${SENTINEL}`
+          const { records, total, complete } = await this.sn.all<Record<string, string>>({ table: SENTINEL, query, fields: ['name', ...PARENT_FIELDS] }, 2_000).catch((error) => {
+            if (noConnection(error)) throw error
+            throw untrusted(`sys_db_object could not be read: ${error instanceof ServiceNowError ? error.kind : 'unknown'}`)
+          })
+          if (!complete || (total !== null && records.length < total)) throw untrusted('sys_db_object could not be read completely')
+          if (!records.some((row) => row.name === SENTINEL)) throw untrusted('the instance did not answer the query as written')
+          for (const row of records) {
+            const chain = [row.name, ...PARENT_FIELDS.map((field) => row[field])].filter((name): name is string => typeof name === 'string' && name !== '')
+            const at = chain.findIndex(counts)
+            if (at >= 0) {
+              if (!closed.has(row.name)) closed.set(row.name, chain)
+              if (at === PARENT_DEPTH) deepest.add(row.name)
+            } else if (row.name !== SENTINEL) throw untrusted('the instance ignored the conditions of the query')
+          }
+        }
+        return [...deepest]
       }
 
-      const closed = new Map<string, string[]>()
       const isClosed = (name: string) => names.includes(name) || wanted.some((prefix) => name.startsWith(prefix))
-      for (const part of queries) {
-        const query = `${part.join('^OR')}^ORname=${SENTINEL}`
-        const { records, total, complete } = await this.sn.all<Record<string, string>>({ table: SENTINEL, query, fields: ['name', ...PARENT_FIELDS] }, 2_000).catch((error) => {
-          throw untrusted(`sys_db_object could not be read: ${error instanceof ServiceNowError ? error.kind : 'unknown'}`)
-        })
-        if (!complete || (total !== null && records.length < total)) throw untrusted('sys_db_object could not be read completely')
-        if (!records.some((row) => row.name === SENTINEL)) throw untrusted('the instance did not answer the query as written')
-        for (const row of records) {
-          const chain = [row.name, ...PARENT_FIELDS.map((field) => row[field])].filter((name): name is string => typeof name === 'string' && name !== '')
-          if (chain.some(isClosed)) closed.set(row.name, chain)
-          else if (row.name !== SENTINEL) throw untrusted('the instance ignored the conditions of the query')
-        }
+      let deepest = await read(names, wanted, isClosed)
+      for (let round = 1; deepest.length; round++) {
+        if (round * PARENT_DEPTH >= MAX_CHAIN) throw untrusted('the tables below the closed ones go deeper than this server follows')
+        const above = new Set(deepest)
+        deepest = await read(deepest, [], (name) => above.has(name))
       }
+
+      // A chain as read ends at the eighth parent. Where it is that long, the table at its end may have parents too,
+      // and a query on one of those answers with the rows of this table as well.
+      for (const chain of closed.values()) {
+        if (chain.length <= PARENT_DEPTH) continue
+        const top = await this.table(chain.at(-1)!).catch((error) => {
+          if (noConnection(error)) throw error
+          return null
+        })
+        if (!top) throw untrusted(`the parents of "${chain.at(-1)}" could not be read`)
+        chain.push(...top.chain.slice(1))
+      }
+
       // What a table is and which fields it has is read from these two. Where a list closes them as children of
       // another table, nothing can be established without reading a closed table.
       const needed = [SENTINEL, 'sys_dictionary'].find((name) => closed.has(name))
@@ -392,26 +430,43 @@ export class Dictionary {
   }
 
   /**
-   * Every table below a table, eight levels down, each with its parents up to the table. Used where a list names
-   * the only tables that may be read: a table below an open one can be closed, by itself or by a parent in
-   * between. null if the list cannot be trusted, for the reasons given at closedTables: the caller then has to
-   * assume that a closed table is among them.
+   * Every table below a table, however deep, each with its parents up to the table. Used where a list names the
+   * only tables that may be read: a table below an open one can be closed, by itself or by a parent in between.
+   * null if the list cannot be trusted, for the reasons given at closedTables: the caller then has to assume that
+   * a closed table is among them.
    */
   childTables(table: string): Promise<Map<string, string[]> | null> {
     assertTableName(table)
     return this.cached(this.childSets, table, async () => {
-      const query = `${PARENT_FIELDS.map((path) => `${path}=${table}`).join('^OR')}^ORname=${table}`
-      const read = await this.sn.all<Record<string, string>>({ table: 'sys_db_object', query, fields: ['name', ...PARENT_FIELDS] }, 3_000).catch(() => null)
-      if (!read || !read.complete || (read.total !== null && read.records.length < read.total)) return null
-      // The table itself is asked for as proof that the query was applied as written.
-      if (!read.records.some((row) => row.name === table)) return null
       const below = new Map<string, string[]>()
-      for (const row of read.records) {
-        if (row.name === table) continue
-        const parents = PARENT_FIELDS.map((path) => row[path]).filter((name): name is string => typeof name === 'string' && name !== '')
-        // A row that does not have the table among its parents matches none of the conditions.
-        if (typeof row.name !== 'string' || !row.name || !parents.includes(table)) return null
-        below.set(row.name, [row.name, ...parents.slice(0, parents.indexOf(table) + 1)])
+      let above = [table]
+      for (let round = 0; above.length; round++) {
+        if (round * PARENT_DEPTH >= MAX_CHAIN) return null
+        const deepest = new Set<string>()
+        for (let from = 0; from < above.length; from += 40) {
+          const group = above.slice(from, from + 40)
+          const under = (path: string) => (group.length === 1 ? `${path}=${group[0]}` : `${path}IN${group.join(',')}`)
+          const query = `${PARENT_FIELDS.map(under).join('^OR')}^ORname=${table}`
+          const read = await this.sn.all<Record<string, string>>({ table: 'sys_db_object', query, fields: ['name', ...PARENT_FIELDS] }, 3_000).catch((error) => {
+            if (noConnection(error)) throw error
+            return null
+          })
+          if (!read || !read.complete || (read.total !== null && read.records.length < read.total)) return null
+          // The table itself is asked for as proof that the query was applied as written.
+          if (!read.records.some((row) => row.name === table)) return null
+          for (const row of read.records) {
+            if (row.name === table) continue
+            const parents = PARENT_FIELDS.map((path) => row[path]).filter((name): name is string => typeof name === 'string' && name !== '')
+            const at = parents.findIndex((name) => group.includes(name))
+            // A row that has none of the tables asked for among its parents matches none of the conditions.
+            if (typeof row.name !== 'string' || !row.name || at < 0) return null
+            // Up to the table it was found under, and from there the way that table was found.
+            below.set(row.name, [row.name, ...parents.slice(0, at + 1), ...(below.get(parents[at])?.slice(1) ?? [])])
+            // Found at the eighth parent: what is below this one was out of sight.
+            if (at === PARENT_DEPTH - 1) deepest.add(row.name)
+          }
+        }
+        above = [...deepest]
       }
       return below
     })
@@ -431,7 +486,7 @@ export class Dictionary {
       const page = await this.gated.query<Record<string, string>>({ table: 'sys_script', query, fields: ['sys_id', 'action_query'], limit: 1 })
       // The answer checks its own query: a row without the field means the instance does not know it and ignored the condition.
       if (page.total === null || (page.records[0] && !('action_query' in page.records[0]))) {
-        throw new ServiceNowError('The instance did not answer the question about query business rules as it was asked.', 'invalid_response', 'sys_script')
+        throw unusableAnswer('The instance did not answer the question about query business rules as it was asked.', 'sys_script')
       }
       return { count: page.total, query }
     })
@@ -463,7 +518,7 @@ export class Dictionary {
       const page = await this.gated.query<Record<string, string>>({ table: 'sys_archive', query, fields: ['sys_id', 'table', 'active'], limit: 1 })
       // The answer checks its own query, as everywhere: a row without the fields means the conditions were ignored.
       if (page.total === null || (page.records[0] && !('table' in page.records[0] && 'active' in page.records[0]))) {
-        throw new ServiceNowError('The instance did not answer the question about archive rules as it was asked.', 'invalid_response', 'sys_archive')
+        throw unusableAnswer('The instance did not answer the question about archive rules as it was asked.', 'sys_archive')
       }
       return { count: page.total, query }
     })
@@ -478,11 +533,20 @@ export class Dictionary {
     return this.cached(this.rotations, table, async () => {
       const page = await this.gated.query<Record<string, string>>({ table: 'sys_table_rotation', query: `name=${table}^type=rotate`, fields: ['name', 'type', 'duration', 'rotations'], limit: 1 })
       const row = page.records.find((item) => item.name === table && item.type === 'rotate')
+      if (!row) {
+        // An entry that matches and did not come back is hidden from this account. That is not "not rotated".
+        if (page.total === null) throw unusableAnswer('The instance did not say how many rotation entries match, so it cannot be told whether one is hidden.', 'sys_table_rotation')
+        if (page.total > 0) throw new ServiceNowError(`"${table}" has a rotation entry, but this account may not read it.`, 'acl', 'sys_table_rotation')
+        return null
+      }
       // Measured: the duration is stored as a point in time counted from 1970-01-01, seven days as "1970-01-08 00:00:00".
-      const length = row ? Date.parse(`${String(row.duration).replace(' ', 'T')}Z`) / 86_400_000 : NaN
-      const rotations = Number(row?.rotations)
+      const length = Date.parse(`${String(row.duration).replace(' ', 'T')}Z`) / 86_400_000
+      const rotations = Number(row.rotations)
+      if (!Number.isFinite(length) || length <= 0 || !Number.isInteger(rotations) || rotations <= 0) {
+        throw unusableAnswer(`"${table}" is rotated, but how long it keeps its rows could not be read from its entry.`, 'sys_table_rotation')
+      }
       // Two decimals: a rotation of six hours is a quarter of a day, not "0.3" and not "0".
-      return Number.isFinite(length) && length > 0 && Number.isInteger(rotations) && rotations > 0 ? { rotations, days: Math.round(length * 100) / 100 } : null
+      return { rotations, days: Math.round(length * 100) / 100 }
     })
   }
 
@@ -519,7 +583,7 @@ export class Dictionary {
         const parent = row[field]
         if (!parent) break
         if (!isTableName(parent) || chain.includes(parent) || chain.length >= MAX_CHAIN) {
-          throw new ServiceNowError(`sys_db_object returned a parent chain for "${name}" that cannot be used.`, 'invalid_response', 'sys_db_object')
+          throw unusableAnswer(`sys_db_object returned a parent chain for "${name}" that cannot be used.`, 'sys_db_object')
         }
         chain.push(parent)
         filled++
@@ -546,7 +610,7 @@ export class Dictionary {
     // Not every sys_id is 32 hex digits. One that cannot go into a query leaves the tables of the view unknown,
     // which is not the same as "no such view".
     if (!/^[0-9A-Za-z_]{1,32}$/.test(String(view.sys_id))) {
-      throw new ServiceNowError(`The definition of the database view "${name}" came back without a usable sys_id, so the tables it joins could not be read.`, 'invalid_response', 'sys_db_view')
+      throw unusableAnswer(`The definition of the database view "${name}" came back without a usable sys_id, so the tables it joins could not be read.`, 'sys_db_view')
     }
 
     const joined = await this.sn.query<Record<string, string>>({
@@ -565,7 +629,7 @@ export class Dictionary {
       .map((row) => ({ table: row.table, prefix: row.variable_prefix }))
     // A row that cannot be used means the list of joined tables is not complete.
     if (members.length < joined.records.length || (joined.total === null && joined.records.length === 50)) {
-      throw new ServiceNowError(`The tables of the database view "${name}" could not be read completely.`, 'invalid_response', 'sys_db_view_table')
+      throw unusableAnswer(`The tables of the database view "${name}" could not be read completely.`, 'sys_db_view_table')
     }
     return { name, label: String(view.label ?? ''), chain: [name], kind: 'database_view', members }
   }

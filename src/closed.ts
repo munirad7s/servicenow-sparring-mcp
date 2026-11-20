@@ -1,6 +1,6 @@
 import type { Gate, ServiceNowClient } from './client.js'
 import type { Dictionary } from './dictionary.js'
-import { ServiceNowError } from './errors.js'
+import { noConnection, ServiceNowError } from './errors.js'
 import { withCondition } from './query.js'
 import { currentCall } from './trace.js'
 
@@ -33,6 +33,13 @@ const MAX_SENT_QUERY = 7_000
 export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTables {
   const blocked = (message: string, table: string) => new ServiceNowError(`${message} Nothing was sent.`, 'blocked', table)
   const childOf = (table: string, parent: string) => `"${table}" is a child table of ${parent}, which is closed on this machine: its rows are rows of that table`
+  /** For a look-up that failed: a lost connection is passed on as it is, anything else is the value given. */
+  const unless =
+    <T>(fallback: T) =>
+    (error: unknown): T => {
+      if (noConnection(error)) throw error
+      return fallback
+    }
 
   async function reason(table: string, seen = new Set<string>()): Promise<string | null> {
     if (!sn.restricted || seen.has(table)) return null
@@ -46,7 +53,9 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     let info
     try {
       info = await dict.table(table)
-    } catch {
+    } catch (error) {
+      // Not being able to log in is not a closed table.
+      if (noConnection(error)) throw error
       return `it could not be established whether "${table}" is a child table of a closed one`
     }
     // Neither a table nor a database view the instance lists: then nothing says what it is a child of or what it
@@ -108,6 +117,22 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     return parts.length ? parts.join('^') : null
   }
 
+  /**
+   * Whether the instance applies a condition on a field of a database view. A view can list the fields it shows of
+   * a table. Measured on one instance, on views whose list leaves the class out: a condition on
+   * "<prefix>_sys_class_name" was applied all the same. That is not taken for granted. A query that asks for the
+   * field to be empty and filled at once has to match nothing; where it matches, the instance drops conditions on
+   * that field, and the rows of closed child tables could not be left out.
+   */
+  const applied = new Set<string>()
+  async function appliesCondition(view: string, field: string): Promise<boolean> {
+    if (applied.has(`${view}.${field}`)) return true
+    const page = await sn.query({ table: view, query: `${field}ISEMPTY^${field}ISNOTEMPTY`, fields: [field], limit: 1, trusted: true }).catch(unless(null))
+    if (!page || page.total !== 0 || page.records.length) return false
+    applied.add(`${view}.${field}`)
+    return true
+  }
+
   return {
     reason: (table) => reason(table),
     mayHoldClosed,
@@ -135,18 +160,23 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
         }
       }
 
-      const info = await dict.table(table).catch(() => null)
+      const info = await dict.table(table).catch(unless(null))
       if (info?.kind === 'database_view') {
         // A view has no class of its own. Each table it joins brings its child tables along, under its prefix.
         for (const member of info.members ?? []) {
           // A view that joins another view, or something the instance does not know as a table: whose rows it
           // holds cannot be established one level down, so it is not read while tables are closed.
-          const joined = await dict.table(member.table).catch(() => null)
+          const joined = await dict.table(member.table).catch(unless(null))
           if (!joined || joined.kind === 'database_view') {
             throw blocked(`"${table}" is a database view that joins "${member.table}", which is ${joined ? 'a view itself' : 'not known as a table'}: with tables closed on this machine it cannot be established whose rows it holds.`, table)
           }
-          const condition = await classCondition(member.table, `${member.prefix}_sys_class_name`)
-          if (condition) conditions.push(condition)
+          const field = `${member.prefix}_sys_class_name`
+          const condition = await classCondition(member.table, field)
+          if (!condition) continue
+          if (!(await appliesCondition(table, field))) {
+            throw blocked(`"${table}" is a database view that joins "${member.table}", which has closed tables below it, and it could not be established that the instance applies a condition on "${field}": the rows of those tables could not be left out.`, table)
+          }
+          conditions.push(condition)
         }
       } else {
         const condition = await classCondition(table, 'sys_class_name')
@@ -165,8 +195,8 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
 
     async hidesNames(table, path) {
       if (!sn.restricted) return null
-      const check = await dict.checkFields(table, [path]).catch(() => null)
-      const column = check?.resolved.get(path)
+      const check = await dict.checkFields(table, [path])
+      const column = check.resolved.get(path)
       // Which table the name comes from is not known: the type could not be read, or the field can point anywhere.
       if (!column?.type || column.type === 'document_id') return 'untold'
       // The display value of a journal field is the text of its entries, which are rows of sys_journal_field.

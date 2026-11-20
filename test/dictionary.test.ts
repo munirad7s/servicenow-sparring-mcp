@@ -315,3 +315,67 @@ test('the tables below a table are listed only where the answer can be trusted',
     assert.equal(await new Dictionary(world.sn).childTables('task'), null, name)
   }
 })
+
+test('a child table more than eight levels below a closed table is found, with its parents up to the root', async () => {
+  // One request sees eight levels down. "u_deep" has the closed table as its eighth parent, and "u_deeper" is below it.
+  const mids = Array.from({ length: 7 }, (_, index) => `u_mid_${7 - index}`)
+  const deep = tableRow('u_deep', 'Deep', ...mids, 'u_base')
+  const deeper = tableRow('u_deeper', 'Deeper', 'u_deep', ...mids)
+  const proof = tableRow('sys_db_object', 'Table')
+  const { sn, calls } = fakeInstance(
+    [
+      // Asked a second time, for what is below the table that was found at the eighth level.
+      { table: 'sys_db_object', query: 'super_class.nameINu_deep^', rows: [deep, deeper, proof] },
+      { table: 'sys_db_object', query: 'nameINu_base', rows: [tableRow('u_base', 'Base', 'u_root'), deep, proof] },
+      // The parents of the table at the end of a chain that is as long as one request reads.
+      { table: 'sys_db_object', exact: 'name=u_base', rows: [tableRow('u_base', 'Base', 'u_root')] },
+      { table: 'sys_db_object', exact: 'name=u_mid_1', rows: [tableRow('u_mid_1', 'Mid', 'u_base', 'u_root')] },
+    ],
+    { tables: { allow: [], deny: ['u_base'] } },
+  )
+  const closed = await new Dictionary(sn).closedTables()
+  assert.deepEqual([...closed.keys()].sort(), ['u_base', 'u_deep', 'u_deeper'])
+  // Up to the root: a query on any table above them has to leave their rows out.
+  assert.deepEqual(closed.get('u_deep'), ['u_deep', ...mids, 'u_base', 'u_root'])
+  assert.deepEqual(closed.get('u_deeper'), ['u_deeper', 'u_deep', ...mids, 'u_base', 'u_root'])
+  assert.equal(calls.filter((call) => call.query.endsWith('^ORname=sys_db_object')).length, 2)
+})
+
+test('the tables below a table are followed deeper than one request sees', async () => {
+  const mids = Array.from({ length: 7 }, (_, index) => `u_mid_${7 - index}`)
+  const root = tableRow('u_root', 'Root')
+  const deep = tableRow('u_deep', 'Deep', ...mids, 'u_root')
+  const deeper = tableRow('u_deeper', 'Deeper', 'u_deep', ...mids)
+  const { sn, calls } = fakeInstance([
+    { table: 'sys_db_object', query: 'super_class.name=u_deep^', rows: [root, deeper] },
+    { table: 'sys_db_object', query: 'super_class.name=u_root^', rows: [root, deep] },
+  ])
+  const below = await new Dictionary(sn).childTables('u_root')
+  assert.deepEqual(below?.get('u_deep'), ['u_deep', ...mids, 'u_root'])
+  assert.deepEqual(below?.get('u_deeper'), ['u_deeper', 'u_deep', ...mids, 'u_root'])
+  assert.equal(calls.length, 2)
+})
+
+test('a rotation entry that is hidden, or cannot be read, is not "not rotated"', async () => {
+  const rotation = (rows: Array<Record<string, string> | null>, extra: { noTotal?: boolean } = {}) => new Dictionary(fakeInstance([{ table: 'sys_table_rotation', rows, ...extra }]).sn).rotation('syslog')
+  assert.equal(await rotation([]), null)
+  assert.deepEqual(await rotation([{ name: 'syslog', type: 'rotate', duration: '1970-01-08 00:00:00', rotations: '8' }]), { rotations: 8, days: 7 })
+  for (const [name, read, kind] of [
+    ['hidden', rotation([null]), 'acl'],
+    ['no total', rotation([], { noTotal: true }), 'invalid_response'],
+    ['no length', rotation([{ name: 'syslog', type: 'rotate', duration: '', rotations: '8' }]), 'invalid_response'],
+  ] as const) {
+    await assert.rejects(read, (error: unknown) => error instanceof ServiceNowError && error.kind === kind, name)
+  }
+})
+
+test('a login the instance rejects is passed on as that, and one unusable answer is not', async () => {
+  // Not being able to log in says nothing about a field: the check does not turn it into "could not be read".
+  const rejected = new Dictionary(fakeInstance([{ table: 'sys_db_object', status: 401 }]).sn)
+  await assert.rejects(rejected.checkFields('incident', ['number']), (error: unknown) => error instanceof ServiceNowError && error.kind === 'auth')
+  // A table of tables this account may not read is about that table: the check goes on and says what it could not do.
+  const unreadable = await new Dictionary(fakeInstance([{ table: 'sys_db_object', status: 403 }]).sn).checkFields('incident', ['number', 'ref_incident.number'])
+  assert.equal(unreadable.status, 'unavailable')
+  // "ref_<the table itself>." is refused by its name alone, before anything is read.
+  assert.match(unreadable.unknown[0].reason, /names the table itself/)
+})

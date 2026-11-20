@@ -194,11 +194,14 @@ test('a look-alike letter does not get "javascript:" past the check', () => {
 test('conditions are returned with operator and value', () => {
   const parsed = parseEncodedQuery('state=6^priorityIN1,2^ORDERBYnumber^short_descriptionLIKEa^^b')
   assert.deepEqual(parsed.conditions, [
-    { field: 'state', operator: '=', value: '6' },
-    { field: 'priority', operator: 'IN', value: '1,2' },
-    { field: 'short_description', operator: 'LIKE', value: 'a^b' },
+    { field: 'state', operator: '=', value: '6', group: 0 },
+    { field: 'priority', operator: 'IN', value: '1,2', group: 1 },
+    { field: 'short_description', operator: 'LIKE', value: 'a^b', group: 2 },
   ])
-  assert.deepEqual(parseEncodedQuery('closed_atMORETHANopened_at@hour@after@4').conditions, [{ field: 'closed_at', operator: 'MORETHAN', value: 'opened_at@hour@after@4', second: 'opened_at' }])
+  // Conditions joined by ^OR belong together: ^OR binds to the condition before it.
+  const joined = parseEncodedQuery('active=false^priority=1^ORpriority=2^NQstate=6^ORstate=7^ORDERBYnumber^active=true')
+  assert.deepEqual(joined.conditions.map(({ field, group }) => `${field}:${group}`), ['active:0', 'priority:1', 'priority:1', 'state:2', 'state:2', 'active:3'])
+  assert.deepEqual(parseEncodedQuery('closed_atMORETHANopened_at@hour@after@4').conditions, [{ field: 'closed_at', operator: 'MORETHAN', value: 'opened_at@hour@after@4', group: 0, second: 'opened_at' }])
   assert.equal(parsed.escapedCaret, true)
   assert.equal(parseEncodedQuery('active=true').escapedCaret, false)
 })

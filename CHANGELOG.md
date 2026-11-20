@@ -5,8 +5,9 @@ answer; such changes are listed under "Changed".
 
 ## 0.3.2 (2026-11-20)
 
-Six reviews of 0.3.1 by a second model, each from another corner, and what they found. Every claim about the
-platform was measured on an instance before anything was changed; the numbers are in `docs/encoded-queries.md`.
+Six reviews of 0.3.1 by a second model, each from another corner, three more of the reworked code, and what they
+found. Every claim about the platform was measured on an instance before anything was changed; the numbers are in
+`docs/encoded-queries.md`.
 
 ### Security
 
@@ -56,6 +57,24 @@ platform was measured on an instance before anything was changed; the numbers ar
     table.
   - An update name was matched against the first table name that fits. `task_sla_<sys_id>` fits `task` as well:
     the longest table that exists decides now, and a record without an update name counts as closed.
+  - The list of tables below a closed one ended eight levels down. Measured on one instance: 5 of 10,806 tables
+    have a parent eight levels up, none nine, so a larger instance can have tables the list missed. The server
+    asks again for what is below a table it finds at the eighth level, and follows every chain up to its root.
+  - `sn_origin`, asked by the sys_id of a record of a closed table, found its update name through a captured
+    change and read its history. It stops there now. Where application files of closed tables were left out of
+    its look-up, it no longer says "not found" of a record that can be one of them.
+  - A record inside a payload was seen only where it carries an action. An element directly inside a wrapper
+    counts now, with or without one.
+  - A name behind "is not" on a reference was looked up in the referenced table. Where rows of that table are
+    closed, the look-up said "no such record" of a record that is there, and so told which sys_id belongs to a
+    closed table. No look-up is made there, and the answer says so.
+  - A database view can list the fields it shows of a table. Before the server leaves the rows of closed child
+    tables out of a view, it asks the view a question that has to match nothing. Where it matches, the instance
+    drops conditions on the class of that table, and the view is not read.
+- **Secrets inside a text:** a secret in JSON that sits in a JSON string was passed on where its value carries an
+  escape (`\\u003d`, `\\/`), and so was the value of a system property whose type stands in CDATA. The values
+  `sn_query` counts by with `groupBy` are cleaned like every other text, and long ones are cut.
+- A request the rules for closed tables refuse was not written to the audit log, although the README said so.
 - **Secrets inside a payload:** the value of a system property was passed on where its type carried an attribute
   or was empty, a text shorter than 20 characters was not looked at, and a value of another record in the same
   payload was taken out by mistake. JSON keys such as `x-api-key` and `accessKey`, numbers, and JSON inside a JSON
@@ -129,6 +148,27 @@ platform was measured on an instance before anything was changed; the numbers ar
   reviewed" was the built-in code 1. A failure to read them is not remembered for ten minutes any more, and
   neither is a failure to read the company code.
 - A renewed token is tried also where the request had waited for the rate limit before.
+- **A login the instance rejects, and an instance that does not answer, were reported as "blocked" while tables
+  were closed on the machine.** `sn_instance` then succeeded and listed every source as blocked. Such a failure is
+  passed on as what it is, by every function.
+- `sn_origin` took an answer without a total for a complete one in three more places: a delete was called the
+  newest change, an empty answer of the table of application files was taken for "no such file", and "no version
+  is marked current" for established.
+- `sn_upgrade_skips` with `excludeErrors` and `onlySkipped: false` left out the entries without a disposition
+  (measured: "NOT IN" skips empty fields). It says when it took the codes of failures from its built-in list, and
+  refuses the two inputs together where every skipped disposition is a failure, instead of sending a query without
+  a value.
+- Of several names behind `NOT IN` on a reference, only the first three were looked up. All of them are now, in
+  one request.
+- The note that "is not" leaves out empty rows was dropped as soon as an "is empty" stood anywhere in the query.
+  It is dropped only where the two are joined with `^OR`. Measured in both APIs: `^OR` binds to the condition
+  before it.
+- Groups of the same size had no fixed order, so that a group could come twice or not at all when paging with
+  `offset`.
+- `sn_delta` accepted a day that does not exist for `since`, which the instance answers with every row.
+- A rotation entry or a company code that is hidden from the account was read as "not rotated" and "not set".
+- `sn_dependencies` returns each query as it was sent, with what the rules for closed tables added.
+- `ref_<the table itself>.<field>` is refused by its name alone: the refusal needed a readable table of tables.
 - The warning that only installations are on the captured rows of a record applies to accounts written in
   another case as well (`System`), as the instance compares them.
 - **`sn_dependencies` took an empty category for "nothing attached" on an instance that answers a query it cannot

@@ -244,9 +244,9 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
         }
 
         const disposition = await dispositions()
-        if (disposition.from === 'fallback' && onlySkipped) {
+        if (disposition.from === 'fallback' && (onlySkipped || excludeErrors)) {
           warnings.push(
-            'The instance did not list its disposition codes, so a built-in list was used to find skipped records. ' +
+            `The instance did not list its disposition codes, so a built-in list was used to find ${onlySkipped ? 'skipped records' : 'the files an upgrade could not apply'}. ` +
               'The set of codes differs between releases: check byDisposition.',
           )
         }
@@ -254,9 +254,14 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
         const isError = (code: string) => /error/i.test(disposition.all[code] ?? '')
         const wanted = Object.keys(disposition.skipped).filter((code) => !(excludeErrors && isError(code)))
         const errorCodes = Object.keys(disposition.all).filter(isError)
+        if (onlySkipped && !wanted.length) {
+          throw validation('On this instance every disposition that says "skipped" is one of a file the upgrade could not apply, so onlySkipped together with excludeErrors leaves nothing to ask for. Drop one of the two.')
+        }
         const reviewCodes = await skipCodes(sn)
+        // Measured: "NOT IN" leaves out the rows where the field is empty. An entry without a disposition is no error.
+        const noErrors = `upgrade_detail.dispositionNOT IN${errorCodes.join(',')}^ORupgrade_detail.dispositionISEMPTY`
         const shared = [
-          onlySkipped ? `upgrade_detail.dispositionIN${wanted.join(',')}` : excludeErrors && errorCodes.length ? `upgrade_detail.dispositionNOT IN${errorCodes.join(',')}` : '',
+          onlySkipped ? `upgrade_detail.dispositionIN${wanted.join(',')}` : excludeErrors && errorCodes.length ? noErrors : '',
           fileContains ? `upgrade_detail.file_nameLIKE${fileContains}` : '',
           unreviewedOnly ? `stateIN${[...reviewCodes.notReviewed].join(',')}` : '',
         ].filter(Boolean)

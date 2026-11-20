@@ -257,7 +257,8 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
           status: 'checked',
           ...(items.length < expected ? { reason: `${expected - items.length} matching row(s) are hidden from this account by row-level access rules` } : {}),
           table: category.table,
-          query,
+          // As it was sent: with tables closed on this machine, the rows of closed child tables are left out of it.
+          query: page.query,
           total: page.total,
           returned: items.length,
           truncated: page.total !== null ? limit < page.total : items.length === limit,

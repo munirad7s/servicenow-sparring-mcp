@@ -109,6 +109,12 @@ export interface Condition {
   field: string
   operator: string
   value: string
+  /**
+   * Conditions joined by ^OR carry the same number. Measured in both APIs: ^OR binds to the condition before it,
+   * tighter than ^. "active=false^priority=1^ORpriority=2" matched the 10 inactive rows of priority 1, not those
+   * and the 4 of priority 2.
+   */
+  group: number
   /** The field on the other side, where the operator compares two fields. */
   second?: string
 }
@@ -241,6 +247,7 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
   }
 
   let afterTextSearch = false
+  let group = -1
   for (const raw of splitTerms(query)) {
     if (raw === '' || raw === 'EQ') continue
 
@@ -287,7 +294,8 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
 
     parsed.fields.push(field)
     const second = checkValue(operator, value, (why) => unsupported(raw, why))
-    parsed.conditions.push({ field, operator, value, ...(second ? { second } : {}) })
+    if (!joinedWithOr) group++
+    parsed.conditions.push({ field, operator, value, group, ...(second ? { second } : {}) })
     if (second) {
       parsed.fields.push(inDictionary(second, raw))
       parsed.otherFields.push(second)

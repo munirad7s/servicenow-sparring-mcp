@@ -5,7 +5,7 @@ import { quoteInstanceText, ServiceNowError, validation } from '../errors.js'
 import { ORIGIN_CAVEATS } from '../limitations.js'
 import { assertSysId, isGeneratedSysId, isTableName } from '../query.js'
 import { fail, labelOf, ok, rawOf, rowSchema, source, sourceShape, tidy, withheldWarning } from '../result.js'
-import { traced } from '../trace.js'
+import { currentCall, traced } from '../trace.js'
 import { CLOSED_NAME, errorKind, isClosedRecord, isSystemAccount, NO_CONNECTION, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
 import { skipCodes } from './upgrade.js'
 
@@ -65,6 +65,9 @@ const hidesRows = (page: Page<unknown> | null) =>
  * never can: access rules take rows off a page after it was cut, so a short or an empty page proves nothing.
  */
 const mayHaveMore = (page: Page<unknown> | null) => Boolean(page && (page.total === null || page.total > page.offset + page.records.length))
+
+/** true if a row that matches can be missing from the page for all that is known: not read, no total, or rows hidden. */
+const mayHideRows = (page: Page<unknown> | null) => !page || page.total === null || hidesRows(page)
 
 /**
  * The query that finds the record such a name was built from. The name does not
@@ -136,7 +139,12 @@ function companyPrefix(sn: ServiceNowClient): Promise<string> {
   if (!known) {
     known = sn
       .query<Record<string, string>>({ table: 'sys_properties', query: 'name=glide.appcreator.company.code', fields: ['name', 'value'], limit: 1 })
-      .then((page) => page.records.find((row) => row.name === 'glide.appcreator.company.code')?.value ?? '')
+      .then((page) => {
+        const row = page.records.find((item) => item.name === 'glide.appcreator.company.code')
+        // A property that matches and did not come back is hidden from this account. That is not "not set".
+        if (!row && page.total !== 0) throw new ServiceNowError('The company code is hidden from this account, or the instance gave no total.', 'acl', 'sys_properties')
+        return row?.value ?? ''
+      })
       .then((code) => (/^[a-z0-9]{1,40}$/i.test(code.trim()) ? `x_${code.trim().toLowerCase()}_` : ''))
     prefixCache.set(sn, known)
     // A failure is not an answer: the next call asks again.
@@ -263,6 +271,12 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         const hidden = Boolean(found) && !file && (found?.total ?? 0) > 0
         // true where it could not be established whether the record exists: then "not found" is not an answer.
         let untraceable = !found || (!file && found.total === null)
+        // The application files of a closed table are left out of that answer. A record that did not come back can
+        // be one of them, so "no such record" is not established.
+        if (!file && currentCall()?.closed.rowsLeftOut) {
+          untraceable = true
+          warnings.push('Application files of tables that are closed on this machine were left out of the look-up. A record that was not found can be one of them.')
+        }
         let name = ''
         // For a dictionary entry or a label: the table and the field it describes. "asked" if that was already looked up.
         let describes: Record<string, string> | null = null
@@ -350,6 +364,12 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           }
         }
 
+        // The record was asked for by its sys_id, and the name found for it says which table it is in. Nothing about a
+        // record of a closed table is read, whichever way it was asked for.
+        if (name && name !== updateName && (await isClosedRecord(ctx, name))) {
+          throw new ServiceNowError('This sys_id stands for a record in a table that is closed on this machine, or may stand for one. Nothing more was read.', 'blocked', 'sys_metadata')
+        }
+
         // A tracked record outside sys_metadata, for example a choice: read it from its own table.
         let ownTable = ''
         // true where the record was read from its own table and it could not be told whether it belongs to a package.
@@ -357,9 +377,10 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         const tail = /^(.+)_([0-9a-f]{32})$/.exec(name)
         if (!file && !hidden && tail && isTableName(tail[1])) {
           // The table of application files said "no such record": then this is none, and it has no package. Where that
-          // table could not be asked, the record can be an application file all the same, and its own table says whether
-          // it carries a package.
-          const columns = found ? null : await ctx.dict.columnSet(tail[1]).catch(() => null)
+          // table could not be asked, or gave no total, the record can be an application file all the same, and its own
+          // table says whether it carries a package.
+          const noSuchFile = found?.total === 0
+          const columns = noSuchFile ? null : await ctx.dict.columnSet(tail[1]).catch(() => null)
           const isFile = Boolean(columns?.columns.has('sys_package'))
           const own = await sn
             .query<Row>({ table: tail[1], query: `sys_id=${tail[2]}`, fields: isFile ? FILE_FIELDS : ['sys_id', 'sys_created_on', 'sys_created_by', 'sys_updated_on', 'sys_updated_by'], limit: 1, display: true })
@@ -370,7 +391,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           if (typeof own !== 'string' && own.records[0]) {
             file = tidy(own.records[0])
             ownTable = tail[1]
-            packageUnknown = !found && !isFile && (!columns || columns.partial)
+            packageUnknown = !noSuchFile && !isFile && (!columns || columns.partial)
             // The record is at hand: that sys_metadata could not be asked no longer leaves its existence open.
             untraceable = false
           } else if (typeof own === 'string' ? own !== 'not_found' : own.total !== 0) {
@@ -415,7 +436,8 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         if (!current && versions && !everyVersionShown && !currentHidden) {
           const marked = await read('sys_update_version', `name=${name}^state=current^ORDERBYDESCsys_created_on`, ['state', 'source_table', 'source', 'sys_created_by', 'sys_created_on'], 1)
           current = marked?.records[0] ? tidy(marked.records[0]) : null
-          currentHidden = !marked || hidesRows(marked)
+          // Without a total, "no version is marked current" cannot be told from "it is hidden from this account".
+          currentHidden = !current && mayHideRows(marked)
         }
 
         // Versions per source. Counted here when every version is in view, asked for otherwise.
@@ -605,7 +627,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           const stamp = earliest?.records[0] ? rawOf(tidy(earliest.records[0]).sys_created_on) : ''
           if (stamp) {
             firstCapturedOn = stamp
-            firstCaptureExact = !hidesRows(earliest)
+            firstCaptureExact = !mayHideRows(earliest)
           }
         }
         // A version from an update set is a capture as well, also where its update row is gone: the update set was
@@ -666,11 +688,14 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           if (hidden) undecided = 'The record exists, but this account may not read it, so nothing about it could be checked.'
           else if (untraceable) undecided = 'It could not be established whether the record exists, or what it is: see the warnings.'
           // The newest row decides: a record that was deleted and made again later is not deleted. A newer row that
-          // this account cannot see can be the one that made it again.
-          else if (rawOf(updateRows[0]?.action) === 'DELETE' && !hidesRows(updates)) verdict = 'deleted_here'
+          // this account cannot see can be the one that made it again, and without a total none can be ruled out.
+          else if (rawOf(updateRows[0]?.action) === 'DELETE' && !mayHideRows(updates)) verdict = 'deleted_here'
           else if (!name || (updates && captured === 0 && noVersions && noSkips)) verdict = 'not_found'
           else {
             undecided = 'Something is recorded under this name, or could be, but no record answers to it: see the warnings.'
+            if (rawOf(updateRows[0]?.action) === 'DELETE') {
+              warnings.push('The newest captured change in view is a delete, but a newer one that is hidden from this account could not be ruled out, so it is not said that the record was deleted here.')
+            }
             if (updateRows.length || versionRows.length) {
               warnings.push('Update rows or versions exist under this name, but the record itself is not readable: it was removed without a captured delete, or it lives in a table this account cannot read.')
             } else if (!upgradeKnows) {

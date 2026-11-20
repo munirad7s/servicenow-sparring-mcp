@@ -1,12 +1,12 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Row } from '../client.js'
-import { quoteInstanceText } from '../errors.js'
+import { quoteInstanceText, validation } from '../errors.js'
 import { DELTA_GAPS } from '../limitations.js'
 import { assertPlainValue } from '../query.js'
 import { clip, fail, listing, listShape, ok, rawOf, rowSchema, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { BY_SYSTEM_ACCOUNT, CLOSED_NAME, isClosedRecord, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
+import { BY_SYSTEM_ACCOUNT, CLOSED_NAME, isClosedRecord, isDate, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
 
 /** A day or a moment as the caller wrote it, in the one form the instance is asked with: YYYY-MM-DD HH:MM:SS. */
 const moment = (given: string) => {
@@ -92,6 +92,8 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
         for (const [label, value] of Object.entries({ nameContains, type, changedBy })) {
           if (value) assertPlainValue(value, label)
         }
+        // Measured: with a date it cannot read, the instance does not reject ">=": it matches every row.
+        if (since && !isDate(since)) throw validation(`"since" is not a day that exists, or not a time of day: ${since}. Write YYYY-MM-DD or YYYY-MM-DD HH:MM:SS, in UTC.`)
 
         const withoutType = [
           nameContains ? `nameLIKE${nameContains}` : '',

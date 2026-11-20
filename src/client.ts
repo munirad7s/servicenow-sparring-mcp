@@ -124,7 +124,7 @@ export class ServiceNowClient {
     const named = fieldsInEncodedQuery(opts.query ?? '', table)
     fields?.forEach((field) => assertFieldPath(field, table))
     const gate = this.restricted && !opts.trusted ? this.gate : null
-    const query = gate ? await gate.enter(table, opts.query ?? '', [...named, ...(fields ?? [])]) : (opts.query ?? '')
+    const query = gate ? await this.entered(gate, 'table', table, opts.query ?? '', [...named, ...(fields ?? [])], fields?.length ? fields : null) : (opts.query ?? '')
 
     const params = new URLSearchParams()
     if (query) params.set('sysparm_query', query)
@@ -145,6 +145,21 @@ export class ServiceNowClient {
     const records = (body.result as unknown[]).filter((row): row is T => row !== null && typeof row === 'object')
     if (gate && display) await this.withoutClosedNames(gate, table, records as Row[])
     return { table, query, limit, offset, records, total }
+  }
+
+  /**
+   * Asks the rules for closed tables. A request they refuse is not sent, but the attempt is still written to the
+   * audit log, like one that names a closed table outright.
+   */
+  private async entered(gate: Gate, api: 'table' | 'stats', table: string, given: string, paths: string[], fields: string[] | null): Promise<string> {
+    const started = Date.now()
+    try {
+      return await gate.enter(table, given, paths)
+    } catch (error) {
+      const status = error instanceof ServiceNowError ? error.kind : 'unknown'
+      this.options.audit?.({ time: new Date(started).toISOString(), tool: currentCall()?.tool ?? null, api, table, query: given, fields, status, sent: 0, rows: null, total: null, ms: Date.now() - started })
+      throw error
+    }
   }
 
   /** Takes the display value off every field whose name could be that of a record in a closed table. */
@@ -211,7 +226,7 @@ export class ServiceNowClient {
     assertFieldPath(groupBy, table)
     const named = fieldsInEncodedQuery(given, table)
     const gate = this.restricted ? this.gate : null
-    const query = gate ? await gate.enter(table, given, [...named, groupBy]) : given
+    const query = gate ? await this.entered(gate, 'stats', table, given, [...named, groupBy], [groupBy]) : given
     // The label of a group is the name behind a reference: not asked for where that could be a record of a closed table.
     const hidden = gate && labels ? await gate.hidesNames(table, groupBy) : null
     const display = labels && !hidden
