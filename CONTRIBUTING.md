@@ -40,7 +40,9 @@ depend on it: it leaves unknown fields out of a row, and it answers "Invalid tab
 
 A rule that keeps something back (a secret, a row of a closed table, a verdict that is not established) needs a
 test that fails without it. To see whether it has one, take the rule out or turn it round, one line at a time,
-and run the tests. For 0.3.4 and 0.4.0 that was done for 370 lines, and 48 of the changes went unnoticed.
+and run the tests. Since 0.3.4 that was done for 396 lines, and 54 of the changes went unnoticed.
 
-If you change how a tool reads the instance, run `npm run smoke` against a real instance and say in the pull request
-which release it was. If you change `sn_origin`, run `npm run origin-check` before and after.
+If you change how a tool reads the instance, run `npm run smoke` and `npm run compare` against a real instance and
+say in the pull request which release it was. `npm run compare` asks the instance a second time, past the server,
+and ends with 1 if a field or a query comes out differently: its first run found rows that change places between
+pages. If you change `sn_origin`, run `npm run origin-check` before and after.

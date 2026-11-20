@@ -156,6 +156,9 @@ Also measured:
   an order.
 - `sys_id` as a sort key does no harm on a database view, which has no field of that name: the rows and the total
   were the same with it and without.
+- The Aggregate API gives the groups of a count another order from one request to the next: five requests for
+  the dictionary entries per type brought three orders. The server puts groups in the order of their size, and
+  groups of one size in the order of their values, so that a list of groups read by pages holds each group once.
 - `^OR` binds to the condition before it, tighter than `^`, in the Table API and in the Aggregate API alike. Of 82
   incidents, 10 were inactive with priority 1 and 4 had priority 2, all of them active:
   `active=false^priority=1^ORpriority=2` matched 10 in both, not 14, and so did the same conditions in another

@@ -15,6 +15,9 @@ answer; such changes are listed under "Changed".
   as its last sort key, in the direction of the key before it, which costs nothing when measured on a table of
   3.5 million rows. Each of these reads then brought every row once. The answer names the query as it was sent.
   A query that asks for no order is sent as before: read by pages it brought no row twice.
+- **The thirty largest groups were not the same thirty on every call.** Measured: the instance gives the groups of
+  a count another order from one request to the next, three orders in five requests. `sn_delta` and
+  `sn_upgrade_skips` now put groups of the same size in the order of their names, as `sn_query` did already.
 - **`sn_origin` gave up on a record that stores no update name.** Measured: a third of the application files of
   an instance store none, because they were never captured. Dictionary entries and labels were already found by
   what they describe. For any other class the answer was `unknown`, with the claim that such a record is captured

@@ -29,7 +29,9 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
       .then((groups) =>
         groups
           .map((group) => ({ type: group.value || '(empty)', count: group.count }))
-          .sort((a, b) => b.count - a.count),
+          // Types of the same size in the order of their names: the instance gives groups another order from one
+          // request to the next (measured: three orders in five requests), and the thirty largest are a cut.
+          .sort((a, b) => b.count - a.count || (a.type < b.type ? -1 : a.type > b.type ? 1 : 0)),
       )
       .catch(() => null)
   /** As many types as an answer lists. Where there are more, the answer says so: a sum over the list is then no total. */

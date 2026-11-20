@@ -319,7 +319,8 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
         }
 
         const byName = (groups: Array<{ value: string; count: number; display?: string }> | null, name: (group: { value: string; display?: string }) => string, top = 30) =>
-          groups && groups.map((group) => ({ name: name(group) || '(empty)', count: group.count })).sort((a, b) => b.count - a.count).slice(0, top)
+          // Groups of the same size in the order of their names, so that the cut is the same on every call.
+          groups && groups.map((group) => ({ name: name(group) || '(empty)', count: group.count })).sort((a, b) => b.count - a.count || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)).slice(0, top)
         const errors = perDisposition?.filter((group) => isError(group.value)).reduce((sum, group) => sum + group.count, 0) ?? 0
         const records = clip(rows, warnings)
         const perAuthor: Record<string, number> = {}

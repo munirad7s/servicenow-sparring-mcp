@@ -1437,6 +1437,15 @@ test('a list of counts that is cut says so', async () => {
     assert.equal(/byType lists the 30 largest of 31 types\. The other 1 have 5 row/.test((await edge.answer('sn_delta')).warnings.join(' ')), said, String(length))
   }
 
+  // Types of the same size come in the order of their names, whatever order the instance gives them in: it gave
+  // three orders in five requests when measured, and a cut at thirty would then show other types each time.
+  const equal = (names: string[]) => stats('sys_update_xml', Object.fromEntries(names.map((name) => [name, 7])))
+  const forward = await connect([...dictionaryRoutes, { table: 'sys_update_xml', rows: [] }, equal(['Report', 'Access Control', 'Module', 'Business Rule'])])
+  const backward = await connect([...dictionaryRoutes, { table: 'sys_update_xml', rows: [] }, equal(['Module', 'Business Rule', 'Report', 'Access Control'])])
+  const inOrder = ['Access Control', 'Business Rule', 'Module', 'Report']
+  assert.deepEqual((await forward.answer('sn_delta')).byType.map((item: Data) => item.type), inOrder)
+  assert.deepEqual((await backward.answer('sn_delta')).byType.map((item: Data) => item.type), inOrder)
+
   // The same for the entries of upgrades, per type and per disposition.
   const manyTypes = stats('upgrade_history_task', Object.fromEntries(Array.from({ length: 31 }, (_, index) => [`Type ${index}`, 3])), undefined, 'upgrade_detail.type')
   const skips = await connect([manyTypes, ...upgradeRoutes])
@@ -1445,6 +1454,11 @@ test('a list of counts that is cut says so', async () => {
   assert.match(listed.warnings.join(' '), /byType lists the 30 largest of 31 groups: "total" counts every entry, a sum over byType does not/)
   assert.doesNotMatch(listed.warnings.join(' '), /byDisposition lists/)
   assert.doesNotMatch((await (await connect(upgradeRoutes)).answer('sn_upgrade_skips', {})).warnings.join(' '), /largest of/)
+  const equalTypes = (names: string[]) => stats('upgrade_history_task', Object.fromEntries(names.map((name) => [name, 3])), undefined, 'upgrade_detail.type')
+  for (const names of [['Widget', 'Module', 'Access Control'], ['Module', 'Access Control', 'Widget']]) {
+    const answer = await (await connect([equalTypes(names), ...upgradeRoutes])).answer('sn_upgrade_skips', {})
+    assert.deepEqual(answer.byType.map((item: Data) => item.name), ['Access Control', 'Module', 'Widget'])
+  }
 })
 
 test('with a deny list, what stands before the sys_id of each name on a page is asked for once', async () => {
