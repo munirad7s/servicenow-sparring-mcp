@@ -1061,6 +1061,84 @@ test('a part of a rotated table, and the archive of a table, are closed with the
   assert.equal(open.calls.filter((call) => call.query === 'name=syslog').length, 0)
 })
 
+test('which tables are parts of a rotated one is read from the list of the instance, where it can be read', async () => {
+  // Measured: 319 of 327 parts are named after their table with four digits, and 8 with one digit. The name alone
+  // says too little and too much, so the list of the instance decides, and the name only where the list is not at hand.
+  const one = (name: string, ...parents: string[]): Route => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name, ...parents)] })
+  const names = ['u_queue', 'u_queue2', 'u_queue7777', 'u_report', 'u_report2024']
+  const world: Route[] = [
+    closedTables(tableRow('u_queue', 'Queue'), tableRow('u_report', 'Report')),
+    ...names.map((name) => one(name)),
+    ...names.map((name): Route => ({ table: 'sys_dictionary', query: `nameIN${name}^`, rows: [column(name, 'sys_id', 'GUID')] })),
+    ...names.map((name): Route => ({ table: name, rows: [{ sys_id: '1' }] })),
+    ...dictionaryRoutes,
+  ]
+  const closed = { tables: { allow: [], deny: ['u_queue', 'u_report'] } }
+  const schedule: Route = { table: 'sys_table_rotation_schedule', rows: [{ table_name: 'u_queue', 'name.name': 'u_queue' }, { table_name: 'u_queue2', 'name.name': 'u_queue' }] }
+
+  const listed = await connect([schedule, ...world], closed)
+  const part = await listed.call('sn_query', { table: 'u_queue2', fields: ['sys_id'] })
+  assert.equal(part.data.error, 'blocked')
+  assert.match(part.data.message, /"u_queue2" holds rows of u_queue/)
+  // Not on the list: a table whose name ends in digits is a table of its own, whatever stands before the digits.
+  assert.equal((await listed.answer('sn_query', { table: 'u_report2024', fields: ['sys_id'] })).returned, 1)
+  assert.equal((await listed.answer('sn_query', { table: 'u_queue7777', fields: ['sys_id'] })).returned, 1)
+  assert.equal(listed.sentTo('sys_table_rotation_schedule').length, 1)
+
+  // The list cannot be read, is incomplete, or is closed on this machine: then a name that ends in digits may be a part.
+  const hidden: Array<[string, Route[], InstanceConfig['tables']]> = [
+    ['not readable', [{ table: 'sys_table_rotation_schedule', status: 403 }], closed.tables],
+    ['a hidden row', [{ table: 'sys_table_rotation_schedule', rows: [{ table_name: 'u_queue', 'name.name': 'u_queue' }, null] }], closed.tables],
+    ['an entry without its table', [{ table: 'sys_table_rotation_schedule', rows: [{ table_name: 'u_queue2', 'name.name': '' }] }], closed.tables],
+    ['closed on this machine', [schedule], { allow: [], deny: ['u_queue', 'u_report', 'sys_table_rotation_schedule'] }],
+  ]
+  for (const [name, routes, lists] of hidden) {
+    const guessing = await connect([...routes, ...world], { tables: lists })
+    for (const table of ['u_queue2', 'u_queue7777', 'u_report2024']) assert.equal((await guessing.call('sn_query', { table, fields: ['sys_id'] })).data.error, 'blocked', `${name}: ${table}`)
+  }
+})
+
+test('the archive of a table the deny list names is closed, also where the instance no longer has the table', async () => {
+  const routes: Route[] = [
+    closedTables(),
+    { table: 'sys_db_object', exact: 'name=ar_u_legacy_hr', rows: [tableRow('ar_u_legacy_hr', 'Archive')] },
+    { table: 'sys_dictionary', query: 'nameINar_u_legacy_hr^', rows: [column('ar_u_legacy_hr', 'sys_id', 'GUID')] },
+    { table: 'ar_u_legacy_hr', rows: [{ sys_id: '1' }] },
+    ...dictionaryRoutes,
+  ]
+  const { call, sentTo } = await connect(routes, { tables: { allow: [], deny: ['u_legacy_hr'] } })
+  const { data } = await call('sn_query', { table: 'ar_u_legacy_hr', fields: ['sys_id'] })
+  assert.equal(data.error, 'blocked')
+  assert.match(data.message, /"ar_u_legacy_hr" holds rows of u_legacy_hr .*"u_legacy_hr" is closed on this machine/)
+  assert.equal(sentTo('ar_u_legacy_hr').length, 0)
+})
+
+test('the archive of a table that carries payloads and names is read like that table', async () => {
+  // An archive and a part carry the fields of their table under a name of their own. What is withheld from the
+  // captured changes is withheld from their archive as well, and neither can be searched.
+  const WITHHELD = '[withheld: the record is in a table closed on this machine]'
+  const payload = (table: string, inner: string) => `<?xml version="1.0"?><record_update table="${table}"><${table} action="INSERT_OR_UPDATE">${inner}</${table}></record_update>`
+  const rows = [
+    { name: `sys_user_${ID}`, target_name: 'Abel Tuter', payload: payload('sys_user', '<name>Abel Tuter</name>') },
+    { name: `sys_script_include_${ID}`, target_name: 'ExampleUtil', payload: payload('sys_script_include', '<name>ExampleUtil</name><api_key>sk-123</api_key>') },
+  ]
+  const routes: Route[] = [
+    closedTables(tableRow('sys_user', 'User')),
+    knownTables('sys_script_include', 'sys_user'),
+    ...['ar_sys_update_xml', 'sys_update_xml', 'sys_script_include'].map((name): Route => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] })),
+    { table: 'sys_dictionary', query: 'nameINar_sys_update_xml^', rows: [column('ar_sys_update_xml', 'name'), column('ar_sys_update_xml', 'target_name'), column('ar_sys_update_xml', 'payload')] },
+    ...dictionaryRoutes,
+    { table: 'ar_sys_update_xml', rows },
+  ]
+  const closed = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
+  const data = await closed.answer('sn_query', { table: 'ar_sys_update_xml', fields: ['name', 'target_name', 'payload'] })
+  assert.deepEqual(data.records.map((row: Data) => row.target_name), [WITHHELD, 'ExampleUtil'])
+  assert.equal(data.records[0].payload, WITHHELD)
+  assert.match(data.records[1].payload, /<api_key>\[withheld\]<\/api_key>/)
+  for (const args of [{ query: 'payloadLIKEAbel' }, { groupBy: 'payload' }]) assert.equal((await closed.call('sn_query', { table: 'ar_sys_update_xml', ...args })).data.error, 'validation', JSON.stringify(args))
+  for (const args of [{ query: 'target_nameSTARTSWITHA' }, { groupBy: 'target_name' }]) assert.equal((await closed.call('sn_query', { table: 'ar_sys_update_xml', ...args })).data.error, 'blocked', JSON.stringify(args))
+})
+
 test('a database view that joins another view is not described either while tables are closed', async () => {
   const views: Route[] = [
     { table: 'sys_db_object', exact: 'name=outer_view', rows: [] },
@@ -1346,14 +1424,27 @@ test('an update name is taken for a record of a closed table in every way it can
   assert.equal(await isClosedRecord(noUsers, 'a_'.repeat(50_000)), true)
   assert.ok(Date.now() - started < 500, `${Date.now() - started} ms`)
 
-  // With a sys_id at the end, what stands before it is the table: a script include is no business rule. Where
-  // something else follows, the table cannot be told, and any cut that is closed counts.
-  const noRules = deny(['sys_script'], closedTables(tableRow('sys_script', 'Business Rule', 'sys_metadata')))
+  // With a sys_id at the end, what stands before it is the table where the instance has a table of that name: a
+  // script include is no business rule. Where something else follows, the table cannot be told, and any cut that
+  // is closed counts.
+  const rules = fakeInstance(
+    [closedTables(tableRow('sys_script', 'Business Rule', 'sys_metadata')), knownTables('sys_script', 'sys_script_include', 'ar_sys_script_include'), ...dictionaryRoutes],
+    { tables: { allow: [], deny: ['sys_script'] } },
+  )
+  const noRules = createContext(rules.sn)
   assert.equal(await isClosedRecord(noRules, NAME), true)
   assert.equal(await isClosedRecord(noRules, `sys_script_include_${ID}`), false)
   assert.equal(await isClosedRecord(noRules, 'sys_script_include_my_util'), true)
-  // A name that cannot begin with a table is the record of no closed one.
-  assert.equal(await isClosedRecord(noRules, `My-App_${ID}`), false)
+  // Measured: "sys_ui_form_sections_<sys_id>" is a record of sys_ui_form, and no table is called
+  // sys_ui_form_sections. What stands before a sys_id is the table only where the instance has such a table.
+  assert.equal(await isClosedRecord(noRules, `sys_script_sections_${ID}`), true)
+  // A name that begins with nothing that can be a table: which record it is cannot be told.
+  assert.equal(await isClosedRecord(noRules, `My-App_${ID}`), true)
+  assert.equal(await isClosedRecord(noRules, 'incident'), true)
+  // Nothing a name can begin with is closed: nothing is asked for it.
+  const before = rules.calls.length
+  assert.equal(await isClosedRecord(noRules, `sys_ui_action_${ID}`), false)
+  assert.equal(rules.calls.length, before)
   // Measured: a linked application file is named after the record it links to, and its update name does not say
   // which table that record is of. While any table is closed, it counts as a record of a closed one.
   assert.equal(await isClosedRecord(noRules, `sys_metadata_link_${ID}`), true)
@@ -2250,7 +2341,7 @@ test('a field of a view is judged by the table it comes from, also where the dic
     { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Customer Update')] },
     // The fields of the joined table are hidden from this account.
     { table: 'sys_dictionary', query: 'nameINsys_update_xml', status: 403 },
-    { table: 'v_updates', rows: [{ ux_name: `sys_user_${ID}`, ux_target_name: 'Abel Tuter', ux_payload: payload, ux_type: 'User' }] },
+    { table: 'v_updates', rows: [{ ux_name: `sys_user_${ID}`, ux_target_name: 'Abel Tuter', ux_payload: payload, ux_type: 'User', 'ux_remote.payload': '<x/>' }] },
   ]
   // Without a list of fields nothing has to be looked up before the view is read, and the row comes with everything.
   const open = await connect([...view, ...dictionaryRoutes])
@@ -2263,6 +2354,14 @@ test('a field of a view is judged by the table it comes from, also where the dic
     assert.match(data.message, /holds whole records as text/, JSON.stringify(args))
   }
   assert.equal(open.sentTo('v_updates', 'stats').length, 0)
+
+  // A path that walks on from a field of the view ends on another table, which the definition of the view does not
+  // name. A field called "payload" there is one by its name, as behind every reference.
+  for (const args of [{ query: 'ux_remote.payloadLIKEsecret' }, { groupBy: 'ux_remote.payload' }]) {
+    const { data } = await open.call('sn_query', { table: 'v_updates', ...args })
+    assert.equal(data.error, 'validation', JSON.stringify(args))
+    assert.match(data.message, /holds whole records as text/, JSON.stringify(args))
+  }
 
   // With the user table closed, the record of a user is not passed on, and neither is its name.
   const closed = await connect([closedTables(tableRow('sys_user', 'User')), ...view, ...dictionaryRoutes], { tables: { allow: [], deny: ['sys_user'] } })
@@ -2294,6 +2393,15 @@ test('on something that could not be read as a table or a view, a field is judge
     assert.equal(data.error, 'validation', JSON.stringify(args))
     assert.match(data.message, /holds whole records as text/, JSON.stringify(args))
   }
+  // The answer says why the value was withheld: not because it is known to be a secret.
+  assert.match((await answer('sn_query', { table: 'v_props' })).warnings.join(' '), /could not be read which tables this database view joins, and a field of this name can be the value of a system property.*: prop_value\./)
+  assert.match((await call('sn_query', { table: 'v_props', query: 'prop_valueSTARTSWITHc' })).data.message, /"prop_value" can be the value of a system property/)
+
+  // An account that may not read the table of tables at all knows nothing about any name. That is no sign of a
+  // view of system properties: a field called "value" is then read as it is, like the text of a journal entry.
+  const blind = await connect([{ table: 'sys_db_object', status: 403 }, { table: 'sys_journal_field', rows: [{ element: 'work_notes', value: 'restarted the service' }] }])
+  const entries = await blind.answer('sn_query', { table: 'sys_journal_field', query: 'element=work_notes^valueLIKErestart', fields: ['element', 'value'] })
+  assert.deepEqual(entries.records, [{ element: 'work_notes', value: 'restarted the service' }])
 })
 
 test('names of records of other tables are kept back on the tables that are known to hold them', async () => {

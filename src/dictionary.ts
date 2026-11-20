@@ -98,13 +98,15 @@ const MAX_KNOWN_NAMES = 5_000
  * came without its name, or with a gap among its parents, so that the place of a parent in the list says nothing.
  */
 function parentsOf(row: Record<string, unknown>): string[] | null {
-  if (typeof row.name !== 'string' || !row.name) return null
+  // A name read here goes into the next query, and into the condition that leaves the rows of a closed table
+  // out: one that is no table name would write that condition anew.
+  if (!isTableName(row.name)) return null
   const parents: string[] = []
   let ended = false
   for (const field of PARENT_FIELDS) {
     const parent = row[field]
     const filled = typeof parent === 'string' && parent !== ''
-    if (filled && ended) return null
+    if (filled && (ended || !isTableName(parent))) return null
     if (filled) parents.push(parent)
     else ended = true
   }
@@ -144,6 +146,7 @@ export class Dictionary {
   private readonly closedSets = new Map<string, Entry<Map<string, string[]>>>()
   private readonly parentChecks = new Map<string, Entry<boolean>>()
   private readonly knownNames = new Map<string, { table: boolean; at: number }>()
+  private readonly partLists = new Map<string, Entry<Map<string, string> | null>>()
 
   /**
    * The client, for the lookups the gate of closed tables is built from: what a table is, what it extends, which
@@ -431,8 +434,10 @@ export class Dictionary {
       const filled = (value: unknown) => typeof value === 'string' && value !== ''
       if (!shown || !filled(shown.name) || !filled(shown['super_class.name'])) return false
 
+      // The name of a table is asked the same way: the lists name tables by "is one of" and "starts with" behind
+      // other conditions, where a dropped one would go unseen as well.
       const [a, b] = NO_SUCH_TABLE
-      const questions = PARENT_FIELDS.flatMap((path) => [`${path}IN${a}^${path}IN${b}`, ...(patterns ? [`${path}STARTSWITH${a}^${path}STARTSWITH${b}`] : [])])
+      const questions = ['name', ...PARENT_FIELDS].flatMap((path) => [`${path}IN${a}^${path}IN${b}`, ...(patterns ? [`${path}STARTSWITH${a}^${path}STARTSWITH${b}`] : [])])
       const answers = await Promise.all(questions.map((query) => this.sn.query<Record<string, string>>({ table: 'sys_db_object', query, fields: ['sys_id'], limit: 1 })))
       return answers.every((answer) => answer.total === 0 && answer.records.length === 0)
     })
@@ -531,6 +536,27 @@ export class Dictionary {
   }
 
   /**
+   * The parts a rotated table is stored in, each with the table whose rows it holds. A part extends nothing, so
+   * nothing but this list says what it is. Measured on one instance: 357 entries for 49 tables, of which 319 are
+   * named after the table with four digits, 8 with one digit, and 30 name the table itself. null where the list
+   * cannot be read completely: the caller then has to go by the name of a table.
+   */
+  rotatedParts(): Promise<Map<string, string> | null> {
+    return this.cached(this.partLists, 'parts', async () => {
+      const read = await this.sn.all<Record<string, string>>({ table: 'sys_table_rotation_schedule', fields: ['table_name', 'name.name'] }, 5_000).catch(unlessNoConnection(null))
+      if (!read || !read.complete || (read.total !== null && read.records.length < read.total)) return null
+      const parts = new Map<string, string>()
+      for (const row of read.records) {
+        // An entry without one of the two names is one this account is not shown in full: then the list says
+        // nothing about the part it stands for.
+        if (!isTableName(row.table_name) || !isTableName(row['name.name'])) return null
+        if (row.table_name !== row['name.name']) parts.set(row.table_name, row['name.name'])
+      }
+      return parts
+    })
+  }
+
+  /**
    * Every table below a table, however deep, each with its parents up to the table. Used where a list names the
    * only tables that may be read: a table below an open one can be closed, by itself or by a parent in between.
    * null if the list cannot be trusted, for the reasons given at closedTables: the caller then has to assume that
@@ -548,7 +574,8 @@ export class Dictionary {
         const deepest = new Set<string>()
         // The names stand in the query once per level: few enough of them at a time that it stays a request.
         for (const group of inGroups(above, 400)) {
-          const under = (path: string) => (group.length === 1 ? `${path}=${group[0]}` : `${path}IN${group.join(',')}`)
+          // With "is one of" also for a single name: that is the condition the instance was shown to apply.
+          const under = (path: string) => `${path}IN${group.join(',')}`
           const query = `${PARENT_FIELDS.map(under).join('^OR')}^ORname=${table}`
           const read = await this.sn.all<Record<string, string>>({ table: 'sys_db_object', query, fields: ['name', ...PARENT_FIELDS] }, 3_000).catch((error) => {
             if (noConnection(error)) throw error
@@ -685,19 +712,15 @@ export class Dictionary {
         remote = row.scriptable_table === 'true'
       }
 
-      let filled = 0
-      for (const field of PARENT_FIELDS) {
-        const parent = row[field]
-        if (!parent) break
-        if (!isTableName(parent) || chain.includes(parent) || chain.length >= MAX_CHAIN) {
-          throw unusableAnswer(`sys_db_object returned a parent chain for "${name}" that cannot be used.`, 'sys_db_object')
-        }
-        chain.push(parent)
-        filled++
+      // Read like every row of this table: a gap among the parents, or a name that is none, is not the end of the chain.
+      const parents = row.name === current ? parentsOf(row) : null
+      if (!parents || parents.some((parent) => chain.includes(parent)) || chain.length + parents.length > MAX_CHAIN) {
+        throw unusableAnswer(`sys_db_object returned a parent chain for "${name}" that cannot be used.`, 'sys_db_object')
       }
+      chain.push(...parents)
 
       // Deeper than one request can see: continue from the last parent found.
-      if (filled < PARENT_FIELDS.length) break
+      if (parents.length < PARENT_FIELDS.length) break
       current = chain[chain.length - 1]
     }
 

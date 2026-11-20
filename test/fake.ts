@@ -7,6 +7,8 @@ export interface Route {
   query?: string
   /** The whole sysparm_query, where a part of it is not proof enough. */
   exact?: string
+  /** A pattern the sysparm_query must match, where neither a part nor the whole says it. */
+  match?: RegExp
   /** The sysparm_group_by a request to the Aggregate API must carry. Omit to match any. */
   groupBy?: string
   /** A null stands for a row that matches but is hidden from the account: counted in the total, never returned. */
@@ -75,6 +77,7 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
       (candidate.api ?? 'table') === api &&
       (candidate.query === undefined || query.includes(candidate.query)) &&
       (candidate.exact === undefined || query === candidate.exact) &&
+      (candidate.match === undefined || candidate.match.test(query)) &&
       (candidate.groupBy === undefined || parsed.searchParams.get('sysparm_group_by') === candidate.groupBy)
     const json = (body: unknown, status: number, headers: Record<string, string> = {}) =>
       new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
@@ -169,7 +172,8 @@ export const closedTables = (...rows: Row[]): Route => ({ table: 'sys_db_object'
 
 /** What an instance answers when it is asked which of some names are tables: the names that are. */
 export function knownTables(...names: string[]): Route {
-  return { table: 'sys_db_object', query: 'nameIN', rows: names.map((name) => ({ name })) }
+  // That question is nothing but a list of names. A list of child tables asks by name too, with more behind it.
+  return { table: 'sys_db_object', match: /^nameIN[^^]*$/, rows: names.map((name) => ({ name })) }
 }
 
 /**

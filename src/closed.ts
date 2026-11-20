@@ -66,13 +66,22 @@ const MAX_PROOFS = 400
 const NO_SUCH_CLASS = ['zz__no_such_class_a', 'zz__no_such_class_b']
 
 /**
- * The tables a table can hold rows of without being their child table, by its name. A rotated table is spread
- * over parts named after it with four digits, and an archive rule moves rows into "ar_<table>". Measured on one
- * instance: of 357 parts, every one is named that way or is the table itself; "syslog0003" has no parent, is read
- * like any table, and answered with 655,964 rows of syslog and of its child tables. A name can be read both ways
- * ("ar_incident0001" as the archive of a part, or as a part of the archive), so both are given.
+ * A table can hold rows of another without being its child table. An archive rule moves rows into "ar_<table>",
+ * and a rotated table is spread over parts. Measured on one instance: "syslog0003" has no parent, is read like any
+ * table, and answered with 655,964 rows of syslog and of its child tables. Of 327 parts, 319 are named after the
+ * table with four digits and 8 with one digit ("sys_replication_queue2").
  */
-export const holdsRowsOf = (name: string): string[] => [/^ar_(.+)$/.exec(name)?.[1], /^(.+)\d{4}$/.exec(name)?.[1]].filter((base): base is string => Boolean(base) && isTableName(base))
+const archiveOf = (name: string): string | undefined => /^ar_(.+)$/.exec(name)?.[1]
+/** By the name alone, a table that ends in digits can be a part of the table without them, or without the last four. */
+const partOfByName = (name: string): Array<string | undefined> => [/^(.*?[^\d])\d+$/.exec(name)?.[1], /^(.+)\d{4}$/.exec(name)?.[1]]
+const tableNames = (names: Array<string | undefined>, but: string): string[] => [...new Set(names)].filter((name): name is string => isTableName(name) && name !== but)
+
+/**
+ * The tables a table can hold rows of, going by its name alone: for where the instance cannot be asked which
+ * tables are parts of a rotated one, and for the name of a record. A name can be read more than one way
+ * ("ar_incident0001" as the archive of a part, or as a part of the archive), so every reading is given.
+ */
+export const holdsRowsOf = (name: string): string[] => tableNames([archiveOf(name), ...partOfByName(name)], name)
 
 export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTables {
   const blocked = (message: string, table: string) => new ServiceNowError(`${message} Nothing was sent.`, 'blocked', table)
@@ -130,7 +139,13 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
       if (why) return `"${table}" is a database view, and ${why}`
     }
     // A part of a rotated table, or the archive of a table, holds the rows of that table and of its child tables.
-    for (const [name, base] of info.chain.flatMap((name) => holdsRowsOf(name).map((base) => [name, base]))) {
+    // Which tables are parts of a rotated one, the instance says in a list. Where that list cannot be read, or
+    // is closed on this machine, the name of a table has to do.
+    const parts = sn.allows('sys_table_rotation_schedule') && sn.allows('sys_table_rotation') ? await dict.rotatedParts() : null
+    const basesOf = (name: string) => tableNames([archiveOf(name), ...(parts ? [parts.get(name)] : partOfByName(name))], name)
+    for (const [name, base] of info.chain.flatMap((name) => basesOf(name).map((base) => [name, base]))) {
+      // A table the deny list names counts whether or not the instance still has it: its archive can outlive it.
+      if (sn.denies(base)) return `"${name}" holds rows of ${base} (a part of a rotated table, or its archive), and "${base}" is closed on this machine`
       let known
       try {
         known = await dict.table(base)

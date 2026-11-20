@@ -2,7 +2,7 @@ import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Row } from '../client.js'
 import type { Column } from '../dictionary.js'
-import { ServiceNowError, unlessNoConnection, validation } from '../errors.js'
+import { ServiceNowError, validation } from '../errors.js'
 import { assertTableName } from '../query.js'
 import { clip, fail, listing, listShape, ok, rawOf, rowSchema, source, tidy } from '../result.js'
 import { traced } from '../trace.js'
@@ -21,6 +21,7 @@ import {
   NAMED_LIKE_A_PAYLOAD,
   payloadTables,
   propertyValueFields,
+  shapeOf,
   READ_ONLY,
   recordNameKey,
   recordPayload,
@@ -68,13 +69,15 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
       if (value && typeof value === 'object' && !Array.isArray(value)) return Object.fromEntries(Object.entries(value).map(([part, text]) => [part, scrub(text)])) as T
       return value
     }
-    const propertyValues = table === 'sys_properties' ? { has: () => false } : await propertyValueFields(ctx, table)
+    const propertyValues = table === 'sys_properties' ? { has: () => false, guessed: false } : await propertyValueFields(ctx, table)
     const restricted = ctx.sn.restricted
-    // What the name stands for: a table, a view with the tables it joins, or nothing that could be read. A field
-    // without a dictionary entry at hand is then judged by the definition of the view, or by its name alone.
-    const shape = await ctx.dict.table(table).catch(unlessNoConnection(null))
-    const describe = (key: string): Column | undefined => known.get(key) ?? (shape?.members ? viewField(shape.members, key) : undefined)
-    const guessed = (key: string, pattern: RegExp) => !shape && !known.has(key) && pattern.test(key)
+    // What the name stands for: a table, a view with the tables it joins, or a view whose definition this account
+    // may not read. A field without a dictionary entry at hand is then judged by the definition of the view, or
+    // by its name alone.
+    const shape = await shapeOf(ctx, table)
+    const describe = (key: string): Column | undefined => known.get(key) ?? (shape.info?.members ? viewField(shape.info.members, key) : undefined)
+    const guessed = (key: string, pattern: RegExp) => shape.kind === 'hidden_view' && !known.has(key) && pattern.test(key)
+    const byGuess = new Set<string>()
     /** Whether a payload carries a record of a closed table. Where it names no table at all, that cannot be ruled out. */
     const carriesClosed = async (payload: string) => {
       const tables = payloadTables(payload)
@@ -134,7 +137,9 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
           if (closed) counts.closedNames++
           out[key] = closed ? CLOSED_NAME : scrub(value)
         } else if (fromProperties || holdsSecret(column, key)) {
-          if (filled(value)) (column?.type || fromProperties ? byType : byName).add(key)
+          // Withheld by the name of the field alone, because what the view joins could not be read: said as that.
+          const onlyGuessed = propertyValues.guessed && propertyValues.has(key) && !mayBePropertyValue(column, key) && !holdsSecret(column, key)
+          if (filled(value)) (onlyGuessed ? byGuess : column?.type || fromProperties ? byType : byName).add(key)
           out[key] = filled(value) ? SECRET_NOTE : value
         } else if (ownValue && filled(value)) {
           // A system property says by its type whether its value is a secret. Without a type its name decides, and
@@ -154,6 +159,11 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     const properties = (count: number) => `${count} system propert${count === 1 ? 'y' : 'ies'}`
     if (byType.size) warnings.push(`Withheld because the field holds a secret: ${list(byType)}.`)
     if (byName.size) warnings.push(`Withheld because the type of the field could not be read and its name suggests a secret: ${list(byName)}.`)
+    if (byGuess.size) {
+      warnings.push(
+        `Withheld because it could not be read which tables this database view joins, and a field of this name can be the value of a system property, some of which hold secrets: ${list(byGuess)}.`,
+      )
+    }
     if (!complete) {
       warnings.push('The types of some fields could not be read (the dictionary is not fully readable for this account). A field that holds a secret is then recognised by its name only.')
     }
@@ -223,7 +233,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
       throw validation(`"${groupBy}" holds a secret. Its values are not listed, also not as groups.`, table)
     }
     // Where it could not be read what the name stands for, a field that is named like a payload counts as one.
-    const unread = !column && !(await ctx.dict.table(table).catch(unlessNoConnection(null)))
+    const unread = !column && (await shapeOf(ctx, table)).kind === 'hidden_view'
     if (recordPayload(table, groupBy, column) || (unread && NAMED_LIKE_A_PAYLOAD.test(groupBy))) {
       throw validation(`"${groupBy}" holds whole records as text, secrets included. Its values are not listed as groups.`, table)
     }

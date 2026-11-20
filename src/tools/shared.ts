@@ -1,7 +1,7 @@
 import type { Row, ServiceNowClient } from '../client.js'
 import { holdsRowsOf, type ClosedTables } from '../closed.js'
-import type { Choice, Column, Dictionary, FieldCheck } from '../dictionary.js'
-import { quoteInstanceText, ServiceNowError, unlessNoConnection, validation } from '../errors.js'
+import type { Choice, Column, Dictionary, FieldCheck, TableInfo } from '../dictionary.js'
+import { noConnection, quoteInstanceText, ServiceNowError, unlessNoConnection, validation } from '../errors.js'
 import { assertFieldPath, isPlainValue, isTableName, parseEncodedQuery, withCondition, type Condition, type ParsedQuery } from '../query.js'
 
 export interface Context {
@@ -48,12 +48,20 @@ const PAYLOAD_FIELDS = new Map<string, string[]>([
   ['sys_sync_preview_remote', ['payload']],
 ])
 
+/**
+ * A table, and the tables it holds rows of by its name: the archive of a table and the parts of a rotated one
+ * carry the same fields with the same content, under a name of their own.
+ */
+const withBases = (table: string): string[] => [table, ...holdsRowsOf(table).flatMap(withBases)]
+/** What a list by table says about a table, or about the table whose rows it holds. */
+const forTable = <T>(list: Map<string, T>, table: string): T | undefined => withBases(table).map((name) => list.get(name)).find((entry) => entry !== undefined)
+
 /** "payload" or "diff" if the field carries a whole record, as itself or as a comparison of two. */
 export function recordPayload(table: string, path: string, column?: Column): 'payload' | 'diff' | null {
   const field = column ? (column.sourceField ?? column.name) : (path.split('.').at(-1) ?? path)
   // Reached through a reference or a view without a dictionary entry at hand: the table it belongs to is not known,
   // so the name decides. Every field of that name in the tables above carries a record.
-  const carries = column ? PAYLOAD_FIELDS.get(column.definedOn)?.includes(field) : path === field ? PAYLOAD_FIELDS.get(table)?.includes(field) : field === 'payload' || field === 'payload_diff'
+  const carries = column ? forTable(PAYLOAD_FIELDS, column.definedOn)?.includes(field) : path === field ? forTable(PAYLOAD_FIELDS, table)?.includes(field) : field === 'payload' || field === 'payload_diff'
   if (!carries) return null
   return field === 'payload_diff' ? 'diff' : 'payload'
 }
@@ -235,32 +243,39 @@ function tableCuts(name: string): string[] {
  */
 const COPIES_OF_RECORDS = new Set(['sys_metadata_link'])
 
-/** What stands before a generated sys_id at the end of an update name: the table, without a doubt. */
+/**
+ * What stands before a generated sys_id at the end of an update name. Mostly that is the table of the record, but
+ * not always. Measured: "sys_ui_form_sections_<sys_id>" is a record of sys_ui_form, and no table is called
+ * sys_ui_form_sections; "sys_ui_list_control_<sys_id>" is a record of the table sys_ui_list_control.
+ */
 const tableBeforeId = (name: string): string | undefined => /^(.+)_[0-9a-f]{32}$/.exec(name)?.[1]
 
 /**
- * Asks in one go which beginnings of these update names are tables. isClosedRecord needs that for each name while
- * a list names the only tables that may be read. A page of two hundred names shares most of its beginnings, so
- * this is a handful of requests where asking name by name would be hundreds. Nothing is asked without such a list.
+ * Asks in one go which beginnings of these update names are tables. isClosedRecord needs that for each name: with
+ * a list of the only tables that may be read for every beginning, otherwise for what stands before the sys_id. A
+ * page of two hundred names shares most of its beginnings, so this is a handful of requests where asking name by
+ * name would be hundreds. Nothing is asked where no table is closed.
  */
 export async function knowRecordTables(ctx: Context, updateNames: string[]): Promise<void> {
-  if (!ctx.sn.restricted || !ctx.sn.openClasses()) return
-  const cuts = updateNames.map((name) => name.toLowerCase()).filter((name) => name.length <= MAX_UPDATE_NAME).flatMap(tableCuts)
+  if (!ctx.sn.restricted) return
+  const names = updateNames.map((name) => name.toLowerCase()).filter((name) => name.length <= MAX_UPDATE_NAME)
+  const asked = ctx.sn.openClasses() ? names.flatMap(tableCuts) : names.map(tableBeforeId).filter((table): table is string => table !== undefined)
   // A look-up that fails here fails again where the name is judged, and is dealt with there.
-  await ctx.dict.knownTables(cuts).catch(unlessNoConnection(null))
+  await ctx.dict.knownTables(asked).catch(unlessNoConnection(null))
 }
 
 /**
  * true if an update name stands for a record of a table that is closed on this machine, or may stand for one. Such
  * a name begins with its table. Mostly the sys_id of the record follows, and then what stands before it is the
- * table. Where something else follows, every way to cut the name is looked at. The readable name of that record is
- * then not passed on.
+ * table, if the instance has a table of that name. Otherwise every way to cut the name is looked at. The readable
+ * name of that record is then not passed on.
  *
  * With a deny list, the closed tables are known by name: the record is in one if its table is one of them, or,
  * where the table cannot be told, if any cut gives one. A name the list closes counts whether or not the instance
- * still lists such a table. With a list of the only tables that may be read, the record has to be in a table that
- * is found and open, and where the table cannot be told, every cut that is a table has to be open. Where no table
- * is found, or no name is given, the answer is yes.
+ * still lists such a table, and a record in the archive of a table or in a part of it is a record of that table.
+ * With a list of the only tables that may be read, the record has to be in a table that is found and open, and
+ * where the table cannot be told, every cut that is a table has to be open. Where no table is found, the name
+ * begins with nothing that can be a table, or no name is given, the answer is yes.
  *
  * Measured: the instance compares a name without regard to case, so the name is judged in small letters.
  */
@@ -269,20 +284,22 @@ export async function isClosedRecord(ctx: Context, updateName: string): Promise<
   const name = updateName.toLowerCase()
   if (!name || name.length > MAX_UPDATE_NAME) return true
   const cuts = tableCuts(name)
-  const exact = tableBeforeId(name)
-  // "sys_script_include_<sys_id>" is no business rule: with a sys_id at the end only one cut is the table.
-  const candidates = exact && cuts.includes(exact) ? [exact] : cuts
-  // A part of a rotated table and the archive of a table hold its rows: a record there is one of that table, and
-  // so is one in a part of its archive.
-  const withBases = (table: string): string[] => [table, ...holdsRowsOf(table).flatMap(withBases)]
-  const tables = [...new Set(candidates.flatMap(withBases))]
-  if (tables.some((table) => ctx.sn.denies(table) || COPIES_OF_RECORDS.has(table))) return true
+  if (!cuts.length) return true
   const denied = await ctx.dict.closedTables().catch(unlessNoConnection(null))
   if (!denied) return true
-  if (tables.some((table) => denied.has(table))) return true
-  if (!ctx.sn.openClasses()) return false
+  const closedByName = (table: string) => withBases(table).some((base) => ctx.sn.denies(base) || COPIES_OF_RECORDS.has(base) || denied.has(base))
+  const listed = Boolean(ctx.sn.openClasses())
+  // Nothing the name can begin with is closed by name, and no list says that only some tables may be read.
+  if (!listed && !cuts.some(closedByName)) return false
 
-  const known = await ctx.dict.knownTables(candidates).catch(unlessNoConnection(null))
+  // "sys_script_include_<sys_id>" is no business rule: where a table of that name stands before the sys_id, the
+  // record is of that table and of no shorter one.
+  const exact = tableBeforeId(name)
+  const known = await ctx.dict.knownTables(listed ? cuts : exact && cuts.includes(exact) ? [exact] : []).catch(unlessNoConnection(null))
+  const candidates = exact && known?.has(exact) ? [exact] : cuts
+  if (candidates.some(closedByName)) return true
+  if (!listed) return false
+
   const found = candidates.filter((table) => known?.has(table))
   if (!found.length) return true
   for (const table of found) {
@@ -333,7 +350,7 @@ export function recordNameKey(table: string, path: string, column?: Column, owne
   const plain = path === field && !column?.sourceField
   const tables = [...(column ? [column.definedOn] : []), ...(plain ? [table] : owner ? [owner] : [])]
   // Reached through a reference without a dictionary entry at hand: the names used for an update name decide.
-  const known = tables.length ? tables.map((name) => RECORD_NAMES.get(name)?.[field]).find(Boolean) : [...RECORD_NAMES.values()].map((fields) => fields[field]).find((entry) => entry?.holds === 'update_name')
+  const known = tables.length ? tables.map((name) => forTable(RECORD_NAMES, name)?.[field]).find(Boolean) : [...RECORD_NAMES.values()].map((fields) => fields[field]).find((entry) => entry?.holds === 'update_name')
   if (!known) return null
   // Beside the field, under the same prefix: "upgrade_detail.target_name" has "upgrade_detail.file_name".
   if (column?.sourceField) return { ...known, path: path.slice(0, path.length - field.length) + known.key }
@@ -346,6 +363,9 @@ export function recordNameKey(table: string, path: string, column?: Column, owne
  * table and the value of a system property. undefined for a field of no joined table.
  */
 export function viewField(members: Array<{ table: string; prefix: string }>, key: string): Column | undefined {
+  // A path that walks on from a field of the view ends on another table, which the definition of the view does
+  // not name: such a field is judged by its name, like every field behind a reference.
+  if (key.includes('.')) return undefined
   const member = members.filter(({ prefix }) => key.startsWith(`${prefix}_`)).sort((a, b) => b.prefix.length - a.prefix.length)[0]
   if (!member) return undefined
   return { name: key, label: '', type: '', reference: null, mandatory: false, readOnly: false, maxLength: null, active: true, choice: false, definedOn: member.table, sourceField: key.slice(member.prefix.length + 1) }
@@ -521,7 +541,9 @@ const SKIPS_EMPTY = new Set(['!=', 'NOT IN', 'NOT LIKE', 'NSAMEAS'])
  */
 const NO_SECRET_PROPERTIES = 'typeNOT INpassword,password2'
 
-const isPropertyValue = (column: Column | undefined) => column?.definedOn === 'sys_properties' && (column.sourceField ?? column.name) === 'value'
+/** The table of system properties, its archive or a part of it. */
+const holdsProperties = (table: string) => withBases(table).includes('sys_properties')
+const isPropertyValue = (column: Column | undefined) => column !== undefined && holdsProperties(column.definedOn) && (column.sourceField ?? column.name) === 'value'
 
 /**
  * Whether a field holds a secret. The dictionary says so by its type. Where the entry is missing, or came back
@@ -549,6 +571,8 @@ export interface PropertyValues {
   has(field: string): boolean
   /** Whether the table hands out such values at all, or may. */
   any: boolean
+  /** true where that is told by the name of a field alone, because what the table is could not be read. */
+  guessed?: boolean
 }
 
 /**
@@ -558,11 +582,37 @@ export interface PropertyValues {
  * that is named like such a value counts: a view of system properties could not be ruled out.
  */
 export async function propertyValueFields(ctx: Context, table: string): Promise<PropertyValues> {
-  if (table === 'sys_properties') return { has: (field) => field === 'value', any: true }
-  const info = await ctx.dict.table(table).catch(unlessNoConnection(null))
-  if (!info) return { has: (field) => NAMED_LIKE_A_VALUE.test(field), any: true }
-  const names = new Set((info.members ?? []).filter((member) => member.table === 'sys_properties').map((member) => `${member.prefix}_value`))
+  if (holdsProperties(table)) return { has: (field) => field === 'value', any: true }
+  const shape = await shapeOf(ctx, table)
+  if (shape.kind === 'hidden_view') return { has: (field) => NAMED_LIKE_A_VALUE.test(field), any: true, guessed: true }
+  const info = shape.info
+  // A table below the table of system properties hands out the value under its own name.
+  if (info?.chain.some(holdsProperties)) return { has: (field) => field === 'value', any: true }
+  const names = new Set((info?.members ?? []).filter((member) => holdsProperties(member.table)).map((member) => `${member.prefix}_value`))
   return { has: (field) => names.has(field), any: names.size > 0 }
+}
+
+export interface Shape {
+  /**
+   * What a name stands for on the instance. "hidden_view": the instance lists no table of that name, and whether
+   * it is a database view, and of which tables, this account may not read. If it answers at all it is a view, and
+   * nothing says whose fields it hands out, so a field is then judged by its name. "unknown": the table of tables
+   * itself could not be read, which says nothing about this name in particular.
+   */
+  kind: 'table' | 'view' | 'unlisted' | 'hidden_view' | 'unknown'
+  info: TableInfo | null
+}
+
+/** What a name stands for, and where that could not be read, why not. */
+export async function shapeOf(ctx: Context, table: string): Promise<Shape> {
+  try {
+    const info = await ctx.dict.table(table)
+    return { kind: !info ? 'unlisted' : info.kind === 'database_view' ? 'view' : 'table', info }
+  } catch (error) {
+    if (noConnection(error)) throw error
+    const about = error instanceof ServiceNowError ? (error.table ?? '') : ''
+    return { kind: about.startsWith('sys_db_view') ? 'hidden_view' : 'unknown', info: null }
+  }
 }
 
 export interface Guard {
@@ -646,15 +696,15 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   }
   // A field of a view whose dictionary entry could not be read is still a field of one of the tables the view
   // joins: the definition of the view says which, and that decides what the field holds.
-  const shape = await ctx.dict.table(table).catch(unlessNoConnection(null))
+  const shape = await shapeOf(ctx, table)
   const described = new Map(check.resolved)
   for (const path of paths) {
-    const viaView = !described.has(path) && shape?.members ? viewField(shape.members, path) : undefined
+    const viaView = !described.has(path) && shape.info?.members ? viewField(shape.info.members, path) : undefined
     if (viaView) described.set(path, viaView)
   }
   // The other way round, a query on a parent answers with the rows of its child tables: those of closed ones are left
   // out by the gate every request passes through, which also says so in the answer.
-  const sent = await keepSecretsOutOfReach(ctx, table, query, parsed, described, check.owners, warnings, !shape)
+  const sent = await keepSecretsOutOfReach(ctx, table, query, parsed, described, check.owners, warnings, shape.kind === 'hidden_view')
   refuseJournalConditions(table, parsed, check.resolved)
   warnAboutEmptyFields(parsed, check.resolved, warnings)
   await refuseChoiceLabels(ctx, table, parsed, check, warnings)
@@ -725,7 +775,7 @@ async function keepSecretsOutOfReach(
   resolved: Map<string, Column>,
   owners: FieldCheck['owners'],
   warnings: string[],
-  /** true where the name could be read neither as a table nor as a view: a field is then judged by its name. */
+  /** true for a view whose definition this account may not read: a field is then judged by its name. */
   unread = false,
 ): Promise<string> {
   // The names of the records in a closed table are kept back from the answer. "Starts with A" on a reference into
@@ -814,8 +864,10 @@ async function keepSecretsOutOfReach(
     if (table === 'sys_properties' && field === 'value') propertyValues = true
     else if (valueFields.has(field) || mayBePropertyValue(column, field)) {
       throw validation(
-        `"${field}" is the value of a system property, and some properties hold secrets. Through a database view or a reference it cannot be compared or sorted by, ` +
-          'because the properties that hold secrets cannot be left out there. Query sys_properties itself. Nothing was sent.',
+        (valueFields.guessed && !isPropertyValue(column)
+          ? `"${field}" can be the value of a system property: the instance lists "${table}" as no table, and which tables it joins as a database view this account may not read. Some properties hold secrets. `
+          : `"${field}" is the value of a system property, and some properties hold secrets. `) +
+          'Through a database view or a reference it cannot be compared or sorted by, because the properties that hold secrets cannot be left out there. Query sys_properties itself. Nothing was sent.',
         table,
       )
     }
