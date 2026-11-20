@@ -415,7 +415,7 @@ npm test              # unit tests against a fake instance, no network
 npm run typecheck
 npm run smoke         # end-to-end against the configured instance, read-only
 npm run call -- sn_schema '{"table":"incident","filter":"assign"}'
-npm run origin-check  # measures sn_origin on the configured instance, with about 1,200 requests
+npm run origin-check  # measures sn_origin on the configured instance, with about 1,200 requests for samples of 100
 ```
 
 `npm run smoke` drives the real server through an MCP client and exits with 1 if a check fails. It prints counts and
@@ -442,6 +442,9 @@ What was tested, and what was not:
 - The test instance has no domain separation, no application installed from a company's own repository, and an
   account that reads English. What the server does for those cases follows the documentation and is covered by
   unit tests only.
+- Tables closed on the machine were tried live with three lists (a deny list of one table, one of a table with
+  child tables and a pattern, and an allow list): the rows, names and counts came out as described. That is a
+  trial on one instance, not a proof: the rules are in `src/closed.ts`, and the unit tests hold them.
 - On another release, run `npm run doctor` and `npm run smoke` first.
 - Signing in with a token is covered by unit tests only.
 - CI runs the unit tests on Linux, Windows and macOS.
