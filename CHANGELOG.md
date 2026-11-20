@@ -3,6 +3,16 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## Unreleased
+
+### Fixed
+
+- **A request that the instance ended because it ran too long was reported as an unknown failure.** Measured: a
+  count per value of a text field of a table of 3.5 million rows came back after 61 seconds with HTTP 500 and
+  "Transaction cancelled: maximum execution time exceeded". That is a request that ran out of time, and it is
+  reported as one now, with the same advice. The server's own limit is usually reached before; a limit set above
+  a minute is not.
+
 ## 0.4.1 (2026-11-20)
 
 Found by measuring, not by reading: every function was held against the instance asked directly, and each

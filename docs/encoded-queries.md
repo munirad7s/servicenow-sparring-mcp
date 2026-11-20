@@ -260,6 +260,10 @@ Also measured:
   times and durations another form; a currency its unit.
 - `NSAMEAS` leaves out the rows where either field is empty. Of 82 incidents, 48 had a caller and nobody who
   resolved them and 28 had two different people there: `caller_idNSAMEASresolved_by` matched the 28.
+- An instance ends a request that runs too long. A count per value of a text field of a table of 3.5 million
+  rows came back after 61 seconds with HTTP 500 and "Transaction cancelled: maximum execution time exceeded". A
+  search through the same field, sorted by it, took 44 seconds and answered. The server reports the first as a
+  request that ran out of time; its own limit, 30 seconds unless set otherwise, is usually reached before.
 - An instance takes a request up to a length. One instance took an address of 8,218 characters and answered HTTP
   414 to one of 8,223, whatever it consisted of. `^`, `,` and `=` are written with three characters there, so a
   query of 2,701 carets was the longest of its kind. The server does not send a request longer than 8,000.

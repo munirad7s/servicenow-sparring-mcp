@@ -163,6 +163,13 @@ test('failures are classified by what the instance says', async () => {
 
   const oracle = new ServiceNowClient(config, async () => json({ error: { message: 'Oracle connection lost', detail: '' } }, 500))
   assert.equal(await kindOf(() => oracle.query({ table: 'incident' })), 'unknown')
+  // Measured: a count per value of a text field of a large table was ended by the instance after 61 seconds, with
+  // HTTP 500 and these words. The request ran out of time, on the side of the instance.
+  const cancelled = { message: 'Exception while executing request: Transaction cancelled: maximum execution time exceeded', detail: 'Transaction cancelled: maximum execution time exceeded Check logs for error trace or enable glide.rest.debug property to verify REST request processing' }
+  const slow = new ServiceNowClient(config, async () => json({ error: cancelled, status: 'failure' }, 500))
+  const ended = await failure(() => slow.groupCount('syslog', 'message'))
+  assert.equal(ended.kind, 'timeout')
+  assert.match(ended.message, /answered HTTP 500: "Exception while executing request: Transaction cancelled: maximum execution time exceeded"/)
   const detail = new ServiceNowClient(config, async () => json({ error: { message: 'Operation Failed', detail: 'ACL Exception Read Failed due to security constraints' } }, 400))
   assert.equal(await kindOf(() => detail.query({ table: 'incident' })), 'acl')
 })

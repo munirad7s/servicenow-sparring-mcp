@@ -633,6 +633,9 @@ function sameAuth(a: Auth, b: Auth): boolean {
 
 function classify(status: number, text: string): ErrorKind {
   if (status === 401) return 'auth'
+  // Measured: a request that runs longer than the instance allows is ended by the instance, after 61 seconds
+  // with HTTP 500 and these words. That is a request that ran out of time, not an unknown failure.
+  if (/maximum execution time exceeded/i.test(text)) return 'timeout'
   if (status === 404 || /invalid table/i.test(text)) return 'not_found'
   if (status === 403 || /\bACL\b|not authorized|insufficient rights|security constraints/i.test(text)) return 'acl'
   if (status === 429) return 'rate_limited'

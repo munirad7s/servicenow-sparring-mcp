@@ -276,7 +276,7 @@ function hintFor(kind: string, about: string | undefined, message: string): stri
     case 'rate_limited':
       return 'The instance is limiting requests. Wait before trying again.'
     case 'timeout':
-      return 'The instance did not answer in time. Narrow the query, or try again later.'
+      return 'The instance did not answer in time, or ended the request because it ran too long. Narrow the query, or try again later.'
     case 'network':
       return 'The instance could not be reached. Check the address and the network. A certificate error points to a company proxy: see "Proxies and certificates" in the README.'
     case 'redirect':
