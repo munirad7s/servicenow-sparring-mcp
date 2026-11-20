@@ -1440,6 +1440,40 @@ test('a secret is found in JSON inside a JSON string, and behind a type written 
   assert.match(cdata.text, /<value>\[withheld\]<\/value>/)
 })
 
+test('text that begins ten thousand things and ends none costs its length, not its length squared', () => {
+  // Whoever can write a record can write this text. Read with a pattern that looks for an end from every
+  // beginning, 60,000 beginnings took 25 seconds. A pass that never searches a stretch twice takes milliseconds.
+  const hostile = [
+    '<a><![CDATA['.repeat(60_000),
+    `${'<password><![CDATA['.repeat(60_000)}]]>`,
+    '<sys_properties><name>x</name>'.repeat(60_000),
+    `<sys_properties><type>password</type>${'<value><![CDATA['.repeat(60_000)}</sys_properties>`,
+    '<!-- '.repeat(60_000),
+    `{"c":"{\\"api_key\\":\\"${'\\\\\\\\'.repeat(100_000)}`,
+  ]
+  const started = performance.now()
+  for (const text of hostile) {
+    scrubSecrets(text)
+    payloadTables(text)
+  }
+  const took = performance.now() - started
+  assert.ok(took < 3_000, `${Math.round(took)} ms`)
+})
+
+test('a secret is taken out of markup that sits inside a CDATA section too', () => {
+  // A record inside a text inside a record: the inner one is read like the outer one.
+  const nested = scrubSecrets('<record_update><sys_remote><payload><![CDATA[<sys_user><user_password>$s$hash</user_password><name>Abel</name></sys_user>]]></payload></sys_remote></record_update>')
+  assert.equal(nested.withheld, 1)
+  assert.match(nested.text, /<user_password>\[withheld\]<\/user_password><name>Abel<\/name>/)
+  // An element that is not ended is left as it is, and so is the text behind it.
+  const open = '<password><![CDATA[abc <name>x</name>'
+  assert.deepEqual(scrubSecrets(open), { text: open, withheld: 0 })
+  // The same property record twice: each is judged by its own type.
+  const two = scrubSecrets('<sys_properties><name>a</name><type>password2</type><value>one</value></sys_properties><sys_properties><name>b</name><type>string</type><value>two</value></sys_properties>')
+  assert.equal(two.withheld, 1)
+  assert.match(two.text, /<value>\[withheld\]<\/value>.*<value>two<\/value>/)
+})
+
 test('the tables of the records a payload carries are all found', () => {
   assert.deepEqual(payloadTables('<record_update table="sys_user" data-action="x"><sys_user action="INSERT_OR_UPDATE"><name>A</name></sys_user></record_update>'), ['sys_user'])
   assert.deepEqual(payloadTables("<record_update><sys_metadata_link action=\"INSERT_OR_UPDATE\"/><sys_user action='DELETE'>x</sys_user></record_update>"), ['sys_metadata_link', 'sys_user'])

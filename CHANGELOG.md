@@ -3,6 +3,21 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## Unreleased
+
+### Security
+
+- **A text from the instance could keep the server busy for minutes.** Every text an answer carries is searched
+  for secrets, and a payload for the tables of its records. Both were done with patterns that look for an end from
+  every beginning: a text of 40,000 property records that are never closed (1.2 MB) took 11 seconds, and the time
+  grows with the square of the length, up to the 10 MB an answer may have. Whoever can write a long text into a
+  record the agent reads could stall the server that way. Both are now read in one pass that never searches a
+  stretch twice: the same text takes 28 milliseconds. Checked against the old code on 721 texts of the test
+  instance (payloads, scripts, deleted records): the same result on every one. Since 0.3.1. Found without a
+  reviewer, by timing the new code on hostile input.
+- A secret inside markup that sits in a CDATA section of another element was passed on: a record inside a text
+  inside a record. It is read like the outer one.
+
 ## 0.3.2 (2026-11-20)
 
 Six reviews of 0.3.1 by a second model, each from another corner, three more of the reworked code, and what they

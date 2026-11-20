@@ -59,37 +59,109 @@ export function recordPayload(table: string, path: string, column?: Column): 'pa
 const WITHHELD = '[withheld]'
 
 /**
+ * Looks for the same text again and again while a longer text is read from left to right. A stretch that was
+ * searched once is not searched again: a text made of ten thousand beginnings and no end then costs its length,
+ * not its length squared. Ask with positions that do not go backwards.
+ */
+function finder(text: string, needle: string): (from: number) => number {
+  let found = -2
+  return (from) => {
+    if (found !== -1 && found < from) found = text.indexOf(needle, from)
+    return found
+  }
+}
+
+/**
+ * The elements of a text that hold nothing but text, <tag …>text</tag>, with the text plain or in one CDATA
+ * section. Read in one pass. Only the elements whose name is wanted are looked into.
+ */
+function* simpleElements(text: string, wanted: (tag: string) => boolean): Generator<{ start: number; end: number; tag: string; plain: string }> {
+  const cdataEnd = finder(text, ']]>')
+  const OPEN = /<([A-Za-z_][\w.-]*)(?:\s[^<>]*)?>/g
+  const CDATA = /\s*<!\[CDATA\[/y
+  const BLANKS = /\s*/y
+  let done = 0
+  for (let match = OPEN.exec(text); match; match = OPEN.exec(text)) {
+    const tag = match[1]
+    if (match.index < done || !wanted(tag)) continue
+    const from = match.index + match[0].length
+    let plain: string
+    let after: number
+    CDATA.lastIndex = from
+    if (CDATA.test(text)) {
+      const inner = CDATA.lastIndex
+      const close = cdataEnd(inner)
+      if (close < 0) continue
+      BLANKS.lastIndex = close + 3
+      BLANKS.test(text)
+      after = BLANKS.lastIndex
+      plain = text.slice(inner, close)
+    } else {
+      after = text.indexOf('<', from)
+      // No "<" is left, or the element is empty.
+      if (after <= from) continue
+      plain = text.slice(from, after)
+    }
+    const closing = `</${tag}>`
+    if (!text.startsWith(closing, after)) continue
+    done = after + closing.length
+    yield { start: match.index, end: done, tag, plain: plain.trim() }
+  }
+}
+
+/**
  * Takes out of a text that carries a record what looks like a secret: the content of an XML element, or the value
  * of a JSON key, whose name suggests one, and the value of a system property that holds one. Recognised by name
  * only: the types of the record's fields are not at hand here.
  *
  * A system property inside a payload is judged like one read from its table: by its type, without a type by its
  * name, and without both its value is taken out.
+ *
+ * The text comes from the instance, and whoever can write a record can write this text. It is read in passes that
+ * cost its length: see finder().
  */
 export function scrubSecrets(text: string): { text: string; withheld: number } {
   if (!/[<"]/.test(text)) return { text, withheld: 0 }
   let withheld = 0
-  const CONTENT = String.raw`(\s*<!\[CDATA\[[\s\S]*?\]\]>\s*|[^<]+)`
-  let out = text.replace(new RegExp(String.raw`<([A-Za-z_][\w.-]*)(?:\s[^<>]*)?>${CONTENT}<\/\1>`, 'g'), (whole, tag: string, content: string) => {
-    const plain = content.replace(/^\s*<!\[CDATA\[|\]\]>\s*$/g, '').trim()
-    // "true" and "false" are switches such as "display_password", not secrets.
-    if (!LOOKS_SECRET.test(tag) || !plain || /^(true|false)$/.test(plain)) return whole
-    withheld++
-    // Without its attributes: a display value there would repeat the content.
-    return `<${tag}>${WITHHELD}</${tag}>`
-  })
-  out = out.replace(/<sys_properties(?:\s[^<>]*)?>[\s\S]*?<\/sys_properties>/g, (record) => {
-    const read = (tag: string) =>
-      (new RegExp(String.raw`<${tag}(?:\s[^<>]*)?>${CONTENT}<\/${tag}>`).exec(record)?.[1] ?? '').replace(/^\s*<!\[CDATA\[|\]\]>\s*$/g, '').trim()
-    const type = read('type')
-    const name = read('name')
-    const secret = type ? /^password2?$/i.test(type) : name ? LOOKS_SECRET.test(name) : true
-    if (!secret) return record
-    return record.replace(new RegExp(String.raw`<value(?:\s[^<>]*)?>${CONTENT}<\/value>`, 'g'), () => {
+  /** The text with the content of the wanted elements taken out. "always" also where the content is a switch. */
+  const without = (source: string, wanted: (tag: string) => boolean, always: boolean): string => {
+    let out = ''
+    let last = 0
+    for (const element of simpleElements(source, wanted)) {
+      // "true" and "false" are switches such as "display_password", not secrets.
+      if (!always && (!element.plain || /^(true|false)$/.test(element.plain))) continue
       withheld++
-      return `<value>${WITHHELD}</value>`
-    })
-  })
+      // Without its attributes: a display value there would repeat the content.
+      out += `${source.slice(last, element.start)}<${element.tag}>${WITHHELD}</${element.tag}>`
+      last = element.end
+    }
+    return last ? out + source.slice(last) : source
+  }
+  let out = without(text, (tag) => LOOKS_SECRET.test(tag), false)
+
+  // A system property: its type says whether the value is a secret.
+  const RECORD = /<sys_properties(?:\s[^<>]*)?>/g
+  const CLOSING = '</sys_properties>'
+  const recordEnd = finder(out, CLOSING)
+  let cleaned = ''
+  let last = 0
+  for (let match = RECORD.exec(out); match; match = RECORD.exec(out)) {
+    const close = recordEnd(match.index)
+    if (close < 0) break
+    const end = close + CLOSING.length
+    const record = out.slice(match.index, end)
+    const fields = [...simpleElements(record, (tag) => tag === 'type' || tag === 'name')]
+    const type = fields.find((field) => field.tag === 'type')?.plain ?? ''
+    const name = fields.find((field) => field.tag === 'name')?.plain ?? ''
+    const secret = type ? /^password2?$/i.test(type) : name ? LOOKS_SECRET.test(name) : true
+    if (secret) {
+      cleaned += out.slice(last, match.index) + without(record, (tag) => tag === 'value', true)
+      last = end
+    }
+    RECORD.lastIndex = end
+  }
+  if (last) out = cleaned + out.slice(last)
+
   // JSON, also where it sits inside a string of another JSON text and its quotes are escaped. There an escape of
   // the inner text is written with two backslashes: \\u003d, \\/ and, for a quote inside the value, \\\".
   for (const quote of ['"', String.raw`\\"`]) {
@@ -173,6 +245,12 @@ export function recordNameKey(table: string, path: string, column?: Column): { p
 
 /** Elements that hold records and are none themselves. */
 const PAYLOAD_WRAPPERS = new Set(['record_update', 'unload', 'xml'])
+/** What is no element and can hold "<": text that is not markup, a comment, a processing instruction. */
+const SECTIONS: Array<[start: string, end: string]> = [
+  ['<![CDATA[', ']]>'],
+  ['<!--', '-->'],
+  ['<?', '?>'],
+]
 
 /**
  * The tables of the records a payload carries: the table named on its root, and every element that has an action
@@ -187,11 +265,28 @@ export function payloadTables(text: string): string[] {
   // Measured: a deleted or an archived record is stored under an element that carries the name of its table and
   // nothing else, and a captured change under a wrapper. So the outermost element counts, and every element that
   // stands directly inside a wrapper, whether it says what was done to it or not.
+  // Read in one pass that costs the length of the text: see finder(). An attribute value may hold ">", so
+  // attributes are read as such and not skipped up to the next ">".
   const open: string[] = []
-  // An attribute value may hold ">", so attributes are read as such and not skipped up to the next ">".
-  for (const tag of text.matchAll(/<!\[CDATA\[[\s\S]*?\]\]>|<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<(\/?)([A-Za-z_][\w.-]*)(?:\s+[\w:.-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*\s*(\/?)>/g)) {
+  const ends = SECTIONS.map(([, end]) => finder(text, end))
+  const TAG = /<(\/?)([A-Za-z_][\w.-]*)(?:\s+[\w:.-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*\s*(\/?)>/y
+  scan: for (let at = text.indexOf('<'); at >= 0; at = text.indexOf('<', at)) {
+    for (const [index, [start, end]] of SECTIONS.entries()) {
+      if (!text.startsWith(start, at)) continue
+      const close = ends[index](at + start.length)
+      // Not ended: the rest of the text is inside it.
+      if (close < 0) break scan
+      at = close + end.length
+      continue scan
+    }
+    TAG.lastIndex = at
+    const tag = TAG.exec(text)
+    if (!tag) {
+      at++
+      continue
+    }
+    at = TAG.lastIndex
     const [, closing, name, empty] = tag
-    if (!name) continue
     if (closing) {
       open.pop()
       continue
