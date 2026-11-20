@@ -743,7 +743,7 @@ export async function requireProofOnView(ctx: Context, view: string, paths: stri
   for (const field of new Set(paths.map((path) => path.split('.')[0]))) {
     if (await ctx.dict.viewCarries(view, field)) continue
     throw validation(
-      `"${field}" is a field of the database view "${view}", but the instance did not prove that it applies a condition on it: asked for rows where it is empty and filled at once, it did not answer with none. ` +
+      `"${field}" is asked of "${view}", which is a database view or could be one, and the instance did not prove that it applies a condition on that field: asked for rows where it is empty and filled at once, it did not answer with none. ` +
         'Measured: a view drops a condition on some of its fields and answers unfiltered, so nothing was sent.',
       view,
     )
@@ -815,9 +815,13 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
 
   // What a view is filtered or sorted by is asked of the instance first, after everything that refuses a query
   // without a request. A field to count by is asked about where the count is made, for the same reason.
-  if (shape.kind === 'view') await requireProofOnView(ctx, table, parsed.fields.filter((path) => !check.resolved.get(path.split('.')[0])?.outsideList))
+  // The same where it could not be read what the name stands for: it can be a view all the same.
+  const proveOnView = async () => {
+    if (shape.kind !== 'table') await requireProofOnView(ctx, table, parsed.fields.filter((path) => !check.resolved.get(path.split('.')[0])?.outsideList))
+  }
 
   if (check.status === 'checked') {
+    await proveOnView()
     const fieldCheck = paths.length ? 'all field names verified against sys_dictionary' : 'not needed: the call names no fields'
     return { fieldCheck, query: sent, parsed, resolved: check.resolved, described, owners: check.owners, warnings }
   }
@@ -842,6 +846,8 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
         table,
       )
     }
+    // A row that carries a field does not say that a view filters by it.
+    await proveOnView()
     return { fieldCheck: `field names verified against a row of the table, because ${why}`, query: sent, parsed, resolved: check.resolved, described, owners: check.owners, warnings }
   }
 

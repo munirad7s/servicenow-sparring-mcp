@@ -253,7 +253,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
 
     // A view is asked first whether it applies a condition on the field: one that it drops would count every row
     // as one group. A field outside the list of the view was asked about when its name was checked.
-    if ((await shapeOf(ctx, table)).kind === 'view' && !guard.resolved.get(groupBy.split('.')[0])?.outsideList) await requireProofOnView(ctx, table, [groupBy])
+    if ((await shapeOf(ctx, table)).kind !== 'table' && !guard.resolved.get(groupBy.split('.')[0])?.outsideList) await requireProofOnView(ctx, table, [groupBy])
 
     // The label of a group is the name behind a reference. The client leaves it out where that name could be the name
     // of a record in a closed table, and the answer says so.

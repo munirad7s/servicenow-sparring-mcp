@@ -191,6 +191,17 @@ test('without a dictionary, field names are checked against a row of the table',
   assert.equal(refused.data.error, 'validation')
   assert.match(refused.data.message, /Unknown field: zzz/)
   assert.equal(typo.sentTo('v_virtual').length, 1, 'only the probe was sent')
+
+  // A row that carries a field does not say that the instance filters by it: what cannot be read to be a plain
+  // table can be a view, and a view was measured to drop the condition on a field its rows carry.
+  const dropping = await connect([{ table: 'v_virtual', exact: 'aISEMPTY^aISNOTEMPTY', rows: [{ a: '1', b: '2' }] }, ...routes])
+  const lost = await dropping.call('sn_query', { table: 'v_virtual', query: 'a=1', fields: ['b'] })
+  assert.equal(lost.data.error, 'validation')
+  assert.match(lost.data.message, /"a" is asked of "v_virtual", which is a database view or could be one, and the instance did not prove that it applies a condition on that field/)
+  assert.ok(!dropping.calls.some((entry) => entry.query === 'a=1'))
+  // A field that is only returned needs no such proof.
+  const returned = await connect([{ table: 'v_virtual', exact: 'bISEMPTY^bISNOTEMPTY', rows: [{ a: '1', b: '2' }] }, ...routes])
+  assert.equal((await returned.call('sn_query', { table: 'v_virtual', query: 'a=1', fields: ['b'] })).isError, false)
 })
 
 test('when field names cannot be verified at all, a filtered query is not sent', async () => {
@@ -414,7 +425,7 @@ test('a view that lists the fields it takes from a table has no other field of t
     const lost = await connect(world(listed, dropped('inc_state'), rows))
     const refused = await lost.call('sn_query', { table: 'incident_caller', ...args })
     assert.deepEqual({ isError: refused.isError, error: refused.data.error }, { isError: true, error: 'validation' }, JSON.stringify(args))
-    assert.match(refused.data.message, /"inc_state" is a field of the database view "incident_caller", but the instance did not prove that it applies a condition on it/, JSON.stringify(args))
+    assert.match(refused.data.message, /"inc_state" is asked of "incident_caller", which is a database view or could be one, and the instance did not prove that it applies a condition on that field/, JSON.stringify(args))
     assert.ok(!lost.calls.some((entry) => entry.table === 'incident_caller' && /inc_state=1|ORDERBYDESCinc_state/.test(entry.query)), JSON.stringify(args))
   }
 
