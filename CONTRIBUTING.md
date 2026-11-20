@@ -4,25 +4,33 @@ Thank you for helping. A few rules keep this project what it is.
 
 ## The rules
 
-1. **Reads only.** No tool and no code path may send anything but `GET`. `test/repo.test.ts` fails the build
-   otherwise. A feature that needs a write does not belong here.
+1. **Reads only.** No tool and no code path may send anything but `GET`. `test/repo.test.ts` fails otherwise. A
+   feature that needs a write does not belong here.
 2. **No unchecked input.** Everything that ends up in a URL or an encoded query passes through `src/query.ts`.
-   What cannot be checked is refused.
+   What cannot be checked is refused. A value read from the instance is checked like any other before it goes into
+   the next query.
 3. **Say what is not known.** A tool that cannot read a source reports "not checked" or "unknown". It never returns
    an empty list in its place. New tools list their own gaps in `src/limitations.ts`.
 4. **Measure before you claim.** A statement about ServiceNow behaviour in code, tests or docs was checked on an
-   instance or in the documentation. Say which.
+   instance or in the documentation. Say which. `docs/encoded-queries.md` shows the form.
 5. **No private data.** No instance names, host names, user names or record content in code, tests, docs or
-   commit messages. Tests use `example.service-now.com`.
+   commit messages. Tests use `example.service-now.com` and addresses at `example.org`. `test/repo.test.ts` scans
+   for instance hosts, local paths, mail addresses and invisible characters.
 
 ## Working on it
 
 ```bash
 npm install
-npm test            # fake instance, no network
+npm test             # fake instance, no network
 npm run typecheck
-npm run smoke       # read-only, against your configured instance
+npm run build
+npm run doctor       # what the configured account can read
+npm run smoke        # read-only, end to end against your instance
+npm run call -- sn_schema '{"table":"incident","filter":"assign"}'
 ```
 
-Add a unit test with every change. If you change how a tool reads the instance, run `npm run smoke` against a real
-instance and say in the pull request which release it was.
+Add a unit test with every change. The fake instance in `test/fake.ts` behaves like the Table API where the tools
+depend on it: it leaves unknown fields out of a row, and it answers "Invalid table" for a table without a route.
+
+If you change how a tool reads the instance, run `npm run smoke` against a real instance and say in the pull request
+which release it was. If you change `sn_origin`, run `npm run origin-check` before and after.

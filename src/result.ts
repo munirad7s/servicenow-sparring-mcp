@@ -1,6 +1,7 @@
 import { z } from 'zod'
 import type { Page, Row, ServiceNowClient } from './client.js'
 import { ServiceNowError } from './errors.js'
+import { currentCall } from './trace.js'
 
 export type ToolResult = {
   content: Array<{ type: 'text'; text: string }>
@@ -8,16 +9,19 @@ export type ToolResult = {
   isError?: boolean
 }
 
-/** Rough ceiling for one answer, so a single call cannot flood the agent's context. */
+/** Rough ceiling for the rows of one answer, so a single call cannot flood the agent's context. */
 const MAX_ANSWER_CHARS = 60_000
+/** Text values up to this length are never cut. */
+const LONG_VALUE_CHARS = 2_000
 
 export const rowSchema = z.record(z.string(), z.unknown())
 
-/** Every answer says where it came from and when. */
+/** Every answer says where it came from, when, and what it cost. */
 export const sourceShape = {
   instance: z.string().describe('Host of the instance that answered.'),
   fetchedAt: z.string().describe('Time of the answer, ISO 8601, UTC.'),
-  warnings: z.array(z.string()).describe('Things that limit how far this answer can be trusted.'),
+  requests: z.number().describe('GET requests this answer needed.'),
+  warnings: z.array(z.string()).describe('Things that limit how far this answer can be trusted. Pass them on.'),
 }
 
 /** Answers that list rows also say how complete the list is. */
@@ -25,57 +29,81 @@ export const listShape = {
   ...sourceShape,
   table: z.string(),
   query: z.string().describe('The encoded query that was sent. Re-run it to check the answer.'),
-  total: z.number().nullable().describe('Rows matching on the server, before row-level access rules. null if unknown.'),
-  returned: z.number(),
+  total: z
+    .number()
+    .nullable()
+    .describe('Rows matching on the server, before row-level access rules. Not the number of rows this account can see. null if unknown.'),
+  returned: z.number().describe('Rows in this answer.'),
   offset: z.number(),
-  truncated: z.boolean().describe('true if more rows match than were returned.'),
-  nextOffset: z.number().optional().describe('Pass as offset to read the next page.'),
+  truncated: z.boolean().describe('true if more rows match than this answer holds.'),
+  nextOffset: z.number().optional().describe('Pass as offset to read on.'),
 }
 
 export function source(sn: ServiceNowClient, warnings: string[] = []) {
-  return { instance: sn.host, fetchedAt: new Date().toISOString(), warnings }
+  return { instance: sn.host, fetchedAt: new Date().toISOString(), requests: currentCall()?.requests ?? 0, warnings }
 }
 
-/** Describes a page honestly: how many rows matched, how many came back, and whether some were withheld. */
-export function listing(sn: ServiceNowClient, page: Page<unknown>, warnings: string[] = []) {
-  const returned = page.records.length
+/**
+ * Describes a page honestly: how many rows matched, how many are in the answer,
+ * and whether some were withheld. "shown" is the number of rows left after the
+ * answer was cut to size; reading on continues right behind them.
+ */
+export function listing(sn: ServiceNowClient, page: Page<unknown>, warnings: string[] = [], shown = page.records.length) {
+  const fetched = page.records.length
   const end = page.offset + page.limit
-  const truncated = page.total !== null ? end < page.total : returned === page.limit
+  const cut = shown < fetched
 
+  let withheld = 0
   if (page.total !== null) {
     const expected = Math.min(page.limit, Math.max(page.total - page.offset, 0))
-    if (returned < expected) {
+    withheld = Math.max(expected - fetched, 0)
+    if (withheld) {
       warnings.push(
-        `${expected - returned} matching row(s) on this page were not returned. Row-level access rules are applied ` +
-          'after the page is cut, so this account cannot see them.',
+        `${withheld} matching row(s) on this page were not returned. Row-level access rules are applied after the page ` +
+          'is cut, so this account cannot see them.',
       )
     }
   }
+  if (cut && withheld) {
+    warnings.push('Because rows were withheld and the answer was cut, reading on from nextOffset can repeat a few rows. None are skipped.')
+  }
 
+  const truncated = cut || (page.total !== null ? end < page.total : fetched === page.limit)
   return {
     ...source(sn, warnings),
     table: page.table,
     query: page.query,
     total: page.total,
-    returned,
+    returned: shown,
     offset: page.offset,
     truncated,
-    ...(truncated ? { nextOffset: end } : {}),
+    ...(truncated ? { nextOffset: cut ? page.offset + shown : end } : {}),
+  }
+}
+
+/** A warning for a list that is not paged by the caller: rows the account could not see. */
+export function withheldWarning(what: string, page: Page<unknown>, warnings: string[]): void {
+  if (page.total === null) return
+  const expected = Math.min(page.limit, Math.max(page.total - page.offset, 0))
+  if (page.records.length < expected) {
+    warnings.push(`${what}: ${expected - page.records.length} matching row(s) were not returned, because row-level access rules hide them from this account.`)
   }
 }
 
 /**
  * With sysparm_display_value=all every field arrives as {display_value, value}.
  * Keep both where they differ (a sys_id and its name, a choice code and its label),
- * and collapse the rest. Timestamps keep the raw value, which is UTC.
+ * and collapse the rest. A timestamp keeps the raw value, which is UTC; its display
+ * value would be the same moment in the account's time zone.
  */
 export function tidy(record: Row): Row {
+  const DATE = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?$/
   return Object.fromEntries(
     Object.entries(record).map(([key, field]) => {
       if (!field || typeof field !== 'object' || !('value' in field)) return [key, field]
       const { value, display_value: display } = field as { value?: unknown; display_value?: unknown }
-      const isTimestamp = typeof value === 'string' && /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?$/.test(value)
-      if (display === undefined || display === null || display === '' || display === value || isTimestamp) return [key, value]
+      const sameMoment = typeof value === 'string' && DATE.test(value) && typeof display === 'string' && DATE.test(display)
+      if (display === undefined || display === null || display === '' || display === value || sameMoment) return [key, value]
       return [key, { value, display }]
     }),
   )
@@ -94,25 +122,79 @@ export function labelOf(field: unknown): string {
 }
 
 export function tally<T>(items: T[], key: (item: T) => string): Record<string, number> {
-  const counts: Record<string, number> = {}
-  for (const item of items) counts[key(item) || 'unknown'] = (counts[key(item) || 'unknown'] ?? 0) + 1
-  return counts
+  const counts = new Map<string, number>()
+  for (const item of items) {
+    const name = key(item) || 'unknown'
+    counts.set(name, (counts.get(name) ?? 0) + 1)
+  }
+  return Object.fromEntries(counts)
 }
 
-/** Drops rows from the end until the answer fits. Returns how many were dropped. */
+/** Replaces the value of the named fields. Used for fields that hold secrets. */
+export function redact<T extends Row>(record: T, fields: Set<string>, note: string): T {
+  if (!fields.size) return record
+  return Object.fromEntries(
+    Object.entries(record).map(([key, value]) => [key, fields.has(key) && value !== '' && value !== null && value !== undefined ? note : value]),
+  ) as T
+}
+
+/**
+ * Keeps an answer within its budget. Long text values are cut first, so that one
+ * script or one payload cannot crowd out every other row; only then rows are
+ * dropped from the end. Pass the length of the result to listing(), so that
+ * reading on continues behind the last row shown.
+ */
 export function clip<T>(records: T[], warnings: string[]): T[] {
+  const sizeOf = (list: unknown[]) => list.reduce<number>((sum, item) => sum + (JSON.stringify(item)?.length ?? 0), 0)
+  if (sizeOf(records) <= MAX_ANSWER_CHARS) return records
+
+  const longValues = records.reduce((count, record) => count + countLong(record), 0)
+  let shown = records
+  if (longValues) {
+    const cap = Math.max(LONG_VALUE_CHARS, Math.floor((MAX_ANSWER_CHARS * 0.8) / longValues))
+    let cut = 0
+    shown = records.map((record) =>
+      mapStrings(record, (text) => {
+        if (text.length <= cap) return text
+        cut++
+        return `${text.slice(0, cap)} … [cut here: ${text.length - cap} more characters]`
+      }),
+    )
+    if (cut) {
+      warnings.push(
+        `${cut} long value(s) were cut to about ${cap} characters, because the answer would be too large. To read more of ` +
+          'one, ask for that field alone with limit 1. A value longer than one answer can carry cannot be read completely.',
+      )
+    }
+  }
+
   let size = 0
-  for (const [index, record] of records.entries()) {
-    size += JSON.stringify(record).length
+  for (const [index, record] of shown.entries()) {
+    size += JSON.stringify(record)?.length ?? 0
     if (size > MAX_ANSWER_CHARS && index > 0) {
       warnings.push(
         `Only the first ${index} of ${records.length} fetched rows are shown, because the answer would be too large. ` +
-          'Ask for fewer fields, or page with a smaller limit.',
+          'Read on with nextOffset, or ask for fewer fields.',
       )
-      return records.slice(0, index)
+      return shown.slice(0, index)
     }
   }
-  return records
+  return shown
+}
+
+function countLong(value: unknown): number {
+  if (typeof value === 'string') return value.length > LONG_VALUE_CHARS ? 1 : 0
+  if (value && typeof value === 'object') return Object.values(value).reduce<number>((count, item) => count + countLong(item), 0)
+  return 0
+}
+
+function mapStrings<T>(value: T, change: (text: string) => string): T {
+  if (typeof value === 'string') return change(value) as T
+  if (Array.isArray(value)) return value.map((item) => mapStrings(item, change)) as T
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, mapStrings(item, change)])) as T
+  }
+  return value
 }
 
 export function ok(payload: Record<string, unknown>): ToolResult {
@@ -125,11 +207,14 @@ export function ok(payload: Record<string, unknown>): ToolResult {
  */
 export function fail(error: unknown, table?: string): ToolResult {
   const known = error instanceof ServiceNowError ? error : undefined
+  const kind = known?.kind ?? 'unknown'
+  const about = known?.table ?? (kind === 'validation' || kind === 'config' ? undefined : table)
+  const message = error instanceof Error ? error.message : String(error)
   const payload = {
-    error: known?.kind ?? 'unknown',
-    message: error instanceof Error ? error.message : String(error),
-    table: known?.table ?? table,
-    hint: hintFor(known?.kind ?? 'unknown', known?.table ?? table),
+    error: kind,
+    message: message.length > 1_000 ? `${message.slice(0, 1_000)}…` : message,
+    ...(about ? { table: about } : {}),
+    hint: hintFor(kind, about),
   }
   return { isError: true, content: [{ type: 'text', text: JSON.stringify(payload) }] }
 }
@@ -138,8 +223,12 @@ function hintFor(kind: string, table?: string): string {
   switch (kind) {
     case 'validation':
       return 'Nothing was sent to the instance. Correct the input and call again.'
+    case 'config':
+      return 'The server is not configured correctly. This is for the person who set it up, not something to work around.'
+    case 'blocked':
+      return `This machine is configured not to ask for "${table}". Report it as "could not be checked": it says nothing about the data.`
     case 'auth':
-      return 'The instance rejected the credentials. Check the SERVICENOW_* variables.'
+      return 'The instance rejected the credentials. Check the SERVICENOW_* variables. With a token: it may have expired.'
     case 'acl':
       return `This account may not read "${table}" through the REST API. That says something about access, not about the data: report it as "could not be checked", never as "nothing found".`
     case 'not_found':
@@ -151,7 +240,11 @@ function hintFor(kind: string, table?: string): string {
     case 'timeout':
       return 'The instance did not answer in time. Narrow the query, or try again later.'
     case 'network':
-      return 'The instance could not be reached. Check the address and the network.'
+      return 'The instance could not be reached. Check the address and the network. A certificate error points to a company proxy: see "Proxies and certificates" in the README.'
+    case 'redirect':
+      return 'The instance sent a redirect instead of data. That usually means single sign-on is enforced and this login is not accepted for the REST API, or the address is wrong.'
+    case 'too_large':
+      return 'Ask for fewer fields, or use a smaller limit.'
     case 'invalid_response':
       return 'The answer was not the expected JSON. A developer instance may be hibernating: open it in a browser to wake it. Otherwise check the instance address.'
     default:

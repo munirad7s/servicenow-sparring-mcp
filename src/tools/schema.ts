@@ -1,9 +1,12 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { ServiceNowError } from '../errors.js'
-import { assertTableName } from '../query.js'
+import { assertPlainValue, assertTableName } from '../query.js'
 import { fail, ok, source, sourceShape } from '../result.js'
+import { traced } from '../trace.js'
 import { READ_ONLY, type Context } from './shared.js'
+
+const MAX_COLUMNS_CHARS = 60_000
 
 export function registerSchemaTool(server: McpServer, ctx: Context) {
   server.registerTool(
@@ -11,73 +14,119 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
     {
       title: 'Inspect a table structure',
       description:
-        'Return the fields of a table: name, label, type, reference target, mandatory and read-only flags, and the ' +
-        'table that defines each field. Reports the chain of parent tables. With includeInherited the answer is the ' +
-        'effective structure: fields of all parent tables included, dictionary overrides applied. Structure only; for ' +
-        'records use sn_query.',
+        'Return the fields of a table as they apply to it: the fields of all parent tables included, dictionary ' +
+        'overrides applied, each with the table that defines it. Use "filter" to look for one field; a field that is ' +
+        'not in the answer does not exist on the table. Also answers for database views. Reports the chain of parent ' +
+        'tables and the kind of table. To judge a single field with sn_origin, pass the update name ' +
+        '"sys_dictionary_<definedOn>_<name>". Structure only; for records use sn_query.',
       inputSchema: {
-        table: z.string().min(1).describe('Table name, e.g. "incident".'),
+        table: z.string().min(1).max(80).describe('Table name, e.g. "incident".'),
+        filter: z.string().max(80).optional().describe('Text the field name or label must contain, e.g. "business" or "assign".'),
         includeInherited: z
           .boolean()
-          .default(false)
-          .describe('true lists inherited fields too and applies dictionary overrides. false lists only the fields this table defines.'),
+          .default(true)
+          .describe('false lists only the fields this table defines itself. Leave true to check whether a field exists.'),
       },
       outputSchema: {
         ...sourceShape,
         table: z.object({
           name: z.string(),
           label: z.string(),
+          kind: z.enum(['table', 'remote_table', 'database_view']),
           extends: z.array(z.string()).describe('Parent tables, nearest first.'),
+          joins: z.array(z.object({ table: z.string(), prefix: z.string() })).optional().describe('For a database view: the tables it joins.'),
         }),
-        columnCount: z.number(),
-        inheritedColumnCount: z.number().describe('Fields that come from parent tables.'),
+        fieldCount: z.number().describe('Fields that apply to the table, inherited ones included.'),
+        ownFieldCount: z.number().describe('Fields the table defines itself.'),
+        returned: z.number().describe('Fields in this answer, after includeInherited and filter.'),
         columns: z.array(
           z.object({
             name: z.string(),
             label: z.string(),
             type: z.string(),
-            reference: z.string().nullable(),
-            mandatory: z.boolean(),
-            readOnly: z.boolean(),
-            maxLength: z.number().nullable(),
             definedOn: z.string(),
-            overriddenOn: z.string().optional(),
+            reference: z.string().optional().describe('Table a reference field points to.'),
+            maxLength: z.number().optional(),
+            mandatory: z.literal(true).optional().describe('Present only when true.'),
+            readOnly: z.literal(true).optional().describe('Present only when true.'),
+            choice: z.literal(true).optional().describe('Present when the field takes its values from a choice list. Queries need the stored value, not the label.'),
+            inactive: z.literal(true).optional().describe('Present when the dictionary entry is deactivated.'),
+            overriddenOn: z.string().optional().describe('Nearest table whose dictionary override changes the field.'),
             overrides: z.array(z.string()).optional(),
           }),
         ),
       },
       annotations: READ_ONLY,
     },
-    async ({ table, includeInherited }) => {
+    traced('sn_schema', async ({ table, filter, includeInherited }) => {
       try {
         assertTableName(table)
+        if (filter) assertPlainValue(filter, 'filter')
+
         const info = await ctx.dict.table(table)
         if (!info) {
-          throw new ServiceNowError(`Table "${table}" has no entry in sys_db_object on this instance.`, 'not_found', table)
+          throw new ServiceNowError(`"${table}" is neither a table in sys_db_object nor a database view on this instance.`, 'not_found', table)
         }
-
-        const warnings: string[] = []
         const effective = await ctx.dict.effectiveColumns(table)
         const all = effective?.columns ?? []
+        const own = all.filter((column) => column.definedOn === table)
+
+        const warnings: string[] = []
+        if (effective && !effective.complete) {
+          warnings.push('The dictionary of this table is only partly readable for this account. Fields may be missing from the answer: a missing field does not prove that it does not exist.')
+        }
         if (effective && !effective.overridesRead) {
-          warnings.push('sys_dictionary_override could not be read, so overrides of mandatory and read-only are not applied.')
+          warnings.push('sys_dictionary_override could not be read completely, so overrides of mandatory and read-only may be missing.')
+        }
+        if (info.kind === 'remote_table') {
+          warnings.push('This is a remote table. Reading its records runs a script on the instance, which usually calls another system.')
+        }
+        if (!includeInherited && all.length > own.length) {
+          warnings.push(`${all.length - own.length} inherited field(s) are left out, because includeInherited is false. They exist on this table too.`)
         }
 
-        const inherited = all.filter((column) => column.definedOn !== table)
-        const columns = (includeInherited ? all : all.filter((column) => column.definedOn === table)).sort((a, b) =>
-          a.name.localeCompare(b.name),
-        )
+        const needle = filter?.toLowerCase()
+        const selected = (includeInherited ? all : own)
+          .filter((column) => !needle || column.name.toLowerCase().includes(needle) || column.label.toLowerCase().includes(needle))
+          .sort((a, b) => a.name.localeCompare(b.name))
+          .map((column) => ({
+            name: column.name,
+            label: column.label,
+            type: column.type,
+            definedOn: column.definedOn,
+            ...(column.reference ? { reference: column.reference } : {}),
+            ...(column.maxLength !== null ? { maxLength: column.maxLength } : {}),
+            ...(column.mandatory ? { mandatory: true as const } : {}),
+            ...(column.readOnly ? { readOnly: true as const } : {}),
+            ...(column.choice ? { choice: true as const } : {}),
+            ...(column.active ? {} : { inactive: true as const }),
+            ...(column.overriddenOn ? { overriddenOn: column.overriddenOn, overrides: column.overrides } : {}),
+          }))
+
+        let size = 0
+        const fits = selected.findIndex((column) => (size += JSON.stringify(column).length) > MAX_COLUMNS_CHARS)
+        const columns = fits === -1 ? selected : selected.slice(0, fits)
+        if (fits !== -1) {
+          warnings.push(`Only the first ${columns.length} of ${selected.length} fields are shown, because the answer would be too large. Use filter to find a field.`)
+        }
 
         return ok({
           ...source(ctx.sn, warnings),
-          table: { name: info.name, label: info.label, extends: info.chain.slice(1) },
-          columnCount: columns.length,
-          inheritedColumnCount: inherited.length,
+          table: {
+            name: info.name,
+            label: info.label,
+            kind: info.kind,
+            extends: info.chain.slice(1),
+            ...(info.members ? { joins: info.members } : {}),
+          },
+          fieldCount: all.length,
+          ownFieldCount: own.length,
+          returned: columns.length,
           columns,
         })
       } catch (error) {
         return fail(error, table)
       }
-    },
+    }),
   )
 }

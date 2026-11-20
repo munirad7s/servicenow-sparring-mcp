@@ -3,23 +3,46 @@
 ## Reporting a problem
 
 Please report security problems privately: open the repository's **Security** tab and choose
-**Report a vulnerability**. Do not open a public issue for them.
+**Report a vulnerability**. Do not open a public issue for them. Reports are answered within a week. Fixes go into
+the latest release; older releases are not patched.
 
 Especially welcome:
 
 - any way to make the server send a request that is not a `GET` to the Table API or the Aggregate API
 - any input that reaches the instance without passing the checks in `src/query.ts`
-- any answer that presents "could not be read" as "nothing found"
+- any answer that presents "could not be read" as "nothing found", or an unfiltered result as a filtered one
+- any way to get a credential into an answer, an error message or a log
 
 ## What the server promises
 
-It sends only HTTP `GET` requests to `/api/now/table/<table>` and `/api/now/stats/<table>`. It refuses queries that
-contain `javascript:`. It does not follow redirects and requires `https`.
+- It sends only HTTP `GET` requests to `/api/now/table/<table>` and `/api/now/stats/<table>` of the one configured
+  instance. It does not follow redirects.
+- It requires `https`. The one exception is `http://localhost` and `http://127.0.0.1`, for a local test server.
+- It refuses queries that would make the instance run script: values with `javascript:`, and `DYNAMIC` conditions.
+- It writes nothing to disk, except the audit log when `SERVICENOW_AUDIT_LOG` names a file.
+- It reads its settings from the environment and from an env file that is named explicitly. Only `SERVICENOW_*`
+  keys are taken from that file, and the process environment is not changed.
 
-It does not control what an instance does while answering a read. See "What read-only means here" in the
-[README](README.md), and give the server an account that cannot write.
+These are enforced in one place, `src/client.ts` and `src/query.ts`, and held by tests in `test/repo.test.ts` and
+`test/tools.test.ts`. The tests are a regression guard. They run in CI on every push; they are not a sandbox.
+
+## What it does not control
+
+- What an instance does while answering a read: `before query` business rules, remote tables, logging. See "What
+  read-only means here" in the [README](README.md).
+- What happens to an answer. Everything a tool returns goes to the MCP client and to the model behind it. If that
+  model runs at a provider, the data leaves your network. The account's access rules, and the table lists described
+  in the README, decide what can be read at all.
+- What an agent does with an answer. Text in a record can try to instruct the agent. The server labels record
+  content as data, cuts long values, and quotes error texts of the instance as data; it cannot make an agent
+  ignore them.
 
 ## Credentials
 
-Credentials are read from environment variables or an env file you name. They are sent only to the configured
-instance, in the `Authorization` header. They are never written to an answer or a log.
+Credentials are read from environment variables or the env file you name. They are sent only to the configured
+instance, in the `Authorization` header. They are never written to an answer, an error message or the audit log.
+Fields that hold secrets on the instance (password types, encrypted fields, system properties of a password type)
+are replaced by a note before an answer leaves the server.
+
+Give the server an account of its own, with read roles and the role `snc_read_only`. `sn_instance` and the doctor
+command report whether the account has that role.

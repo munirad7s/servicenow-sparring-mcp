@@ -1,5 +1,6 @@
 import type { ServiceNowClient } from './client.js'
-import { assertTableName } from './query.js'
+import { ServiceNowError } from './errors.js'
+import { assertTableName, isTableName } from './query.js'
 
 export interface Column {
   name: string
@@ -9,9 +10,13 @@ export interface Column {
   mandatory: boolean
   readOnly: boolean
   maxLength: number | null
+  /** false if the dictionary entry is deactivated. */
+  active: boolean
+  /** true if the field takes its values from a choice list. */
+  choice: boolean
   /** The table in the parent chain that defines this field. */
   definedOn: string
-  /** Set when a dictionary override changes the field for the inspected table. */
+  /** The nearest table whose dictionary override changes the field for the inspected table. */
   overriddenOn?: string
   overrides?: string[]
 }
@@ -21,6 +26,10 @@ export interface TableInfo {
   label: string
   /** The table itself first, then its parents up to the root. */
   chain: string[]
+  /** A remote table runs a script on the instance whenever it is read. */
+  kind: 'table' | 'remote_table' | 'database_view'
+  /** For a database view: the tables it joins, and the prefix its fields carry. */
+  members?: Array<{ table: string; prefix: string }>
 }
 
 export interface UnknownField {
@@ -32,27 +41,56 @@ export interface UnknownField {
 }
 
 export interface FieldCheck {
-  /** "unavailable" means the dictionary could not be read, so nothing was verified. */
+  /** "unavailable" means the dictionary could not be read completely, so not every name was verified. */
   status: 'checked' | 'unavailable'
   reason?: string
+  /** Names the dictionary proves wrong. Valid even when the status is "unavailable". */
   unknown: UnknownField[]
+  /** The dictionary entry of each path that was verified, keyed by the path as written. */
+  resolved: Map<string, Column>
+}
+
+export interface Choice {
+  value: string
+  label: string
+}
+
+interface ColumnSet {
+  columns: Map<string, Column>
+  /** true if rows of the dictionary were withheld or cut off: a missing name proves nothing. */
+  partial: boolean
+}
+
+interface Entry<T> {
+  value: Promise<T>
+  at: number
 }
 
 const PARENT_DEPTH = 8
 const PARENT_FIELDS = Array.from({ length: PARENT_DEPTH }, (_, i) => `${'super_class.'.repeat(i + 1)}name`)
+const MAX_CHAIN = 32
+const MAX_ENTRIES = 400
 
 const OVERRIDABLE = ['mandatory', 'read_only', 'default_value', 'reference_qual', 'attributes', 'dependent', 'calculation', 'display']
 
 /**
- * What the instance says about its own tables and fields, cached for the life of
- * the process. Used to answer schema questions and to refuse queries on fields
- * that do not exist.
+ * What the instance says about its own tables and fields. Used to answer schema
+ * questions and to refuse queries on fields that do not exist.
+ *
+ * Entries are kept for a few minutes. A name that is missing from an entry older
+ * than half a minute is looked up once more, so a field created during a session
+ * is found.
  */
 export class Dictionary {
-  private readonly tables = new Map<string, Promise<TableInfo | null>>()
-  private readonly columnMaps = new Map<string, Promise<Map<string, Column> | null>>()
+  private readonly tables = new Map<string, Entry<TableInfo | null>>()
+  private readonly columnSets = new Map<string, Entry<ColumnSet | null>>()
+  private readonly choiceLists = new Map<string, Entry<Choice[]>>()
 
-  constructor(private readonly sn: ServiceNowClient) {}
+  constructor(
+    private readonly sn: ServiceNowClient,
+    private readonly ttlMs = 10 * 60_000,
+    private readonly recheckMs = 30_000,
+  ) {}
 
   table(name: string): Promise<TableInfo | null> {
     assertTableName(name)
@@ -60,23 +98,27 @@ export class Dictionary {
   }
 
   /** Own and inherited fields of a table, without dictionary overrides. null if the table is unknown. */
-  columns(name: string): Promise<Map<string, Column> | null> {
-    return this.cached(this.columnMaps, name, () => this.loadColumns(name))
+  async columns(name: string): Promise<Map<string, Column> | null> {
+    return (await this.columnSet(name))?.columns ?? null
   }
 
   /** The fields as they behave on this table: inherited fields included, overrides applied. */
-  async effectiveColumns(name: string): Promise<{ columns: Column[]; overridesRead: boolean } | null> {
-    const [info, base] = await Promise.all([this.table(name), this.columns(name)])
+  async effectiveColumns(name: string): Promise<{ columns: Column[]; complete: boolean; overridesRead: boolean } | null> {
+    const [info, base] = await Promise.all([this.table(name), this.columnSet(name)])
     if (!info || !base) return null
 
-    const columns = new Map([...base].map(([key, column]) => [key, { ...column }]))
+    const columns = new Map([...base.columns].map(([key, column]) => [key, { ...column }]))
+    if (info.kind === 'database_view') return { columns: [...columns.values()], complete: !base.partial, overridesRead: true }
+
     let overridesRead = true
     try {
-      const { records } = await this.sn.all<Record<string, string>>({
+      const { records, total, complete } = await this.sn.all<Record<string, string>>({
         table: 'sys_dictionary_override',
         query: `nameIN${info.chain.join(',')}`,
         fields: ['name', 'element', ...OVERRIDABLE.map((key) => `${key}_override`), 'mandatory', 'read_only'],
       })
+      if (!complete || (total !== null && records.length < total)) overridesRead = false
+
       // Parents first, so an override closer to the inspected table wins.
       for (const table of [...info.chain].reverse()) {
         for (const row of records.filter((record) => record.name === table)) {
@@ -87,115 +129,232 @@ export class Dictionary {
           if (changed.includes('mandatory')) column.mandatory = row.mandatory === 'true'
           if (changed.includes('read_only')) column.readOnly = row.read_only === 'true'
           column.overriddenOn = table
-          column.overrides = changed
+          column.overrides = [...new Set([...(column.overrides ?? []), ...changed])]
         }
       }
     } catch {
       overridesRead = false
     }
 
-    return { columns: [...columns.values()], overridesRead }
+    return { columns: [...columns.values()], complete: !base.partial, overridesRead }
   }
 
-  /** Checks field paths (with dot-walks) against the dictionary. */
+  /**
+   * Checks field paths against the dictionary. A dot-walk is followed only through
+   * a reference field: ServiceNow drops a condition that walks through a list
+   * field. "ref_<child>.<field>" reaches a field of a child table.
+   */
   async checkFields(table: string, paths: string[]): Promise<FieldCheck> {
-    const unknown: UnknownField[] = []
+    const check: FieldCheck = { status: 'checked', unknown: [], resolved: new Map() }
+    const unavailable = (reason: string) => {
+      check.status = 'unavailable'
+      check.reason ??= reason
+    }
 
-    try {
-      for (const path of new Set(paths)) {
+    for (const path of new Set(paths)) {
+      try {
         let current = table
         const segments = path.split('.')
 
         for (const [index, segment] of segments.entries()) {
-          const columns = await this.columns(current)
-          if (!columns) {
-            if (index === 0) return { status: 'unavailable', reason: `table "${current}" has no dictionary entry`, unknown: [] }
-            unknown.push({ field: path, table: current, segment, reason: `the referenced table "${current}" has no dictionary entry`, suggestions: [] })
-            break
-          }
+          const last = index === segments.length - 1
 
-          const column = columns.get(segment)
-          if (!column) {
-            unknown.push({ field: path, table: current, segment, reason: `"${segment}" is not a field of "${current}"`, suggestions: suggest(segment, columns) })
-            break
-          }
-
-          if (index < segments.length - 1) {
-            if (!column.reference) {
-              unknown.push({ field: path, table: current, segment, reason: `"${segment}" is not a reference field, so it cannot be dot-walked`, suggestions: [] })
-              break
+          if (!last && segment.startsWith('ref_') && isTableName(segment.slice(4))) {
+            const child = await this.table(segment.slice(4))
+            if (child?.chain.includes(current)) {
+              current = child.name
+              continue
             }
+          }
+
+          let set = await this.columnSet(current)
+          if (set && !set.partial && !set.columns.has(segment)) set = await this.columnSet(current, this.recheckMs)
+          if (!set) {
+            if (index === 0) unavailable(`table "${current}" has no dictionary entry`)
+            else check.unknown.push({ field: path, table: current, segment, reason: `the referenced table "${current}" has no dictionary entry`, suggestions: [] })
+            break
+          }
+
+          const column = set.columns.get(segment)
+          if (!column) {
+            if (set.partial) unavailable(`the dictionary of "${current}" is only partly readable for this account`)
+            else check.unknown.push({ field: path, table: current, segment, reason: `"${segment}" is not a field of "${current}"`, suggestions: suggest(segment, set.columns) })
+            break
+          }
+
+          if (last) {
+            check.resolved.set(path, column)
+          } else if (column.type !== 'reference' || !column.reference) {
+            const why = column.reference ? `a list of references (${column.type})` : `of type ${column.type || 'unknown'}`
+            check.unknown.push({ field: path, table: current, segment, reason: `"${segment}" is ${why}, not a single reference, so it cannot be dot-walked`, suggestions: [] })
+            break
+          } else {
             current = column.reference
           }
         }
+      } catch (error) {
+        unavailable(`the dictionary could not be read (${error instanceof ServiceNowError ? error.kind : 'unknown'})`)
       }
-    } catch (error) {
-      return { status: 'unavailable', reason: `the dictionary could not be read (${error instanceof Error ? error.message : String(error)})`, unknown: [] }
     }
 
-    return { status: 'checked', unknown }
+    return check
+  }
+
+  /** The choices of a field, from the nearest table in the parent chain that defines any. Empty if there are none. */
+  async choices(table: string, field: string): Promise<Choice[]> {
+    const info = await this.table(table)
+    if (!info) return []
+
+    return this.cached(this.choiceLists, `${table}.${field}`, async () => {
+      const { records } = await this.sn.query<Record<string, string>>({
+        table: 'sys_choice',
+        query: `nameIN${info.chain.join(',')}^element=${field}^inactive=false^language=en^ORDERBYsequence`,
+        fields: ['name', 'value', 'label'],
+        limit: 200,
+      })
+      const owner = info.chain.find((name) => records.some((row) => row.name === name))
+      return records
+        .filter((row) => row.name === owner && typeof row.value === 'string')
+        .map((row) => ({ value: row.value, label: String(row.label ?? '') }))
+    })
   }
 
   private async loadTable(name: string): Promise<TableInfo | null> {
-    const page = await this.sn.query<Record<string, string>>({
-      table: 'sys_db_object',
-      query: `name=${name}`,
-      fields: ['name', 'label', ...PARENT_FIELDS],
-      limit: 1,
-    })
-    const row = page.records[0]
-    if (!row) return null
+    const chain: string[] = []
+    let label = ''
+    let remote = false
+    let current = name
 
-    const chain = [name]
-    for (const field of PARENT_FIELDS) {
-      const parent = row[field]
-      if (!parent) return { name, label: row.label ?? '', chain }
-      chain.push(parent)
+    for (;;) {
+      const page = await this.sn.query<Record<string, string>>({
+        table: 'sys_db_object',
+        query: `name=${current}`,
+        fields: ['name', 'label', 'scriptable_table', ...PARENT_FIELDS],
+        limit: 1,
+      })
+      const row = page.records[0]
+      if (!row) {
+        if ((page.total ?? 0) > 0) {
+          throw new ServiceNowError(`"${current}" has an entry in sys_db_object, but this account may not read it.`, 'acl', 'sys_db_object')
+        }
+        if (chain.length === 0) return this.loadView(name)
+        break
+      }
+
+      if (chain.length === 0) {
+        chain.push(name)
+        label = String(row.label ?? '')
+        remote = row.scriptable_table === 'true'
+      }
+
+      let filled = 0
+      for (const field of PARENT_FIELDS) {
+        const parent = row[field]
+        if (!parent) break
+        if (!isTableName(parent) || chain.includes(parent) || chain.length >= MAX_CHAIN) {
+          throw new ServiceNowError(`sys_db_object returned a parent chain for "${name}" that cannot be used.`, 'invalid_response', 'sys_db_object')
+        }
+        chain.push(parent)
+        filled++
+      }
+
+      // Deeper than one request can see: continue from the last parent found.
+      if (filled < PARENT_FIELDS.length) break
+      current = chain[chain.length - 1]
     }
 
-    // Deeper than one request can see: continue from the last parent found.
-    const rest = await this.table(chain[chain.length - 1])
-    return { name, label: row.label ?? '', chain: rest ? [...chain, ...rest.chain.slice(1)] : chain }
+    return { name, label, chain, kind: remote ? 'remote_table' : 'table' }
   }
 
-  private async loadColumns(name: string): Promise<Map<string, Column> | null> {
+  /** Database views have no entry in sys_db_object. Their fields are the fields of the joined tables, with a prefix. */
+  private async loadView(name: string): Promise<TableInfo | null> {
+    const page = await this.sn.query<Record<string, string>>({ table: 'sys_db_view', query: `name=${name}`, fields: ['sys_id', 'name', 'label'], limit: 1 })
+    const view = page.records[0]
+    if (!view) {
+      if ((page.total ?? 0) > 0) {
+        throw new ServiceNowError(`"${name}" is a database view, but this account may not read its definition.`, 'acl', 'sys_db_view')
+      }
+      return null
+    }
+    if (!/^[0-9a-f]{32}$/.test(String(view.sys_id))) return null
+
+    const joined = await this.sn.query<Record<string, string>>({
+      table: 'sys_db_view_table',
+      query: `view=${view.sys_id}^active=true^ORDERBYorder`,
+      fields: ['table', 'variable_prefix'],
+      limit: 50,
+    })
+    if (joined.total !== null && joined.records.length < joined.total) {
+      throw new ServiceNowError(`The tables of the database view "${name}" are only partly readable.`, 'acl', 'sys_db_view_table')
+    }
+
+    const members = joined.records
+      .filter((row) => isTableName(row.table) && /^[a-z0-9_]{1,40}$/.test(String(row.variable_prefix)))
+      .map((row) => ({ table: row.table, prefix: row.variable_prefix }))
+    return { name, label: String(view.label ?? ''), chain: [name], kind: 'database_view', members }
+  }
+
+  private columnSet(name: string, maxAgeMs = this.ttlMs): Promise<ColumnSet | null> {
+    return this.cached(this.columnSets, name, () => this.loadColumns(name), maxAgeMs)
+  }
+
+  private async loadColumns(name: string): Promise<ColumnSet | null> {
     const info = await this.table(name)
     if (!info) return null
 
-    const { records } = await this.sn.all<Record<string, string>>({
+    const columns = new Map<string, Column>()
+    if (info.kind === 'database_view') {
+      let partial = false
+      for (const member of info.members ?? []) {
+        const set = await this.columnSet(member.table)
+        if (!set || set.partial) partial = true
+        for (const column of set?.columns.values() ?? []) {
+          columns.set(`${member.prefix}_${column.name}`, { ...column, name: `${member.prefix}_${column.name}`, definedOn: member.table })
+        }
+      }
+      return { columns, partial }
+    }
+
+    const { records, total, complete } = await this.sn.all<Record<string, string>>({
       table: 'sys_dictionary',
       query: `nameIN${info.chain.join(',')}^elementISNOTEMPTY`,
-      fields: ['name', 'element', 'column_label', 'internal_type', 'reference', 'mandatory', 'read_only', 'max_length'],
+      fields: ['name', 'element', 'column_label', 'internal_type', 'reference', 'mandatory', 'read_only', 'max_length', 'active', 'choice'],
     })
 
-    const columns = new Map<string, Column>()
     // Root first, so a definition closer to the inspected table wins.
     for (const table of [...info.chain].reverse()) {
-      for (const row of records.filter((record) => record.name === table)) {
+      for (const row of records) {
+        if (row.name !== table || typeof row.element !== 'string' || !row.element) continue
         columns.set(row.element, {
           name: row.element,
-          label: row.column_label ?? '',
-          type: row.internal_type ?? '',
-          reference: row.reference || null,
+          label: String(row.column_label ?? ''),
+          type: String(row.internal_type ?? ''),
+          reference: isTableName(row.reference) ? row.reference : null,
           mandatory: row.mandatory === 'true',
           readOnly: row.read_only === 'true',
-          maxLength: row.max_length ? Number(row.max_length) : null,
+          maxLength: /^\d+$/.test(String(row.max_length)) ? Number(row.max_length) : null,
+          active: row.active !== 'false',
+          choice: row.choice === '1' || row.choice === '3',
           definedOn: table,
         })
       }
     }
-    return columns
+    return { columns, partial: !complete || (total !== null && records.length < total) }
   }
 
   /** Caches the promise, and forgets it again if it fails, so a later call can retry. */
-  private cached<T>(cache: Map<string, Promise<T>>, key: string, load: () => Promise<T>): Promise<T> {
-    let pending = cache.get(key)
-    if (!pending) {
-      pending = load()
-      cache.set(key, pending)
-      pending.catch(() => cache.delete(key))
-    }
-    return pending
+  private cached<T>(cache: Map<string, Entry<T>>, key: string, load: () => Promise<T>, maxAgeMs = this.ttlMs): Promise<T> {
+    const hit = cache.get(key)
+    if (hit && Date.now() - hit.at < maxAgeMs) return hit.value
+
+    const entry: Entry<T> = { value: load(), at: Date.now() }
+    cache.delete(key)
+    cache.set(key, entry)
+    entry.value.catch(() => {
+      if (cache.get(key) === entry) cache.delete(key)
+    })
+    if (cache.size > MAX_ENTRIES) cache.delete(cache.keys().next().value as string)
+    return entry.value
   }
 }
 
@@ -208,7 +367,8 @@ function suggest(segment: string, columns: Map<string, Column>): string[] {
     .map((name) => {
       const candidate = name.replace(/^u_/, '')
       const contained = candidate.length > 3 && (candidate.includes(wanted) || wanted.includes(candidate))
-      return { name, score: contained ? 1 : editDistance(wanted, candidate) }
+      const comparable = Math.abs(candidate.length - wanted.length) <= tolerance
+      return { name, score: contained ? 1 : comparable ? editDistance(wanted, candidate) : Infinity }
     })
     .filter((item) => item.score <= tolerance)
     .sort((a, b) => a.score - b.score || a.name.localeCompare(b.name))
