@@ -70,17 +70,21 @@ test('a log that takes no lines does not fill the memory of the server', async (
   // new ones are dropped, and the log says how many were lost once it takes lines again.
   const reports: string[] = []
   const lines: string[] = []
-  let release!: () => void
-  const stuck = new Promise<void>((resolve) => (release = resolve))
-  let first = true
+  let held: Promise<void> | null = null
+  let release = () => {}
+  const hold = () => {
+    held = new Promise<void>((resolve) => (release = resolve))
+  }
   const write = auditWriter('/dev/null/audit.jsonl', (message) => reports.push(message), async (_path, line) => {
-    if (first) {
-      first = false
-      await stuck
+    if (held) {
+      const waitFor = held
+      held = null
+      await waitFor
     }
     lines.push(line)
   })
   const entry = (index: number) => ({ time: '', tool: null, api: 'table' as const, table: 'incident', query: `priority=${index}`, fields: null, status: 200, sent: 1, rows: 0, total: 0, ms: 0 })
+  hold()
   for (let index = 0; index < 10_250; index++) write(entry(index))
   assert.equal(reports.length, 1)
   assert.match(reports[0], /is not taking lines fast enough/)
@@ -94,4 +98,13 @@ test('a log that takes no lines does not fill the memory of the server', async (
   assert.equal(JSON.parse(lines[9_999]).query, 'priority=9999')
   assert.equal(JSON.parse(lines[10_000]).dropped, 250)
   assert.equal(JSON.parse(lines[10_001]).query, 'priority=99999')
+
+  // It hangs a second time. The lines lost then are counted from nothing, and it is not said again on the error output.
+  hold()
+  for (let index = 0; index < 10_007; index++) write(entry(index))
+  release()
+  await until(() => lines.length >= 20_003)
+  assert.equal(lines.length, 20_003)
+  assert.equal(JSON.parse(lines[20_002]).dropped, 7)
+  assert.equal(reports.length, 1)
 })

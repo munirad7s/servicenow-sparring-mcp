@@ -22,6 +22,7 @@ export function auditWriter(
   append: (path: string, line: string, options: { mode: number }) => Promise<void> = appendFile,
 ): (entry: AuditEntry) => void {
   let failed = false
+  let slow = false
   let waiting = 0
   let dropped = 0
   let written: Promise<void> = Promise.resolve()
@@ -34,7 +35,9 @@ export function auditWriter(
   return (entry) => {
     if (waiting >= MAX_WAITING) {
       if (!dropped) {
-        report(`audit log: ${path} is not taking lines fast enough, and new ones are dropped until it does`)
+        // Said once, like a file that cannot be written. The log itself says each time how many lines it lost.
+        if (!slow) report(`audit log: ${path} is not taking lines fast enough, and new ones are dropped until it does`)
+        slow = true
         // Behind the lines that wait, where the dropped ones would have stood: how many were lost by then.
         written = written.then(async () => {
           const lost = dropped

@@ -895,6 +895,25 @@ test('a table without rows proves nothing about a condition, and its answer is n
   await filled.answer('sn_query', { table: 'task', fields: ['number'] })
   await filled.answer('sn_query', { table: 'task', fields: ['number'] })
   assert.equal(filled.proofsFrom('task').length, 3)
+
+  // An answer that says "no row matches" and carries a row all the same is no proof.
+  const odd = await connect(familyWorld([below, { table: 'task', exact: 'sys_class_nameISEMPTY^sys_class_nameISNOTEMPTY', rows: [{ sys_id: '1' }], total: 0 }, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
+  assert.equal((await odd.call('sn_query', { table: 'task', fields: ['number'] })).data.error, 'blocked')
+  assert.equal(odd.sentTo('task').length, 0)
+})
+
+test('a proof that the instance applies a condition is kept for ten minutes, not for good', async (t) => {
+  // An access rule can be added while the server runs. What was proven is asked for again after a while.
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const below = closedTables(tableRow('incident', 'Incident', 'task'))
+  const { answer, proofsFrom } = await connect(familyWorld([below, { table: 'task', rows: [{ number: 'TASK1' }] }]), { tables: { allow: [], deny: ['incident'] } })
+  await answer('sn_query', { table: 'task', fields: ['number'] })
+  t.mock.timers.tick(9 * 60_000)
+  await answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(proofsFrom('task').length, 3)
+  t.mock.timers.tick(2 * 60_000)
+  await answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(proofsFrom('task').length, 6)
 })
 
 test('the name and the payload of a captured change are kept back where its record is in a closed table', async () => {
@@ -1084,14 +1103,13 @@ test('a call that is refused because of a closed table is written to the audit l
   await call('sn_query', { table: 'incident', query: 'no_such_field=1' })
   assert.equal(refusals().length, tried.length)
 
-  // A tool that asks the client for a closed table is refused there, and the client writes that down itself.
+  // A request that the gate of the client refuses is written down there. The call it belongs to gets no second
+  // line: here the instance drops the condition that would leave the rows of the closed table out.
   const once: AuditEntry[] = []
-  const captured = await connect([closedTables(tableRow('sys_update_xml', 'Customer Update')), ...dictionaryRoutes], { tables: { allow: [], deny: ['sys_update_xml'] } }, (entry) => once.push(entry))
-  assert.equal((await captured.call('sn_delta')).data.error, 'blocked')
-  const lines = once.filter((entry) => entry.status === 'blocked' && entry.table === 'sys_update_xml')
-  assert.ok(lines.length >= 1)
-  // One line per request that was refused, and none on top for the call.
-  assert.equal(new Set(lines.map((entry) => `${entry.api} ${entry.query}`)).size, lines.length)
+  const dropping: Route[] = [closedTables(tableRow('incident', 'Incident', 'task')), { table: 'task', exact: 'sys_class_nameISEMPTY^sys_class_nameISNOTEMPTY', rows: [{ sys_id: '1' }] }, ...dictionaryRoutes, { table: 'task', rows: [{ number: 'TASK1' }] }]
+  const gated = await connect(dropping, { tables: { allow: [], deny: ['incident'] } }, (entry) => once.push(entry))
+  assert.equal((await gated.call('sn_query', { table: 'task', fields: ['number'] })).data.error, 'blocked')
+  assert.equal(once.filter((entry) => entry.status === 'blocked').length, 1)
 })
 
 test('one call does not send hundreds of requests, whatever it names', async () => {
@@ -2037,6 +2055,8 @@ test('a payload does not hide the table of a record behind the way it is written
   // Measured: the instance compares names without regard to case. A table in capitals, or with a prefix, is the same table.
   assert.deepEqual(tables('<record_update table="SYS_USER"><SYS_USER ACTION="INSERT_OR_UPDATE"><name>x</name></SYS_USER></record_update>'), ['sys_user'])
   assert.deepEqual(tables('<record_update><x:sys_user action="DELETE"/></record_update>'), ['sys_user'])
+  // Inside a CDATA section the action on an element is the only sign, in whatever case it is written.
+  assert.deepEqual(tables('<record_update table="incident"><incident action="INSERT_OR_UPDATE"><note><![CDATA[<SYS_USER ACTION="DELETE"><name>x</name></SYS_USER>]]></note></incident></record_update>'), ['incident', 'sys_user'])
 
   // Measured: a linked application file carries the record it links to as a whole payload in a CDATA section.
   const inner = '<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_user"><sys_user action="INSERT_OR_UPDATE"><name>Abel Tuter</name></sys_user></record_update>'
@@ -2078,6 +2098,9 @@ test('a secret is taken out of a text however its element is written', () => {
   withheld('<record_update><sys_properties action="DELETE"/><incident><type>string</type></incident><sys_properties action="INSERT_OR_UPDATE"><name>x</name><type>password2</type><value>TOPSECRET</value></sys_properties></record_update>')
   // A property of another type keeps its value.
   assert.equal(scrubSecrets('<sys_properties action="INSERT_OR_UPDATE"><name>glide.ui.width</name><type>integer</type><value>120</value></sys_properties>').withheld, 0)
+  // Also where an element in front of it ends in itself: that one holds no record, and what stands between the
+  // two is not part of the property behind it.
+  assert.equal(scrubSecrets('<record_update><sys_properties action="DELETE"/><x><type>password</type></x><sys_properties action="INSERT_OR_UPDATE"><name>glide.ui.width</name><type>integer</type><value>120</value></sys_properties></record_update>').withheld, 0)
 })
 
 test('the payload of a captured change is passed on without its secrets, and cannot be searched', async () => {
@@ -2173,6 +2196,18 @@ test('a linked application file does not give away the record it links to', asyn
   assert.equal(closed.sentTo('sys_metadata')[0].query, 'sys_nameSTARTSWITHA^sys_class_nameNOT INsys_metadata_link^ORsys_class_nameISEMPTY')
   assert.match(parent.warnings.join(' '), /were left out by a condition on sys_class_name/)
 
+  // A reference into the table of application files can point to such a file, whose name is that of the record it
+  // links to: the name behind the reference is left out like one behind a reference into a closed table.
+  const pointing: Route[] = [
+    { table: 'sys_db_object', exact: 'name=u_review', rows: [tableRow('u_review', 'Review')] },
+    { table: 'sys_dictionary', query: 'nameINu_review', rows: [column('u_review', 'u_note'), column('u_review', 'u_file', 'reference', 'sys_metadata')] },
+    { table: 'u_review', rows: [{ u_note: 'x', u_file: labelled(ID, 'Abel Tuter') }] },
+  ]
+  const reviewing = await connect([...pointing, ...world], { tables: { allow: [], deny: ['sys_user'] } })
+  const shown = await reviewing.answer('sn_query', { table: 'u_review', fields: ['u_note', 'u_file'], displayValue: true })
+  assert.deepEqual(shown.records, [{ u_note: 'x', u_file: ID }])
+  assert.match(shown.warnings.join(' '), /were left out: u_file/)
+
   // Nothing is closed: the names stay, and the parent is read as it is.
   const open = await connect(world)
   assert.deepEqual((await open.answer('sn_query', { table: 'sys_metadata_link', fields: ['sys_name'] })).records.map((row: Data) => row.sys_name), ['Abel Tuter', 'A question'])
@@ -2228,6 +2263,12 @@ test('on something that could not be read as a table or a view, a field is judge
   assert.equal(row.other, 'plain')
   assert.equal(row.prop_name, 'glide.smtp.pw')
   assert.equal((await call('sn_query', { table: 'v_props', groupBy: 'prop_value' })).data.error, 'validation')
+  // What is named like a payload is not searched, sorted or counted by there either.
+  for (const args of [{ query: 'u_payloadLIKEs3cr' }, { query: 'ORDERBYu_payload' }, { groupBy: 'u_payload' }]) {
+    const { data } = await call('sn_query', { table: 'v_props', ...args })
+    assert.equal(data.error, 'validation', JSON.stringify(args))
+    assert.match(data.message, /holds whole records as text/, JSON.stringify(args))
+  }
 })
 
 test('names of records of other tables are kept back on the tables that are known to hold them', async () => {
@@ -2879,7 +2920,14 @@ test('a login that is rejected in the middle of a call is passed on as that', as
   const listed = await plugins.call('sn_plugins')
   assert.equal(listed.data.error, 'auth')
   assert.doesNotMatch(JSON.stringify(listed.data), /closed on this machine/)
-  assert.equal((await plugins.call('sn_instance')).data.error, 'auth')
+  // On a connection of its own: after a rejected login the client sends nothing for a while, and that would fail
+  // the call whatever the tool does with the failure.
+  const instance = await connect(
+    [{ table: 'sys_db_object', exact: 'name=sys_store_app', status: 401 }, { table: 'sys_db_object', exact: 'name=v_plugin', rows: [tableRow('v_plugin', 'Plugin')] }, { table: 'v_plugin', rows: [] }, ...dictionaryRoutes],
+    { tables: { allow: [], deny: ['sys_user'] } },
+  )
+  const overview = await instance.call('sn_instance')
+  assert.equal(overview.data.error, 'auth')
   // The entries of upgrades are one more witness, and many accounts cannot read them: that is no failure. A login
   // that is rejected there is one.
   const witness = await connect([{ table: 'upgrade_history_task', status: 401 }, ...origin('sys_plugins', [], [])])
