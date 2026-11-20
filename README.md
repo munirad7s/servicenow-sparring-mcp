@@ -247,7 +247,8 @@ many. The npm scripts do not write it.
   change places between pages (measured: 989 different rows in a thousand captured changes read newest first).
   The `query` of an answer shows the key.
 - One `sn_query` is one request, plus five to seven the first time a table is used: to check its field names, and
-  to look for rules that filter, archive or rotate it. The other functions cost more: `sn_origin` 4 to 9,
+  to look for rules that filter, archive or rotate it. On a database view, one more to read which fields it takes,
+  and two for each field it is filtered, sorted or counted by for the first time in ten minutes. The other functions cost more: `sn_origin` 4 to 9,
   `sn_upgrade_skips` about 10, `sn_dependencies` 25 to 35 (about 18 for one field), `sn_instance` about 50. Every
   answer carries its count in `requests`. At most eight requests are with the instance at a time, whichever
   function sends them.
