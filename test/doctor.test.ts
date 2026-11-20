@@ -35,7 +35,8 @@ test('the doctor command lists what the account can read, and what it cannot', a
   assert.match(output, /does not have the role snc_read_only/)
   // One request per source, four for what lies beyond the tables, and one per field a function filters by, on
   // the sources that could be read. No source is asked twice.
-  const fields = FILTERED_BY.flatMap((item) => item.fields).length
+  // The business rules are not visible to this account, so it is not asked about their fields.
+  const fields = FILTERED_BY.filter((item) => item.table !== 'sys_script').flatMap((item) => item.fields).length
   assert.match(output, new RegExp(`fields the functions filter by\\s+${fields} of ${fields} applied by this instance`))
   assert.equal(calls.length, SOURCES.length + 4 + fields)
   assert.ok(calls.every((entry) => entry.method === 'GET'))

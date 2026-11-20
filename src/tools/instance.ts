@@ -15,6 +15,7 @@ export const SOURCES: Array<{ table: string; usedBy: string }> = [
   { table: 'sys_dictionary_override', usedBy: 'sn_schema, sn_dependencies' },
   { table: 'sys_choice', usedBy: 'check of choice values, sn_upgrade_skips' },
   { table: 'sys_db_view', usedBy: 'sn_schema and field check for database views' },
+  { table: 'sys_db_view_table_field', usedBy: 'sn_schema and field check for database views (the fields a view takes)' },
   { table: 'sys_documentation', usedBy: 'sn_schema (field labels)' },
   { table: 'sys_properties', usedBy: 'sn_instance' },
   { table: 'sys_user_has_role', usedBy: 'sn_instance (roles of this account)' },
@@ -56,12 +57,25 @@ export const SOURCES: Array<{ table: string; usedBy: string }> = [
 
 
 /**
- * The fields that sn_delta, sn_origin, sn_upgrade_skips and sn_plugins filter by in queries they write themselves.
- * They are fields of the platform and are not looked up before each call. An instance that does not know one of
- * them would drop the condition and answer with every row, so the doctor command asks each of them once.
- * sn_query, sn_schema and sn_dependencies check the fields they use against the dictionary on every call.
+ * The fields the server filters by in queries it writes itself: those of sn_delta, sn_origin, sn_upgrade_skips
+ * and sn_plugins, and those it reads the dictionary with. They are fields of the platform and are not looked up
+ * before each call. An instance that does not know one of them would drop the condition and answer with every
+ * row, so the doctor command asks each of them once. The fields a caller names, and the ones sn_dependencies
+ * uses, are checked against the dictionary on every call.
  */
 export const FILTERED_BY: Array<{ table: string; fields: string[] }> = [
+  { table: 'sys_db_object', fields: ['name', 'super_class.name'] },
+  { table: 'sys_dictionary', fields: ['name', 'element'] },
+  { table: 'sys_dictionary_override', fields: ['name'] },
+  { table: 'sys_documentation', fields: ['name', 'element', 'language'] },
+  { table: 'sys_choice', fields: ['name', 'element', 'language', 'inactive'] },
+  { table: 'sys_db_view', fields: ['name'] },
+  { table: 'sys_db_view_table', fields: ['view', 'active'] },
+  { table: 'sys_db_view_table_field', fields: ['view_table'] },
+  { table: 'sys_script', fields: ['collection', 'action_query', 'active'] },
+  { table: 'sys_archive', fields: ['table', 'active'] },
+  { table: 'sys_table_rotation', fields: ['name', 'type'] },
+  { table: 'sys_user_has_role', fields: ['user.user_name', 'state'] },
   { table: 'sys_update_xml', fields: ['name', 'type', 'action', 'sys_created_by', 'sys_updated_by', 'sys_updated_on', 'sys_created_on'] },
   { table: 'sys_update_version', fields: ['name', 'state', 'source_table', 'sys_created_on'] },
   { table: 'sys_metadata', fields: ['sys_update_name', 'sys_class_name'] },

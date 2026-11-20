@@ -67,11 +67,11 @@ No answer changed its shape. What a caller can notice:
 
 ### Added
 
-- **`doctor` asks the instance whether it applies a condition on each field the functions filter by.** Four
-  functions write queries of their own on fields of the platform (27 fields of nine tables) and do not look them
-  up before each call. An instance that does not know one of them, on another release for example, would drop the
-  condition and answer with every row. `doctor` asks each field once, names the ones that are dropped, and ends
-  with 1 for them.
+- **`doctor` asks the instance whether it applies a condition on each field the functions filter by.** The
+  server writes queries of its own on fields of the platform, for four of its functions and to read the
+  dictionary (52 fields of 21 tables), and does not look those fields up before each call. An instance that does
+  not know one of them, on another release for example, would drop the condition and answer with every row.
+  `doctor` asks each field once, names the ones that are dropped, and ends with 1 for them.
 - **`npm run compare`** holds the server against the instance asked directly, past everything the server does to
   a request. It reads the dictionary a second time, one table of the parent chain after the other, and compares
   each field with what `sn_schema` says; and it sends a few hundred encoded queries both ways. On the test
