@@ -5,6 +5,9 @@ answer; such changes are listed under "Changed".
 
 ## Unreleased
 
+Found by measuring, not by reading: every function was held against the instance asked directly, and the
+differences were followed up. Two of them were answers this server exists to prevent.
+
 ### Fixed
 
 - **On a database view, a condition the instance drops was sent, and the answer was unfiltered.** A view can
@@ -47,6 +50,20 @@ answer; such changes are listed under "Changed".
   groups of `byType` (and `byDisposition`). Where there were more, the rest was left out without a word, and a sum
   over the list came out below `total`. Both now say how many groups there are, and `sn_delta` how many rows the
   ones left out hold between them.
+
+### Changed
+
+No answer changed its shape. What a caller can notice:
+
+- The `query` of an answer to a sorted query ends in `^ORDERBYsys_id` or `^ORDERBYDESCsys_id`: that is what was
+  sent.
+- On a database view, a query that the instance would answer unfiltered is refused. That includes a field outside
+  the list of the view that is only asked for as a field to return: the instance left it out of the row before,
+  and the answer said so.
+- `sn_schema` lists fewer fields for a view that carries a field list.
+- `sn_origin` answers with a verdict for some records it called `unknown` before, and such a call costs 6
+  requests where it cost 1.
+- `doctor` ends with 1 where the instance drops a condition on a field the functions filter by.
 
 ### Added
 
