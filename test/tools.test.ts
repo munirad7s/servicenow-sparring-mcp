@@ -612,6 +612,52 @@ test('the values of system properties that hold secrets cannot be found out by t
   assert.equal(sentTo('sys_properties', 'stats')[0].query, `valueLIKEa^${LEFT_OUT}`)
 })
 
+test('the value of a system property is not handed out under another name', async () => {
+  const properties: Route[] = [
+    { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property', 'sys_metadata')] },
+    { table: 'sys_db_object', query: 'name=sys_metadata', rows: [tableRow('sys_metadata', 'Application File')] },
+    { table: 'sys_dictionary', query: 'nameINsys_properties,sys_metadata', rows: [column('sys_metadata', 'sys_name'), column('sys_properties', 'name'), column('sys_properties', 'value'), column('sys_properties', 'type')] },
+    { table: 'sys_dictionary', query: 'nameINsys_metadata', rows: [column('sys_metadata', 'sys_name')] },
+    ...dictionaryRoutes,
+    { table: 'sys_properties', rows: [{ name: 'glide.smtp.pw', type: 'password2', value: 'ciphertext', 'ref_sys_properties.value': 'ciphertext' }] },
+    { table: 'sys_metadata', rows: [{ sys_name: 'glide.smtp.pw', 'ref_sys_properties.value': 'ciphertext' }] },
+  ]
+  const { answer, call, sentTo } = await connect(properties)
+
+  // Measured: the instance takes "ref_<the table itself>." and returns the field under that name. The server does not.
+  for (const args of [{ fields: ['name', 'ref_sys_properties.value'] }, { query: 'ref_sys_properties.valueSTARTSWITHc' }, { groupBy: 'ref_sys_properties.value' }]) {
+    const { data } = await call('sn_query', { table: 'sys_properties', ...args })
+    assert.equal(data.error, 'validation', JSON.stringify(args))
+    assert.match(data.message, /Unknown field/)
+  }
+  assert.equal(sentTo('sys_properties').length, 0)
+
+  // From the parent table the path is a real one. There the type of the property is not at hand, so the value is withheld.
+  const data = await answer('sn_query', { table: 'sys_metadata', fields: ['sys_name', 'ref_sys_properties.value'] })
+  assert.deepEqual(data.records, [{ sys_name: 'glide.smtp.pw', 'ref_sys_properties.value': '[withheld: this field holds a secret]' }])
+  for (const args of [{ query: 'ref_sys_properties.valueSTARTSWITHc' }, { groupBy: 'ref_sys_properties.value' }]) {
+    assert.equal((await call('sn_query', { table: 'sys_metadata', ...args })).data.error, 'validation', JSON.stringify(args))
+  }
+})
+
+test('a dictionary entry without a type is no proof that a field is harmless', async () => {
+  // The row of the dictionary is visible, its type is not: an access rule on that one field is enough for this.
+  const untyped: Route[] = [
+    { table: 'sys_dictionary', query: 'nameINsys_user', rows: [column('sys_user', 'name'), column('sys_user', 'user_password', ''), column('sys_user', 'manager', '')] },
+    ...dictionaryRoutes,
+    { table: 'sys_user', rows: [{ name: 'Abel', user_password: '$s$hash', manager: labelled(ID, 'Beth Anglin') }] },
+  ]
+  const { answer, call } = await connect(untyped)
+  assert.equal((await answer('sn_query', { table: 'sys_user', fields: ['name', 'user_password'] })).records[0].user_password, '[withheld: this field holds a secret]')
+  assert.match((await call('sn_query', { table: 'sys_user', query: 'user_passwordSTARTSWITH$' })).data.message, /judged by its name/)
+
+  // With tables closed, a field of unknown type may point into one of them: no name is passed on, and none can be probed.
+  const closed = await connect([{ table: 'sys_db_object', query: 'name=sys_user', rows: [tableRow('sys_user', 'User')] }, ...untyped], { tables: { allow: [], deny: ['sys_group'] } })
+  const data = await closed.answer('sn_query', { table: 'sys_user', fields: ['name', 'manager'], displayValue: true })
+  assert.deepEqual(data.records, [{ name: 'Abel', manager: ID }])
+  assert.equal((await closed.call('sn_query', { table: 'sys_user', query: 'managerSTARTSWITHBe' })).data.error, 'blocked')
+})
+
 test('through a database view the value of a system property can be neither compared nor counted', async () => {
   const view: Route[] = [
     { table: 'sys_db_object', query: 'name=u_property_view', rows: [] },

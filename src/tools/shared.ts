@@ -1,6 +1,6 @@
 import type { Row, ServiceNowClient } from '../client.js'
 import type { Column, Dictionary } from '../dictionary.js'
-import { ServiceNowError, validation } from '../errors.js'
+import { quoteInstanceText, ServiceNowError, validation } from '../errors.js'
 import { assertFieldPath, parseEncodedQuery, withCondition, type ParsedQuery } from '../query.js'
 
 export interface Context {
@@ -67,6 +67,22 @@ const SKIPS_EMPTY = new Set(['!=', 'NOT IN', 'NOT LIKE'])
 const NO_SECRET_PROPERTIES = 'typeNOT INpassword,password2'
 
 const isPropertyValue = (column: Column | undefined) => column?.definedOn === 'sys_properties' && (column.sourceField ?? column.name) === 'value'
+
+/**
+ * Whether a field holds a secret. The dictionary says so by its type. Where the entry is missing, or came back
+ * without a type, the name is the only sign left.
+ */
+export function holdsSecret(column: Column | undefined, path: string): boolean {
+  return column?.type ? SECRET_TYPES.has(column.type) : LOOKS_SECRET.test(path)
+}
+
+/**
+ * Whether a path can be the value of a system property although the dictionary does not say so: reached through
+ * a reference or a child table ("property.value", "ref_sys_properties.value") with a type that could not be read.
+ */
+export function mayBePropertyValue(column: Column | undefined, path: string): boolean {
+  return isPropertyValue(column) || (!column?.type && /\.value$/.test(path))
+}
 
 /**
  * The names under which a table hands out the value of a system property: its
@@ -217,13 +233,15 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
   // that table compares with those names, and sorting by the reference orders the rows by them.
   if (ctx.sn.restricted) {
     const closedBehind = (field: string) => {
-      const target = resolved.get(field)?.reference
-      return target && !ctx.sn.allows(target) ? target : null
+      const column = resolved.get(field)
+      if (column?.reference) return ctx.sn.allows(column.reference) ? null : column.reference
+      // A field that can point to any table, or whose type did not come back: it may point into a closed one.
+      return !column?.type || column.type === 'document_id' ? 'a table that cannot be told' : null
     }
     const byName = [...parsed.conditions.filter(({ operator }) => !COMPARES_IDS.has(operator)).flatMap(({ field, second }) => (second ? [field, second] : [field])), ...parsed.sorts].find(closedBehind)
     if (byName) {
       throw new ServiceNowError(
-        `"${byName}" points into ${closedBehind(byName)}, which is closed on this machine. Comparing it with text or sorting by it works on the names of the records there, ` +
+        `"${byName}" points into ${closedBehind(byName)}, and tables are closed on this machine. Comparing it with text or sorting by it works on the names of the records there, ` +
           'so those names could be found out by trying. Compare it with a sys_id (=, IN) or ask whether it is filled. Nothing was sent.',
         'blocked',
         table,
@@ -238,15 +256,15 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
   let propertyValues = false
   for (const field of compared) {
     const column = resolved.get(field)
-    if (column ? SECRET_TYPES.has(column.type) : LOOKS_SECRET.test(field)) {
+    if (holdsSecret(column, field)) {
       throw validation(
-        `"${field}" holds a secret${column ? '' : ' (judged by its name, because its type could not be read)'}. It can be neither compared nor sorted by: ` +
+        `"${field}" holds a secret${column?.type ? '' : ' (judged by its name, because its type could not be read)'}. It can be neither compared nor sorted by: ` +
           'the number of matches would give its value away piece by piece. Asking whether it is filled works: ISEMPTY, ISNOTEMPTY. Nothing was sent.',
         table,
       )
     }
     if (table === 'sys_properties' && field === 'value') propertyValues = true
-    else if (valueFields.has(field) || isPropertyValue(column)) {
+    else if (valueFields.has(field) || mayBePropertyValue(column, field)) {
       throw validation(
         `"${field}" is the value of a system property, and some properties hold secrets. Through a database view or a reference it cannot be compared or sorted by, ` +
           'because the properties that hold secrets cannot be left out there. Query sys_properties itself. Nothing was sent.',
@@ -387,8 +405,8 @@ async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQue
       const meant = choices.find((choice) => choice.label.toLowerCase() === given.toLowerCase())
       if (meant) {
         throw validation(
-          `"${field}" stores the value of a choice, not its label: "${given}" is the label of "${meant.value}". ` +
-            `Write ${meant.value} instead. With the label ServiceNow does not compare what was meant, and the answer would mislead. Nothing was sent.`,
+          `"${field}" stores the value of a choice, not its label: "${given}" is the label of "${quoteInstanceText(meant.value, 80)}". ` +
+            `Write ${quoteInstanceText(meant.value, 80)} instead. With the label ServiceNow does not compare what was meant, and the answer would mislead. Nothing was sent.`,
           table,
         )
       }
@@ -421,7 +439,7 @@ export async function explainEmpty(ctx: Context, table: string, guard: Guard): P
       const stored = new Set(choices.map((choice) => choice.value.toLowerCase()))
       const odd = given.find((item) => !stored.has(item.toLowerCase()))
       if (choices.length && odd) {
-        const list = choices.slice(0, 15).map((choice) => `${choice.value} (${choice.label})`).join(', ')
+        const list = choices.slice(0, 15).map((choice) => `${quoteInstanceText(choice.value, 80)} (${quoteInstanceText(choice.label, 80)})`).join(', ')
         notes.push(`"${odd}" is not among the choice values of "${field}": that can be why nothing matched. Its values: ${list}.`)
       }
     }

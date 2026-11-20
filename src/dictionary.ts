@@ -210,7 +210,8 @@ export class Dictionary {
 
           if (!last && segment.startsWith('ref_') && isTableName(segment.slice(4))) {
             const child = await this.table(segment.slice(4))
-            if (child?.chain.includes(current)) {
+            // Measured: the instance also takes "ref_<the table itself>.". That is no way around a check made on the plain name.
+            if (child && child.name !== current && child.chain.includes(current)) {
               current = child.name
               check.reached.add(current)
               continue

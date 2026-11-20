@@ -5,6 +5,16 @@ answer; such changes are listed under "Changed".
 
 ## 0.3.1 (2026-11-20)
 
+### Security
+
+- **The value of a system property that holds a secret was handed out under another name.** Measured: the Table
+  API accepts `ref_sys_properties.value` on `sys_properties` itself and returns the field under that name. The
+  server took that for a path into a child table and passed the value on. 0.3.0 has this defect. Found by review.
+- A dictionary entry that came back without its type counted as proof that a field holds no secret and points into
+  no closed table. Now the name of the field decides, as where the entry is missing.
+- With tables closed, a field that can point to any table could still be compared with text.
+- Choice values and labels went into messages unquoted.
+
 ### Added
 
 - `sn_query` says when business rules run on every read of the queried table. Such a "before query" rule can hide

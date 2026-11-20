@@ -6,7 +6,7 @@ import { validation } from '../errors.js'
 import { assertTableName } from '../query.js'
 import { clip, fail, listing, listShape, ok, rawOf, rowSchema, source, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { explainEmpty, guardFields, JOURNAL_TYPES, LOOKS_SECRET, propertyValueFields, READ_ONLY, SECRET_NOTE, SECRET_TYPES, type Context, type Guard } from './shared.js'
+import { explainEmpty, guardFields, holdsSecret, JOURNAL_TYPES, LOOKS_SECRET, mayBePropertyValue, propertyValueFields, READ_ONLY, SECRET_NOTE, type Context, type Guard } from './shared.js'
 
 /** System properties of these types hold credentials. Their value is never passed on. */
 const SECRET_PROPERTY_TYPES = new Set(['password', 'password2'])
@@ -41,17 +41,18 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
       const out: Row = {}
       for (const [key, value] of Object.entries(row)) {
         const column = known.get(key)
-        // Reached through a view or a reference, the value of a system property comes without the type that would say whether it is a secret.
-        const fromProperties = propertyValues.has(key) || (table !== 'sys_properties' && column?.definedOn === 'sys_properties' && (column.sourceField ?? column.name) === 'value')
+        // Reached through a view, a reference or a child path, the value of a system property comes without the type
+        // that would say whether it is a secret. Only the plain "value" of sys_properties itself is judged by its row.
+        const fromProperties = propertyValues.has(key) || (!(table === 'sys_properties' && key === 'value') && mayBePropertyValue(column, key))
         const named = value && typeof value === 'object'
-        if (fromProperties || (column ? SECRET_TYPES.has(column.type) : LOOKS_SECRET.test(key))) {
-          if (filled(value)) (column || fromProperties ? byType : byName).add(key)
+        if (fromProperties || holdsSecret(column, key)) {
+          if (filled(value)) (column?.type || fromProperties ? byType : byName).add(key)
           out[key] = filled(value) ? SECRET_NOTE : value
         } else if (named && column?.reference && !ctx.sn.allows(column.reference)) {
           // A single reference or a list of them: the display value is the name of a record in the closed table.
           closed.add(key)
           out[key] = rawOf(value)
-        } else if (named && ctx.sn.restricted && (!column || column.type === 'document_id')) {
+        } else if (named && ctx.sn.restricted && (!column?.type || column.type === 'document_id')) {
           // Which table the name comes from is not known: the type could not be read, or the field can point anywhere.
           untold.add(key)
           out[key] = rawOf(value)
@@ -100,18 +101,17 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
   async function countPerValue(table: string, query: string, groupBy: string, limit: number) {
     const guard = await guardFields(ctx, table, query, [], groupBy)
     const column = guard.resolved.get(groupBy)
-    if (column ? SECRET_TYPES.has(column.type) : LOOKS_SECRET.test(groupBy)) {
+    if (holdsSecret(column, groupBy)) {
       throw validation(`"${groupBy}" holds a secret. Its values are not listed, also not as groups.`, table)
     }
-    const fromProperties = column?.definedOn === 'sys_properties' && (column.sourceField ?? column.name) === 'value'
-    if (fromProperties || (await propertyValueFields(ctx, table)).has(groupBy)) {
+    if (mayBePropertyValue(column, groupBy) || (table === 'sys_properties' && groupBy === 'value') || (await propertyValueFields(ctx, table)).has(groupBy)) {
       throw validation(`"${groupBy}" is the value of a system property, and some properties hold secrets. The values are not listed as groups. Read the properties with their name and type instead.`, table)
     }
 
     // The label of a group is the name behind a reference. Not asked for where that table is closed on this machine,
     // or where tables are closed and it is not known which table the field points to.
     const intoClosed = Boolean(column?.reference) && !ctx.sn.allows(column?.reference ?? '')
-    const labels = !(intoClosed || (ctx.sn.restricted && (!column || column.type === 'document_id')))
+    const labels = !(intoClosed || (ctx.sn.restricted && (!column?.type || column.type === 'document_id')))
     const groups = (await ctx.sn.groupCount(table, groupBy, guard.query, labels)).sort((a, b) => b.count - a.count)
     const shown = groups.slice(0, limit)
     const warnings = [...guard.warnings]
