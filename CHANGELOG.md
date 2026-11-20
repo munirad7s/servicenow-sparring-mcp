@@ -138,8 +138,8 @@ measurements.
 - An answer was read into memory completely before its size was checked.
 - A field that holds a secret was withheld from the answer, but could be used in a condition or a sort. "Starts
   with a", "starts with b": the number of matches gives a value away piece by piece. Such a field can now only be
-  asked whether it is filled. A query that compares or sorts by the value of system properties leaves the
-  properties of a password type out; a count per property value is refused.
+  asked whether it is filled. A query that compares or sorts by the value of system properties leaves out the
+  properties of a password type and those without a type; a count per property value is refused.
 - The value of a system property was passed on when neither its type nor its name came back, when its type was
   empty, and through a database view whose dictionary could not be read.
 - With tables closed on the machine, the names behind a list of references into a closed table were passed on, and

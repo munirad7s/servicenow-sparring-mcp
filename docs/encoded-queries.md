@@ -75,12 +75,13 @@ These were not sent to the instance for measurement. They are refused because of
 |---|---|---|
 | A condition on a field of a password or encrypted type | `user_passwordSTARTSWITH$s$a` | refuses; `ISEMPTY` and `ISNOTEMPTY` are allowed |
 | A sort by such a field, or a comparison of another field with it | `ORDERBYuser_password` | refuses |
-| A condition on, or a sort by, the value of system properties | `valueLIKEhttp` on `sys_properties` | sends it with `typeNOT INpassword,password2^ORtypeISEMPTY` added to every part of the query, and says so |
+| A condition on, or a sort by, the value of system properties | `valueLIKEhttp` on `sys_properties` | sends it with `typeNOT INpassword,password2` added to every part of the query, and says so |
 | The same through a database view or a reference | `prop_valueLIKEhttp` | refuses |
 
 The instance applies each of these as written. The number of matches would tell whether a guess was right, and
-repeated guesses would spell out a value that the answer itself withholds. The second part of the added condition
-keeps the properties without a type in the result: `NOT IN` alone would leave them out.
+repeated guesses would spell out a value that the answer itself withholds. The added condition also leaves out the
+properties without a type, because `NOT IN` skips empty fields. That is wanted: without a type, a value is withheld
+by the name of its property, and a name cannot be written into this condition.
 
 ## Works as expected
 

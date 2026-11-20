@@ -62,7 +62,7 @@ export const QUERY_LIMITS = [
   '"!=", "NOT IN" and "NOT LIKE" leave out the rows where the field is empty. The answer says so when one of them is used; add ^OR<field>ISEMPTY to count those rows too.',
   'A choice field is compared with its stored value. A query that uses the English label of a field of the table itself is refused and the stored value is named. Where the choices could not be read, the answer says so.',
   'Fields that hold secrets (types password, password2, glide_encrypted, and system properties of a password type) come back as "[withheld: this field holds a secret]". Where the type of a field cannot be read, its name decides, and the answer says that types were missing.',
-  'A field that holds a secret can be asked whether it is filled (ISEMPTY, ISNOTEMPTY). It cannot be compared or sorted by: the number of matches would give its value away piece by piece. A query that compares or sorts by the value of system properties leaves the properties of a password type out and says so; through a database view or a reference such a query is refused, and so is a count per property value.',
+  'A field that holds a secret can be asked whether it is filled (ISEMPTY, ISNOTEMPTY). It cannot be compared or sorted by: the number of matches would give its value away piece by piece. A query that compares or sorts by the value of system properties leaves out the properties of a password type and those without a type, and says so; through a database view or a reference such a query is refused, and so is a count per property value.',
   'One answer carries about 60,000 characters of rows. Longer values are cut and marked; more rows are reached with nextOffset.',
 ]
 

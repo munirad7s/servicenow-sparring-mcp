@@ -31,8 +31,12 @@ const ASKS_IF_FILLED = new Set(['ISEMPTY', 'ISNOTEMPTY', 'ISEMPTYSTRING', 'ANYTH
 const COMPARES_IDS = new Set(['=', '!=', 'IN', 'NOT IN', 'SAMEAS', 'NSAMEAS', ...ASKS_IF_FILLED])
 /** Measured: these leave out the rows where the field is empty. */
 const SKIPS_EMPTY = new Set(['!=', 'NOT IN', 'NOT LIKE'])
-/** A system property says by its type whether its value is a secret. Rows without a type stay in. */
-const NO_SECRET_PROPERTIES = 'typeNOT INpassword,password2^ORtypeISEMPTY'
+/**
+ * A system property says by its type whether its value is a secret. Measured: "NOT IN" leaves out the rows where the
+ * field is empty, so properties without a type go as well. That is wanted: without a type, the name of a property
+ * decides whether its value is withheld, and a name cannot be put into this condition.
+ */
+const NO_SECRET_PROPERTIES = 'typeNOT INpassword,password2'
 
 const isPropertyValue = (column: Column | undefined) => column?.definedOn === 'sys_properties' && (column.sourceField ?? column.name) === 'value'
 
@@ -223,8 +227,8 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
   if (!propertyValues) return query
 
   warnings.push(
-    'The query compares or sorts by the value of system properties. Properties that hold a secret (type password or password2) were left out of it, ' +
-      'so that their values cannot be found out by trying. The total does not count them.',
+    'The query compares or sorts by the value of system properties. Properties that hold a secret (type password or password2) and properties without a type ' +
+      'were left out of it, so that no secret can be found out by trying. The total does not count them.',
   )
   return withCondition(query, NO_SECRET_PROPERTIES)
 }

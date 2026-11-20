@@ -459,7 +459,7 @@ test('a field that holds a secret can be asked whether it is filled, and nothing
 })
 
 test('the values of system properties that hold secrets cannot be found out by trying', async () => {
-  const LEFT_OUT = 'typeNOT INpassword,password2^ORtypeISEMPTY'
+  const LEFT_OUT = 'typeNOT INpassword,password2'
   const { answer, call, sentTo } = await connect([
     { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] },
     { table: 'sys_dictionary', query: 'nameINsys_properties', rows: [column('sys_properties', 'name'), column('sys_properties', 'value'), column('sys_properties', 'type')] },
@@ -473,7 +473,7 @@ test('the values of system properties that hold secrets cannot be found out by t
   const sent = `valueLIKEzurich^${LEFT_OUT}^NQname=glide.war^ORDERBYvalue^${LEFT_OUT}`
   assert.equal(sentTo('sys_properties')[0].query, sent)
   assert.equal(found.query, sent)
-  assert.match(found.warnings.join(' '), /Properties that hold a secret \(type password or password2\) were left out/)
+  assert.match(found.warnings.join(' '), /Properties that hold a secret \(type password or password2\) and properties without a type were left out/)
 
   // Nothing compares the value: the query goes out as written. Asking whether it is filled compares nothing.
   await answer('sn_query', { table: 'sys_properties', query: 'name=glide.war', fields: ['name', 'value'] })

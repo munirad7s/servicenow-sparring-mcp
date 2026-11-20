@@ -116,7 +116,8 @@ provider, the data leaves your network. Four things limit what can go that way:
 - **A secret cannot be found out by trying.** "Starts with a", "starts with b": the number of matches would give a
   value away piece by piece, and so would the order of rows sorted by it. A field that holds a secret can be asked
   whether it is filled, and nothing else. A query that compares or sorts by the value of system properties leaves
-  the properties of a password type out and says so; a count per property value is refused.
+  out the properties of a password type and those without a type, and says so; a count per property value is
+  refused.
 - **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
   away from the server: it does not ask for them, a query cannot reach them through a dot-walk, a child table or a
   database view, and the names behind references into them are left out, for single references and for lists.
