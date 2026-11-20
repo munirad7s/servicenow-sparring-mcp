@@ -1419,6 +1419,20 @@ test('the tables of a page of update names are asked for together, not name by n
   assert.ok(calls.length < 40, `${calls.length} requests in all`)
 })
 
+test('a list of counts that is cut says so', async () => {
+  // Thirty-five types of captured changes: the answer lists the thirty largest, and a sum over them is no total.
+  const types = Object.fromEntries(Array.from({ length: 35 }, (_, index) => [`Type ${String(index).padStart(2, '0')}`, 100 - index]))
+  const { answer } = await connect([...dictionaryRoutes, { table: 'sys_update_xml', rows: [{ name: 'x_1', type: 'Type 00', target_name: 'A', sys_created_by: 'abel', sys_updated_by: 'abel' }], total: 2_905 }, stats('sys_update_xml', types)])
+  const data = await answer('sn_delta')
+  assert.equal(data.byType.length, 30)
+  assert.equal(data.byType[0].count, 100)
+  // The five that are left out have 70, 69, 68, 67 and 66 rows.
+  assert.match(data.warnings.join(' '), /byType lists the 30 largest of 35 types\. The other 5 have 340 row\(s\) between them/)
+  // Thirty types or fewer: the list is the whole of it, and nothing is said.
+  const few = await connect([...dictionaryRoutes, { table: 'sys_update_xml', rows: [] }, stats('sys_update_xml', { 'Business Rule': 2 })])
+  assert.doesNotMatch((await few.answer('sn_delta')).warnings.join(' '), /largest of/)
+})
+
 test('with a deny list, what stands before the sys_id of each name on a page is asked for once', async () => {
   // Two hundred script includes with business rules closed: each name begins with "sys_script" as well, so each
   // needs to know whether "sys_script_include" is a table. Asked for the page, that is one request.

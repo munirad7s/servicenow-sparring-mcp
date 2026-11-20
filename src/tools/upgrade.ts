@@ -313,6 +313,10 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
           warnings.push('The entries came back without file names: the upgrade details behind them are not readable for this account, so the filter on disposition may not have been applied either.')
         }
         if (!perDisposition || !types || !states) warnings.push('Some of the counts could not be read (Aggregate API). The list itself is valid.')
+        // A list that is cut says so: a sum over it is then no total.
+        for (const [label, groups] of [['byType', types], ['byDisposition', perDisposition]] as const) {
+          if (groups && groups.length > 30) warnings.push(`${label} lists the 30 largest of ${groups.length} groups: "total" counts every entry, a sum over ${label} does not.`)
+        }
 
         const byName = (groups: Array<{ value: string; count: number; display?: string }> | null, name: (group: { value: string; display?: string }) => string, top = 30) =>
           groups && groups.map((group) => ({ name: name(group) || '(empty)', count: group.count })).sort((a, b) => b.count - a.count).slice(0, top)

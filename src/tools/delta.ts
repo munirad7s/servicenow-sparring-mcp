@@ -29,10 +29,11 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
       .then((groups) =>
         groups
           .map((group) => ({ type: group.value || '(empty)', count: group.count }))
-          .sort((a, b) => b.count - a.count)
-          .slice(0, 30),
+          .sort((a, b) => b.count - a.count),
       )
       .catch(() => null)
+  /** As many types as an answer lists. Where there are more, the answer says so: a sum over the list is then no total. */
+  const MOST_TYPES = 30
 
   server.registerTool(
     'sn_delta',
@@ -104,7 +105,7 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
         const filter = scope([...withoutType, type ? `type=${type}` : ''].filter(Boolean))
 
         const warnings: string[] = []
-        const [page, byType, bySystem] = await Promise.all([
+        const [page, everyType, bySystem] = await Promise.all([
           sn.query<Row>({
             table: 'sys_update_xml',
             query: [filter, 'ORDERBYDESCsys_updated_on'].filter(Boolean).join('^'),
@@ -118,11 +119,16 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
           total([...withoutType, type ? `type=${type}` : '', BY_SYSTEM_ACCOUNT].filter(Boolean).join('^')),
         ])
 
+        const byType = everyType && everyType.slice(0, MOST_TYPES)
         if (!byType) warnings.push('The counts per type could not be read (Aggregate API). The list itself is valid.')
+        if (everyType && everyType.length > MOST_TYPES) {
+          const rest = everyType.slice(MOST_TYPES).reduce((sum, item) => sum + item.count, 0)
+          warnings.push(`byType lists the ${MOST_TYPES} largest of ${everyType.length} types. The other ${everyType.length - MOST_TYPES} have ${rest} row(s) between them: "total" counts them, a sum over byType does not.`)
+        }
         if (page.total === 0 && type) {
           const known = await typeCounts(scope(withoutType))
           if (known?.length) {
-            warnings.push(`No row has the type "${type}". The type must be the exact label. Types under this filter: ${known.map((item) => quoteInstanceText(item.type, 60)).join(', ')}.`)
+            warnings.push(`No row has the type "${type}". The type must be the exact label. Types under this filter: ${known.slice(0, MOST_TYPES).map((item) => quoteInstanceText(item.type, 60)).join(', ')}${known.length > MOST_TYPES ? `, and ${known.length - MOST_TYPES} more` : ''}.`)
           }
         }
         if (peopleOnly && bySystem) {
