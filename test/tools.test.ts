@@ -1160,6 +1160,24 @@ test('a record in a closed table is not read by the other tools either, and its 
     [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_script', rows: [] }, { table: 'sys_update_xml', query: `nameENDSWITH_${ID}`, rows: [{ name: NAME }] }, ...origin('sys_plugins', [change()], [], {}, [skip('Skipped')])],
     closed,
   )
+  // The list of what an upgrade skipped names the record of a closed table by its file, not by its readable name.
+  const entry = (file: string, target: string) => ({
+    'upgrade_detail.file_name': file,
+    'upgrade_detail.target_name': target,
+    'upgrade_detail.type': 'Business Rule',
+    'upgrade_detail.disposition': labelled('4', 'Skipped'),
+    'upgrade_detail.upgrade_history.to_version': 'glide-australia-02-11-2026__patch1.zip',
+    state: labelled('1', 'Not Reviewed'),
+    sys_created_on: '2026-09-25 17:00:00',
+  })
+  const log = { table: 'sys_dictionary', query: 'nameINsys_upgrade_history_log', rows: ['file_name', 'target_name', 'type'].map((name) => column('sys_upgrade_history_log', name)).concat([column('sys_upgrade_history_log', 'disposition', 'integer'), column('sys_upgrade_history_log', 'upgrade_history', 'reference', 'sys_upgrade_history')]) }
+  const skipped = await connect(
+    [log, ...world, { table: 'upgrade_history_task', rows: [entry(NAME, 'Example rule'), entry(`sys_ui_action_${ID}`, 'Example action')] }, ...upgradeRoutes.filter((route) => !(route.table === 'upgrade_history_task' && (route.api ?? 'table') === 'table'))],
+    closed,
+  )
+  const list = await skipped.answer('sn_upgrade_skips', {})
+  assert.deepEqual(list.records.map((item: Data) => item.target), ['[withheld: the record is in a table closed on this machine]', 'Example action'])
+
   const stopped = await traced.call('sn_origin', { sysId: ID })
   assert.equal(stopped.data.error, 'blocked')
   assert.match(stopped.data.message, /This sys_id stands for a record in a table that is closed on this machine/)
@@ -2611,6 +2629,13 @@ test('sn_origin: what a row does not say is not read as an answer', async () => 
   // An update row without an author has no person on it: it counts as sn_delta counts it.
   const authorless = await (await connect(origin('sys_plugins', [change({ sys_created_by: '', sys_updated_by: '' })], []))).answer('sn_origin', { sysId: ID })
   assert.deepEqual({ divergence: authorless.divergence, capturedBy: authorless.capturedBy }, { divergence: 'customer_changes_captured', capturedBy: 'system_accounts' })
+  // One row by a job and one by a person: a person captured a change.
+  const job = { sys_created_by: 'system', sys_updated_by: 'system' }
+  const mixed = await (await connect(origin('sys_plugins', [change(job), change({ sys_created_by: 'abel', sys_updated_by: 'abel' })], []))).answer('sn_origin', { sysId: ID })
+  assert.equal(mixed.capturedBy, 'people')
+  // An account is the same in whatever case it is written: the instance compares names that way.
+  const upper = await (await connect(origin('sys_plugins', [change({ sys_created_by: 'System', sys_updated_by: 'GUEST' })], []))).answer('sn_origin', { sysId: ID })
+  assert.equal(upper.capturedBy, 'system_accounts')
 
   // An earlier version from an update set and none marked current: whose content the record holds is not known.
   const noCurrent = await (await connect(origin('sys_plugins', [], [version('previous', 'sys_update_set', '2026-03-01 10:00:00', 'abel')]))).answer('sn_origin', { sysId: ID })
@@ -2642,6 +2667,35 @@ test('sn_origin: two records that spell the same name are not told apart by gues
   const override = await connect(world([]))
   await override.answer('sn_origin', { updateName: `sys_dictionary_override_${ID}` })
   assert.equal(override.sentTo('sys_dictionary').length, 0)
+})
+
+test('sn_origin: a record of an application customization is said to be one, and not judged', async () => {
+  // Changes a customer made to an installed application are kept in a package of their own. No rule here fits it.
+  const data = await (await connect(origin('sys_app_customization', [change()], [version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel')]))).answer('sn_origin', { sysId: ID })
+  assert.equal(data.verdict, 'unknown')
+  assert.match(data.explanation, /application customization \(sys_app_customization\)/)
+})
+
+test('sn_origin: what an upgrade entry means is decided by the codes the instance lists', async () => {
+  const codes: Route = {
+    table: 'sys_choice',
+    query: 'elementINdisposition,state',
+    rows: [
+      { name: 'sys_upgrade_history_log', element: 'disposition', value: '4', label: 'Skipped' },
+      { name: 'sys_upgrade_history_log', element: 'disposition', value: '9', label: 'Skipped Error' },
+      { name: 'upgrade_history_task', element: 'state', value: '5', label: 'Reviewed and Reverted' },
+      { name: 'upgrade_history_task', element: 'state', value: '7', label: 'Reviewed, Not Reverted' },
+      { name: 'upgrade_history_task', element: 'state', value: '8', label: 'Revert Failed' },
+    ],
+  }
+  const judged = async (row: Data) => (await (await connect([codes, ...origin('sys_plugins', [], [], {}, [row])])).answer('sn_origin', { sysId: ID })).verdict
+  // A file the upgrade could not apply is a failure and no local change, also where the instance names its codes itself.
+  assert.equal(await judged(skip('Skipped Error')), 'out_of_box_as_captured')
+  assert.equal(await judged(skip('Skipped')), 'customized')
+  // Reverted is what says so, and nothing that says it did not happen.
+  assert.equal(await judged({ ...skip('Skipped'), state: labelled('5', 'Reviewed and Reverted') }), 'out_of_box_as_captured')
+  assert.equal(await judged({ ...skip('Skipped'), state: labelled('7', 'Reviewed, Not Reverted') }), 'customized')
+  assert.equal(await judged({ ...skip('Skipped'), state: labelled('8', 'Revert Failed') }), 'customized')
 })
 
 test('sn_origin sends no request whose answer it would not use', async () => {

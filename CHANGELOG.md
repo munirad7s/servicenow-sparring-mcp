@@ -22,7 +22,11 @@ answer; such changes are listed under "Changed".
   answered with the names that are close; a payload that names no table is withheld. A second run over 49 lines of
   the rules for secrets, the parser and the client found eight more, among them: the value of a system property
   behind a reference whose table cannot be read, a text search on a table whose fields are partly hidden, the
-  comparison of two payloads, and the time limit of a request.
+  comparison of two payloads, and the time limit of a request. A third over 41 lines of `sn_origin` and the other
+  functions found seven: a change captured by a job and by a person counts as one by a person, a failed file is
+  no local change also where the instance lists its own codes, "not reverted" is not "reverted", an account is
+  the same in whatever case it is written, and `sn_upgrade_skips` keeps back the name of a record of a closed
+  table. One check in `sn_origin` could not be reached any more and is gone.
 
 ## 0.3.3 (2026-11-20)
 

@@ -6,7 +6,7 @@ import { ORIGIN_CAVEATS } from '../limitations.js'
 import { assertSysId, isGeneratedSysId, isTableName } from '../query.js'
 import { fail, labelOf, ok, rawOf, rowSchema, source, sourceShape, tidy, withheldWarning } from '../result.js'
 import { currentCall, traced } from '../trace.js'
-import { CLOSED_NAME, errorKind, isClosedRecord, isSystemAccount, NO_CONNECTION, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
+import { errorKind, isClosedRecord, isSystemAccount, NO_CONNECTION, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
 import { skipCodes } from './upgrade.js'
 
 const UPDATE_NAME = /^[A-Za-z0-9_.-]{1,250}$/
@@ -484,12 +484,12 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         // The decision is made on the stored codes: the labels come in the language of the account.
         const skipRecords = skips?.records.map(tidy) ?? []
         const codes = divergence === 'no_customer_changes_captured' && skipRecords.length ? await skipCodes(sn) : null
-        // The readable name of a record in a table that is closed on this machine is not passed on, here or below.
-        const closedRecord = (await isClosedRecord(ctx, name)) || Boolean(isTableName(ownTable || kind) && (await ctx.closed.reason(ownTable || kind)))
+        // A record of a table that is closed on this machine does not get this far: it is refused by its update name,
+        // above, before anything about it is read.
         const skipRows = skipRecords.map((row) => ({
           disposition: labelOf(row['upgrade_detail.disposition']),
           review: labelOf(row.state),
-          target: closedRecord ? CLOSED_NAME : rawOf(row['upgrade_detail.target_name']),
+          target: rawOf(row['upgrade_detail.target_name']),
           upgrade: rawOf(row['upgrade_detail.upgrade_history.to_version']),
           createdOn: rawOf(row.sys_created_on),
         }))
@@ -775,7 +775,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           record: file && compact({
             sysId: rawOf(file.sys_id),
             table: ownTable || kind,
-            name: closedRecord ? CLOSED_NAME : rawOf(file.sys_name),
+            name: rawOf(file.sys_name),
             updateName: name,
             package: packageName,
             packageClass,
