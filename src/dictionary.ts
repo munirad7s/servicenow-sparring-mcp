@@ -75,34 +75,39 @@ export interface UnknownField {
  * otherwise). That question is cheap, because nothing matches.
  *
  * An instance can also be set to answer a query it cannot use with no rows at all
- * (glide.invalid_query.returns_no_rows); the first question then proves nothing. Where it is known that the
- * instance is not set that way ("dropsUnusable"), it is enough to know that the table has a row: without one
- * nothing can be proven, and nothing can come back either ("no_rows"). Where it is not known, the rows where the
- * field is empty or filled are asked for, which is every row: an answer with rows says "applied", and one with
- * none from a table that has rows says that the instance answered the question with nothing ("answers_nothing").
- * That second question counts the whole table, which took nine seconds on a view of 12,000 rows.
+ * (glide.invalid_query.returns_no_rows); the first question then proves nothing. So the rows where the field is
+ * empty or filled are asked for as well, which is every row: an answer with a row says "applied". How the instance
+ * is set is not asked instead. A setting is read at one moment and the proof is relied on at another, and an
+ * administrator who turns the setting on in between made a field the instance cannot use look like one that
+ * matched nothing.
+ *
+ * The second question asks only whether a row comes back, not how many there are ("uncounted"). Measured on eight
+ * database views: counted, it took up to eleven seconds on a view of four million rows and five on one of 145;
+ * not counted, a tenth of a second on each. Where no row comes back, the first one can be a row this account may not
+ * see. Then the count says that there are rows, and the question is asked once more, counted.
+ *
+ * None from a table that has rows says that the instance answered the question with nothing ("answers_nothing"),
+ * and a table without rows proves nothing, and nothing can come back from it either ("no_rows").
  *
  * A question that fails, or an empty answer without a total, is "unanswered".
  */
 export async function proveCondition(
-  ask: (query: string) => Promise<{ total: number | null; records: unknown[] } | null>,
+  ask: (query: string, uncounted?: boolean) => Promise<{ total: number | null; records: unknown[] } | null>,
   path: string,
-  dropsUnusable = false,
 ): Promise<'applied' | 'dropped' | 'answers_nothing' | 'no_rows' | 'unanswered'> {
   const some = (answer: { total: number | null; records: unknown[] }) => answer.records.length > 0 || (answer.total ?? 0) > 0
   const both = await ask(`${path}ISEMPTY^${path}ISNOTEMPTY`)
   if (!both) return 'unanswered'
   if (some(both)) return 'dropped'
   if (both.total === null) return 'unanswered'
-  if (!dropsUnusable) {
-    const either = await ask(`${path}ISEMPTY^OR${path}ISNOTEMPTY`)
+  for (const uncounted of [true, false]) {
+    const either = await ask(`${path}ISEMPTY^OR${path}ISNOTEMPTY`, uncounted)
     if (!either) return 'unanswered'
     if (some(either)) return 'applied'
   }
   const any = await ask('')
   if (!any || (any.total === null && !any.records.length)) return 'unanswered'
-  if (!some(any)) return 'no_rows'
-  return dropsUnusable ? 'applied' : 'answers_nothing'
+  return some(any) ? 'answers_nothing' : 'no_rows'
 }
 
 export interface FieldCheck {
@@ -396,9 +401,8 @@ export class Dictionary {
 
   private forgetTables(): void {
     this.dropped++
-    // What a view was seen to filter by, and that it has rows, was seen of the view as it was defined then.
+    // What a view was seen to filter by was seen of the view as it was defined then.
     this.carried.clear()
-    this.someRow.clear()
     for (const cache of [this.tables, this.columnSets, this.choiceLists, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.closedSets, this.knownNames, this.partLists, this.shownSets, this.childSets]) cache.clear()
   }
 
@@ -407,7 +411,6 @@ export class Dictionary {
     for (const key of [...this.choiceLists.keys()]) if (key.startsWith(`${name}.`)) this.choiceLists.delete(key)
     // What a view was seen to carry belongs to its definition: a field taken off its list is asked about again.
     for (const key of [...this.carried.keys()]) if (key.startsWith(`${name}.`)) this.carried.delete(key)
-    this.someRow.delete(name)
     this.knownNames.delete(name)
   }
 
@@ -929,9 +932,12 @@ export class Dictionary {
    * Whether the instance answers a query it cannot use with no rows (glide.invalid_query.returns_no_rows), where it
    * would otherwise drop the condition and answer with every row. A hardened instance has this on. Then an empty
    * answer no longer shows that a condition was understood. null if the property could not be read.
+   *
+   * Remembered for half a minute, so that the parts of one call ask once: an administrator can turn it on at any
+   * time, and an answer read ten minutes ago said nothing about now.
    */
   emptyOnInvalidQuery(): Promise<boolean | null> {
-    return this.cached(this.settings, 'emptyOnInvalidQuery', async () => {
+    const read = async (): Promise<boolean | null> => {
       const name = 'glide.invalid_query.returns_no_rows'
       const page = await this.gated.query<Record<string, string>>({ table: 'sys_properties', query: `name=${name}`, fields: PROPERTY_FIELDS, limit: 1 }).catch(unlessNoConnection(null))
       if (!page) return null
@@ -941,7 +947,8 @@ export class Dictionary {
       if (!row) return page.total === 0 ? false : null
       const value = plainValue(row)
       return value === undefined ? null : value === 'true'
-    })
+    }
+    return this.cached(this.settings, 'emptyOnInvalidQuery', read, this.recheckMs)
   }
 
   /**
@@ -1113,8 +1120,6 @@ export class Dictionary {
   }
 
   private readonly carried = new Map<string, Entry<boolean>>()
-  /** The views that were seen to have a row, and when. */
-  private readonly someRow = new Map<string, number>()
 
   /**
    * true if the instance applies a condition on this field of a view, or on this path from one of its fields.
@@ -1132,26 +1137,12 @@ export class Dictionary {
     if (known && Date.now() - known.at < this.ttlMs) return known.value
     const asked = this.dropped
     // A view that is closed on this machine is refused as that, not as a field that could not be proven.
-    const read = (query: string) =>
-      this.gated.query({ table: view, query, fields: ['sys_id'], limit: 1 }).catch((error) => {
+    const ask = (query: string, uncounted?: boolean) =>
+      this.gated.query({ table: view, query, fields: ['sys_id'], limit: 1, uncounted }).catch((error) => {
         if (noConnection(error) || (error instanceof ServiceNowError && error.kind === 'blocked')) throw error
         return null
       })
-    // Whether the view has a row is asked once for all of its fields: on a large view that question is the slow
-    // one. Only "it has one" is remembered: a view that was empty can have rows by the next question.
-    const ask = async (query: string) => {
-      if (query !== '') return read(query)
-      const seen = this.someRow.get(view)
-      if (seen !== undefined && Date.now() - seen < this.ttlMs) return { total: 1, records: [{}] }
-      const answer = await read('')
-      // Remembered only if nothing was dropped while it was asked: what was seen belongs to the state before.
-      if (asked === this.dropped && answer && (answer.records.length > 0 || (answer.total ?? 0) > 0)) {
-        if (this.someRow.size >= MAX_ENTRIES) this.someRow.clear()
-        this.someRow.set(view, Date.now())
-      }
-      return answer
-    }
-    const proof = await proveCondition(ask, path, (await this.emptyOnInvalidQuery()) === false)
+    const proof = await proveCondition(ask, path)
     if (proof === 'applied' && asked === this.dropped) {
       if (this.carried.size >= MAX_ENTRIES) this.carried.clear()
       this.carried.set(key, { value: Promise.resolve(true), at: Date.now() })

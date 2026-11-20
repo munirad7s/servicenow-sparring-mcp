@@ -416,12 +416,18 @@ test('a view that lists the fields it takes from a table has no other field of t
 
   // A field that is only returned goes out without a question. A field the view is filtered by is asked about
   // first, also one on the list and one of a table without a list: measured, the instance dropped the condition
-  // on one of eight listed fields of a joined table. Asked once per field, and once whether the view has a row
-  // at all, while it has one.
+  // on one of eight listed fields of a joined table. Two questions per field, asked once: the rows where it is
+  // empty and filled at once, and one row where it is either.
   await described.answer('sn_query', { table: 'incident_caller', fields: ['inc_number', 'usr_name'] })
   assert.deepEqual(described.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [''])
   for (let run = 0; run < 2; run++) await described.answer('sn_query', { table: 'incident_caller', query: 'inc_number=INC1^usr_nameLIKEa', fields: ['inc_number'] })
-  assert.deepEqual(described.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query).slice(1), [proof('inc_number'), '', proof('usr_name'), 'inc_number=INC1^usr_nameLIKEa', 'inc_number=INC1^usr_nameLIKEa'])
+  const toView = described.calls.filter((entry) => entry.table === 'incident_caller').slice(1)
+  assert.deepEqual(toView.map((entry) => entry.query), [proof('inc_number'), either('inc_number'), proof('usr_name'), either('usr_name'), 'inc_number=INC1^usr_nameLIKEa', 'inc_number=INC1^usr_nameLIKEa'])
+  // The second question asks for a row and not for how many there are: measured, counting a large view took
+  // eleven seconds where its first row came in a tenth of one. Every other request is counted.
+  assert.deepEqual(toView.map((entry) => entry.params.get('sysparm_no_count')), [null, 'true', null, 'true', null, null])
+  // How the instance is set to answer a query it cannot use is not asked: the two questions show what it does.
+  assert.ok(!described.calls.some((entry) => entry.table === 'sys_properties' && entry.query.includes('returns_no_rows')))
 
   // A field on the list, and the instance drops the condition all the same: refused, with what was asked.
   for (const args of [{ query: 'inc_state=1' }, { query: 'ORDERBYDESCinc_state' }, { groupBy: 'inc_state' }, { query: 'usr_nameLIKEa^inc_state=1' }]) {
@@ -445,21 +451,33 @@ test('a view that lists the fields it takes from a table has no other field of t
 
   // An instance can be set to answer a query it cannot use with no rows at all. "Empty and filled at once" then
   // matches nothing for a field it does not know either, so the second question decides: every row is empty or
-  // filled, and an answer without rows from a view that has rows says that the field is not used.
-  // Where the instance is known to drop what it cannot use, as in the cases above, the first question is enough.
+  // filled, and an answer without rows from a view that has rows says that the field is not used. Asked once
+  // more with the count, because the one row could be hidden from the account, and then for any row at all.
   const strict: Route = { table: 'sys_properties', query: 'name=glide.invalid_query.returns_no_rows', rows: [{ name: 'glide.invalid_query.returns_no_rows', value: 'true' }] }
   const silent = await connect(world(listed, strict, { table: 'incident_caller', exact: either('inc_state'), rows: [] }, rows))
   const unusable = await silent.call('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })
   assert.equal(unusable.data.error, 'validation')
-  assert.deepEqual(silent.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_state'), either('inc_state'), ''])
+  assert.deepEqual(silent.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_state'), either('inc_state'), either('inc_state'), ''])
+  // The same where the setting says "off", or says nothing, and the instance answers that way all the same: it
+  // was turned on after it was read. What the instance is set to is not what the proof goes by.
+  for (const setting of [{ table: 'sys_properties', query: 'name=glide.invalid_query.returns_no_rows', rows: [{ name: 'glide.invalid_query.returns_no_rows', value: 'false' }] }, { table: 'sys_properties', query: 'name=glide.invalid_query.returns_no_rows', status: 403 }] satisfies Route[]) {
+    const turnedOn = await connect(world(listed, setting, { table: 'incident_caller', exact: either('inc_state'), rows: [] }, rows))
+    assert.equal((await turnedOn.call('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })).data.error, 'validation')
+    assert.ok(!turnedOn.calls.some((entry) => entry.query === 'inc_state=1'))
+  }
   // On such an instance a field it does use answers the second question with rows, and the query goes out.
   const careful = await connect(world(listed, strict, rows))
   await careful.answer('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })
   assert.deepEqual(careful.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_state'), either('inc_state'), 'inc_state=1'])
-  // The same where the setting cannot be read: nothing is taken on trust.
-  const unreadSetting = await connect(world(listed, { table: 'sys_properties', query: 'name=glide.invalid_query.returns_no_rows', status: 403 }, rows))
-  await unreadSetting.answer('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })
-  assert.ok(unreadSetting.calls.some((entry) => entry.query === either('inc_state')))
+  // The one row that was asked for is hidden from this account: none comes back, and the count says that there
+  // are rows. The field is used.
+  const hidden = await connect(world(listed, { table: 'incident_caller', exact: either('inc_state'), rows: [null] }, rows))
+  await hidden.answer('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })
+  assert.deepEqual(hidden.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => [entry.query, entry.params.get('sysparm_no_count')]), [[proof('inc_state'), null], [either('inc_state'), 'true'], [either('inc_state'), null], ['inc_state=1', null]])
+  // A view without a row proves nothing, and nothing can come back from it either: the query goes out.
+  const noRows = await connect(world(listed, { table: 'incident_caller', rows: [] }))
+  assert.equal((await noRows.answer('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })).returned, 0)
+  assert.deepEqual(noRows.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_state'), either('inc_state'), either('inc_state'), '', 'inc_state=1'])
   // Without a total an empty answer proves nothing.
   const blind = await connect(world(listed, { table: 'incident_caller', exact: proof('inc_state'), rows: [], noTotal: true }, rows))
   assert.equal((await blind.call('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })).data.error, 'validation')
@@ -515,10 +533,10 @@ test('a view that lists the fields it takes from a table has no other field of t
   }
 
   // A field outside the list that a row carries all the same: the instance applies the condition, which it proves
-  // by matching nothing for "empty and filled at once". Asked once, while the view has rows.
+  // by matching nothing for "empty and filled at once" and a row for "empty or filled". Asked once.
   const carried = await connect(world(listed, rows))
   for (let run = 0; run < 2; run++) await carried.answer('sn_query', { table: 'incident_caller', query: 'inc_sys_id=x', fields: ['inc_number'] })
-  assert.deepEqual(carried.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_sys_id'), '', 'inc_sys_id=x', 'inc_sys_id=x'])
+  assert.deepEqual(carried.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_sys_id'), either('inc_sys_id'), 'inc_sys_id=x', 'inc_sys_id=x'])
 
   // sn_schema reads the definition anew, and what the view was seen to carry is asked for again after it.
   await carried.answer('sn_schema', { table: 'incident_caller' })
@@ -5849,6 +5867,33 @@ test('a list or an object behind a key that looks like a secret is taken out who
   const started = Date.now()
   assert.equal(clean('{"tokens":['.repeat(50_000)).text, '{"tokens":"[withheld]"')
   assert.ok(Date.now() - started < 5_000)
+})
+
+test('the id of the record a row belongs to is no secret, though its name ends like one', () => {
+  // Measured on 24,811 texts of one instance: of the 3,601 places taken out by name, 3,345 were "document_key", in
+  // 825 of 6,631 captured changes. It is the platform's name for the record a row belongs to, and each held a
+  // sys_id: the values of a workflow or a flow carry it, and without it no value can be told from another.
+  const ID = '0123456789abcdef0123456789abcdef'
+  const value = `<record_update><sys_variable_value action="INSERT_OR_UPDATE"><document>wf_activity</document><document_key>${ID}</document_key><value>10</value></sys_variable_value></record_update>`
+  assert.deepEqual(scrubSecrets(value), { text: value, withheld: 0 })
+  // Written in a CDATA section, with a prefix, with entities, or as JSON, also inside a text of another JSON.
+  for (const text of [`<a><document_key><![CDATA[${ID}]]></document_key></a>`, `<a><x:document_key> ${ID} </x:document_key></a>`, `<a>&lt;document_key&gt;${ID}&lt;/document_key&gt;</a>`, `{"document":"wf_activity","document_key":"${ID}"}`, String.raw`{"text":"{\"document_key\": \"${ID}\"}"}`]) {
+    assert.deepEqual(scrubSecrets(text), { text, withheld: 0 }, text)
+  }
+  // Only a sys_id passes under that name: anything else there is taken out as before.
+  for (const other of ['s3cret', ID.toUpperCase(), `${ID}0`, ID.slice(1), `${ID} and more`]) {
+    assert.equal(scrubSecrets(`<a><document_key>${other}</document_key></a>`).text, '<a><document_key>[withheld]</document_key></a>', other)
+    assert.equal(scrubSecrets(`{"document_key":"${other}"}`).text, '{"document_key":"[withheld]"}', other)
+  }
+  // And only under that name. A key can be written as 32 such characters, and a name that only contains it is another.
+  for (const name of ['api_key', 'u_document_key', 'document_key_2', 'private_key']) {
+    assert.equal(scrubSecrets(`<a><${name}>${ID}</${name}></a>`).text, `<a><${name}>[withheld]</${name}></a>`, name)
+    assert.equal(scrubSecrets(`{"${name}":"${ID}"}`).text, `{"${name}":"[withheld]"}`, name)
+  }
+  // Inside a list or an object that is taken out whole, it goes with it.
+  assert.equal(scrubSecrets(`{"credentials":{"document_key":"${ID}","user":"abel"}}`).text, '{"credentials":"[withheld]"}')
+  // An element of that name that ends in itself still loses what its attributes repeat.
+  assert.equal(scrubSecrets(`<a><document_key display_value="Some record"/></a>`).text, '<a><document_key/></a>')
 })
 
 test('every text of an answer is read for what looks like a secret, whichever tool it comes from', async () => {

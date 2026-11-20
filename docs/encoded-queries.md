@@ -296,6 +296,28 @@ Also measured:
   value empty in 2,391 of them; 680 cells of currency fields carried a third part, `currency_display_value`.
   No cell was a list or another kind of object. The server passes on value and display value; an object of
   another shape, which no cell here had, is passed on as the text it is written as.
+- Counting is what makes a question slow, not finding a row. Eight database views, the six with the most rows
+  (93,000 to 3.9 million) and two smaller ones that answered slowly, were asked for one row where a field is
+  empty or filled: with the count that took 0.3 to 11.7 seconds, 5 seconds on a view of 145 rows and 11 on the
+  largest; with `sysparm_no_count=true` 0.08 to 0.29 seconds on every one. Asked that way the instance still sends
+  `X-Total-Count`, and it is then no count of the rows that match: `1` for the one row asked for, and on one
+  table `1` where no row came back, because the account is not shown its rows. The question that has to match
+  nothing took 0.07 to 0.5 seconds either way. On ten tables of up to 3.5 million rows the difference was
+  smaller than on the views: 0.5 seconds against 0.1 for 1.2 million rows, 4.5 against 1.0 for 3.5 million. So the server asks
+  "does a row come back" without the count, takes no total from such an answer, and asks with the count only
+  where no row came back, because the one row can be hidden from the account while the count says that it is there.
+- What the rule for secret names takes out of real text is mostly no secret. 24,811 texts were read through it,
+  70 million characters: every captured change, 3,000 versions, and up to sixty rows of each of 650 fields of a
+  script, XML or JSON type on 446 tables. It changed 982 of them, in 3,601 places. 3,345 of those were one
+  element, `document_key`, in 825 of the 6,631 captured changes: the record a value of a workflow or of a flow belongs
+  to (`sys_variable_value`), a sys_id every time. The server passes a sys_id on under that name since 0.4.4,
+  which leaves 256 places in 158 texts: 91 counts and limits of tokens (`max_tokens`, `inputTokens`), 54
+  templates of connection records behind `credential`, 24 cursors of paged answers (`nextToken`), and some
+  thirty-five that are what the rule is for, an access key, a password, a client secret. The dictionary says the
+  same of the names of fields: the rule matches 3,181 of 288,610, and 1,079 of those are of a secret type. A
+  field is judged by its type where that can be read; inside a text there is only the name. `[withheld]`
+  therefore says that a name suggests a secret, not that there was one. Between 0.4.3 and 0.4.4 nothing else
+  changed for these texts: with that one name set aside, both took the same out of all 24,811.
 - The table of tables had 10,806 rows. Asked for the one changed last and for how many there are, it answered in
   about 120 milliseconds with 97 bytes. Asked for a name that ends in a given sys_id, the versions (49,263
   rows) answered in 0.2 seconds, and the entries of upgrades through their reference in 0.1.

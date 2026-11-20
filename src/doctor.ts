@@ -73,7 +73,7 @@ export async function runDoctor(given?: ServiceNowClient, print: (line: string) 
   // the rows where it is empty and filled at once, and for those where it is one of the two: see proveCondition.
   const asked = FILTERED_BY.filter((item) => results.find((result) => result.table === item.table)?.status === 'readable').flatMap((item) => item.fields.map((field) => ({ table: item.table, field })))
   const answers = await mapLimit(asked, 4, async ({ table, field }) => {
-    const ask = (query: string) => sn.query({ table, query, fields: ['sys_id'], limit: 1 }).catch(() => null)
+    const ask = (query: string, uncounted?: boolean) => sn.query({ table, query, fields: ['sys_id'], limit: 1, uncounted }).catch(() => null)
     return { name: `${table}.${field}`, verdict: await proveCondition(ask, field) }
   })
   const named = (verdict: string) => answers.filter((answer) => answer.verdict === verdict).map((answer) => answer.name)

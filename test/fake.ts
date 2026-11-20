@@ -167,7 +167,10 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
       if (!display) return Object.fromEntries(Object.entries(kept).map(([key, value]) => [key, isPair(value) ? value.value : value]))
       return Object.fromEntries(Object.entries(kept).map(([key, value]) => [key, isPair(value) ? value : { value, display_value: value }]))
     })
-    return json({ result: page }, 200, answering.noTotal ? {} : { 'x-total-count': String(answering.total ?? rows.length) })
+    // Measured: asked not to count (sysparm_no_count), an instance still sends the header, with the rows it read
+    // for this page: 1 for the one row asked for, also where that row is hidden from the account.
+    const counted = parsed.searchParams.get('sysparm_no_count') !== 'true'
+    return json({ result: page }, 200, answering.noTotal ? {} : { 'x-total-count': String(counted ? (answering.total ?? rows.length) : rows.slice(offset, offset + limit).length) })
   }
 
   return { calls, sn: new ServiceNowClient({ ...config, ...overrides }, fetchImpl, { audit, sleep: async () => undefined }) }

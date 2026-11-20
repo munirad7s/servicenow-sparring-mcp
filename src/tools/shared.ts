@@ -263,6 +263,17 @@ const NESTED_END = ']]]]><![CDATA[>'
 /** The name of an element without a prefix, in small letters: "x:Value" is "value". */
 const localName = (tag: string) => tag.slice(tag.lastIndexOf(':') + 1).toLowerCase()
 
+/**
+ * A name the rule for secrets matches, where what it holds is the id of a record. "document_key" is what the
+ * platform calls the record a row belongs to, beside "document" for its table: every value of a workflow or of a
+ * flow carries it (sys_variable_value). Measured on 24,811 texts of 652 fields of one instance: of the 3,601
+ * places taken out by name, 3,345 were this one element, in 825 of 6,631 captured changes, and each of them held
+ * a sys_id. Under that name a sys_id is passed on. Anything else under it is taken out as before, and so is a
+ * sys_id under any other name: a key can be written as 32 such characters.
+ */
+const RECORD_ID_NAMES = new Set(['document_key'])
+const isRecordId = (name: string, value: string) => RECORD_ID_NAMES.has(localName(name)) && /^[0-9a-f]{32}$/.test(value)
+
 function scrubOnce(text: string): { text: string; withheld: number } {
   if (!/[<"]|&lt;/.test(text)) return { text, withheld: 0 }
   let withheld = 0
@@ -294,8 +305,10 @@ function scrubOnce(text: string): { text: string; withheld: number } {
   const places: Array<{ start: number; end: number; put: string }> = [...secretContainers(text), ...secretValues(text)]
   for (const markup of text.includes('&lt;') ? [PLAIN_MARKUP, ESCAPED_MARKUP] : [PLAIN_MARKUP]) {
     for (const element of simpleElements(text, looksSecret, markup)) {
-      // "true" and "false" are switches such as "display_password", not secrets. And a note is no secret.
-      if (isSwitch(markup === PLAIN_MARKUP ? element.plain : unescaped(element.plain).trim()) || element.plain === WITHHELD) continue
+      // "true" and "false" are switches such as "display_password", not secrets. A note is no secret, and
+      // neither is the id of the record a row belongs to.
+      const plain = markup === PLAIN_MARKUP ? element.plain : unescaped(element.plain).trim()
+      if (isSwitch(plain) || element.plain === WITHHELD || isRecordId(element.tag, plain)) continue
       // Without its attributes: a display value there would repeat the content.
       places.push({ start: element.start, end: element.end, put: `${markup.lt}${element.tag}${markup.gt}${WITHHELD}${markup.lt}/${element.tag}${markup.gt}` })
     }
@@ -409,6 +422,9 @@ function* secretValues(text: string): Generator<{ start: number; end: number; pu
       const [whole, lead, key] = match
       // "true" and "false" are switches, and what an earlier reading put there is a note.
       if (!LOOKS_SECRET.test(key) || /:(?:\s|\\[nrt])*\\?"(true|false)\\?"$/.test(whole) || whole === `${lead}${mark}${WITHHELD}${mark}`) continue
+      // The id of the record a row belongs to: see RECORD_ID_NAMES.
+      const held = whole.slice(lead.length)
+      if (isRecordId(key, held.startsWith(mark) ? held.slice(mark.length, -mark.length) : held)) continue
       yield { start: match.index + lead.length, end: match.index + whole.length, put: `${mark}${WITHHELD}${mark}` }
     }
   }

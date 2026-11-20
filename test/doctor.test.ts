@@ -40,6 +40,11 @@ test('the doctor command lists what the account can read, and what it cannot', a
   assert.match(output, new RegExp(`fields the functions filter by\\s+${fields} of ${fields} applied by this instance`))
   // Two questions per field: empty and filled at once, and one of the two.
   assert.equal(calls.length, SOURCES.length + 4 + 2 * fields)
+  // The second asks for one row and not for how many there are: counting a large table is what takes long.
+  const second = calls.filter((entry) => /ISEMPTY\^OR/.test(entry.query))
+  assert.equal(second.length, fields)
+  assert.ok(second.every((entry) => entry.params.get('sysparm_no_count') === 'true'))
+  assert.ok(calls.filter((entry) => !/ISEMPTY\^OR/.test(entry.query)).every((entry) => !entry.params.has('sysparm_no_count')))
   assert.ok(calls.every((entry) => entry.method === 'GET'))
 })
 

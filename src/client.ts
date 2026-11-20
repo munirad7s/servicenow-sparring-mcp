@@ -21,6 +21,12 @@ export interface QueryOptions {
    * which is the default; for a database view the sys_ids of the tables it joins. Empty adds nothing.
    */
   stableBy?: string[]
+  /**
+   * true asks for the rows and not for how many there are (sysparm_no_count). The page then has no total.
+   * For the questions that only want to know whether a row comes back. Measured on eight database views: counting
+   * is what takes long, up to eleven seconds where the first row alone came in a tenth of one.
+   */
+  uncounted?: boolean
 }
 
 /**
@@ -183,9 +189,12 @@ export class ServiceNowClient {
     params.set('sysparm_exclude_reference_link', 'true')
     params.set('sysparm_suppress_pagination_header', 'true')
     if (display) params.set('sysparm_display_value', 'all')
+    if (opts.uncounted) params.set('sysparm_no_count', 'true')
 
     const { records, total } = await this.get('table', table, sent, fields?.length ? fields : null, params, (result, headers) => {
-      const header = headers.get('x-total-count')
+      // Measured: asked not to count, an instance still sends the header: "1" for the one row asked for, also
+      // where that row is not shown to the account. That is no total, and it is not passed on as one.
+      const header = opts.uncounted ? null : headers.get('x-total-count')
       // Only the fields that were asked for: an instance sends no others, and what is not an instance is not
       // trusted to. Every check behind this is made for the fields of the request.
       const asked = fields?.length ? new Set(fields) : null

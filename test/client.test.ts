@@ -266,6 +266,20 @@ test('without a total, a list can never be called complete', async () => {
   assert.equal(result.complete, false)
 })
 
+test('a read that does not ask for the count has no total, whatever the header says', async () => {
+  // Measured: asked not to count (sysparm_no_count), an instance still sends X-Total-Count, with the number of
+  // rows it read for the page. Taken for the total, the one row asked of a view of four million would be "1 row
+  // matches".
+  const { sn, calls } = fakeInstance([{ table: 'incident', rows: [{ n: '1' }, { n: '2' }, { n: '3' }] }])
+  const page = await sn.query({ table: 'incident', fields: ['n'], limit: 1, uncounted: true })
+  assert.deepEqual({ rows: page.records.length, total: page.total }, { rows: 1, total: null })
+  assert.equal(calls[0].params.get('sysparm_no_count'), 'true')
+  // Counted is what a read is unless it says otherwise, and it says how many rows there are.
+  const counted = await sn.query({ table: 'incident', fields: ['n'], limit: 1 })
+  assert.equal(counted.total, 3)
+  assert.equal(calls[1].params.has('sysparm_no_count'), false)
+})
+
 test('counts per group come from the Aggregate API', async () => {
   const { sn, calls } = fakeInstance([
     { table: 'sys_update_xml', api: 'stats', rows: [{ stats: { count: '7' }, groupby_fields: [{ field: 'type', value: 'Business Rule' }] }] },

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { Dictionary } from '../src/dictionary.js'
+import { Dictionary, proveCondition } from '../src/dictionary.js'
 import { ServiceNowError } from '../src/errors.js'
 import { createContext } from '../src/server.js'
 import { column, dictionaryRoutes, fakeInstance, isLookAtTables, isProof, showsParents, tableRow, type Route } from './fake.js'
@@ -775,6 +775,69 @@ test('a setting that cannot be read is neither on nor off', async () => {
   assert.equal(await asked({ table: 'sys_properties', status: 403 }), null)
 })
 
+test('how the instance answers a query it cannot use is asked again after half a minute', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-21T10:00:00Z') })
+  const name = 'glide.invalid_query.returns_no_rows'
+  const routes: Route[] = [{ table: 'sys_properties', rows: [] }]
+  const { sn, calls } = fakeInstance(routes)
+  const dictionary = new Dictionary(sn)
+  assert.equal(await dictionary.emptyOnInvalidQuery(), false)
+  // The parts of one call ask once.
+  assert.equal(await dictionary.emptyOnInvalidQuery(), false)
+  assert.equal(calls.length, 1)
+  // An administrator turns it on. Ten minutes was how long the old answer was told; now it is half a minute.
+  routes.unshift({ table: 'sys_properties', rows: [{ name, value: 'true', type: 'boolean' }] })
+  t.mock.timers.tick(29_000)
+  assert.equal(await dictionary.emptyOnInvalidQuery(), false)
+  t.mock.timers.tick(2_000)
+  assert.equal(await dictionary.emptyOnInvalidQuery(), true)
+  assert.equal(calls.length, 2)
+})
+
+test('whether an instance applies a condition is told by what it answers, with as few counted questions as it takes', async () => {
+  const BOTH = 'u_fieldISEMPTY^u_fieldISNOTEMPTY'
+  const EITHER = 'u_fieldISEMPTY^ORu_fieldISNOTEMPTY'
+  type Answer = { total: number | null; records: unknown[] } | null
+  const none: Answer = { total: 0, records: [] }
+  const row: Answer = { total: 1, records: [{}] }
+  /** Answers by question; "EITHER uncounted" for the one that does not count. */
+  const instance = (answers: Record<string, Answer>) => {
+    const asked: string[] = []
+    const ask = async (query: string, uncounted?: boolean) => {
+      const key = uncounted ? `${query} uncounted` : query
+      asked.push(key)
+      const answer = key in answers ? answers[key] : none
+      // Not counted, an answer has no total.
+      return answer && uncounted ? { ...answer, total: null } : answer
+    }
+    return { ask, asked }
+  }
+  const verdict = async (answers: Record<string, Answer>) => {
+    const { ask, asked } = instance(answers)
+    return { verdict: await proveCondition(ask, 'u_field'), asked }
+  }
+  // Applied: nothing is empty and filled at once, and a row is one of the two. Two questions, one of them counted.
+  assert.deepEqual(await verdict({ [`${EITHER} uncounted`]: row }), { verdict: 'applied', asked: [BOTH, `${EITHER} uncounted`] })
+  // Dropped: every row comes back for the first question, and no second one is asked.
+  assert.deepEqual(await verdict({ [BOTH]: row }), { verdict: 'dropped', asked: [BOTH] })
+  // Counted, but hidden: the count alone says "dropped" too.
+  assert.equal((await verdict({ [BOTH]: { total: 4, records: [] } })).verdict, 'dropped')
+  // The row that was asked for is hidden from the account: the count says that there is one.
+  assert.deepEqual(await verdict({ [EITHER]: { total: 7, records: [] } }), { verdict: 'applied', asked: [BOTH, `${EITHER} uncounted`, EITHER] })
+  // An instance that answers what it cannot use with nothing: no row is empty or filled, and the table has rows.
+  assert.deepEqual(await verdict({ '': row }), { verdict: 'answers_nothing', asked: [BOTH, `${EITHER} uncounted`, EITHER, ''] })
+  assert.equal((await verdict({ '': { total: 3, records: [] } })).verdict, 'answers_nothing')
+  // A table without rows proves nothing.
+  assert.equal((await verdict({})).verdict, 'no_rows')
+  // A question that fails, at any place, and an empty answer without a total: not answered.
+  assert.equal((await verdict({ [BOTH]: null })).verdict, 'unanswered')
+  assert.equal((await verdict({ [BOTH]: { total: null, records: [] } })).verdict, 'unanswered')
+  assert.equal((await verdict({ [`${EITHER} uncounted`]: null })).verdict, 'unanswered')
+  assert.equal((await verdict({ [EITHER]: null })).verdict, 'unanswered')
+  assert.equal((await verdict({ '': null })).verdict, 'unanswered')
+  assert.equal((await verdict({ '': { total: null, records: [] } })).verdict, 'unanswered')
+})
+
 test('which names are tables is not remembered from an answer that arrived after everything was dropped', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
   const stamp = (total: number): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], total })
@@ -809,7 +872,6 @@ test('what a view was seen to filter by is asked again once everything about tab
   const stamp = (total: number): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], total })
   const routes: Route[] = [
     stamp(100),
-    { table: 'sys_properties', rows: [] },
     { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] },
     { table: 'v_tasks', rows: [{ sys_id: '1' }] },
   ]
@@ -836,7 +898,7 @@ test('what a view was seen to filter by is asked again once everything about tab
 test('a proof about a view that arrives after everything was dropped is not remembered', async (t) => {
   t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
   const stamp = (total: number): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], total })
-  const routes: Route[] = [stamp(100), { table: 'sys_properties', rows: [] }, { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] }, { table: 'v_tasks', rows: [{ sys_id: '1' }] }]
+  const routes: Route[] = [stamp(100), { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] }, { table: 'v_tasks', rows: [{ sys_id: '1' }] }]
   const closed = fakeInstance(routes, { tables: { allow: [], deny: ['u_private'] } })
   const dictionary = new Dictionary(closed.sn)
   await dictionary.table('u_open')
@@ -862,37 +924,4 @@ test('a proof about a view that arrives after everything was dropped is not reme
   const before = closed.calls.filter((call) => call.table === 'v_tasks').length
   assert.equal(await dictionary.viewCarries('v_tasks', 'tsk_number'), true)
   assert.ok(closed.calls.filter((call) => call.table === 'v_tasks').length > before)
-})
-
-test('that a view has rows is not remembered from an answer that arrived after everything was dropped', async (t) => {
-  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
-  const stamp = (total: number): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], total })
-  const routes: Route[] = [stamp(100), { table: 'sys_properties', rows: [] }, { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] }, { table: 'v_tasks', rows: [{ sys_id: '1' }] }]
-  const closed = fakeInstance(routes, { tables: { allow: [], deny: ['u_private'] } })
-  const dictionary = new Dictionary(closed.sn)
-  await dictionary.table('u_open')
-  let arrive = () => {}
-  const held = new Promise<void>((resolve) => (arrive = resolve))
-  const query = closed.sn.query.bind(closed.sn)
-  let holding = true
-  closed.sn.query = (async (opts: Parameters<typeof query>[0]) => {
-    const read = await query(opts)
-    // Only the question whether the view has a row at all is slow.
-    if (holding && opts.table === 'v_tasks' && !opts.query) await held
-    return read
-  }) as typeof closed.sn.query
-  const early = dictionary.viewCarries('v_tasks', 'tsk_number')
-  await new Promise((done) => setImmediate(done))
-  await new Promise((done) => setImmediate(done))
-  routes.unshift(stamp(101))
-  t.mock.timers.tick(31_000)
-  await dictionary.table('u_open')
-  holding = false
-  arrive()
-  await early
-  // Asked about another field, the view is asked again whether it has a row: it was seen to have one before.
-  const anyRow = () => closed.calls.filter((call) => call.table === 'v_tasks' && call.query === '').length
-  const before = anyRow()
-  await dictionary.viewCarries('v_tasks', 'tsk_state')
-  assert.equal(anyRow(), before + 1)
 })

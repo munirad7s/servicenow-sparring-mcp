@@ -5,12 +5,12 @@ answer; such changes are listed under "Changed".
 
 ## Unreleased
 
-Three reviews, and this time before the release that carries the answers to them: one of the fixes of 0.4.3,
-one of the answers to that, and one of the answers to that. The first rated 10 of 13 as holding for the case
-they were written for and not for another, the second 5 of 8, the third 3 of 6, with the same pattern as before:
-a rule that stood where the fault was found and not where every path runs through. The third was asked to say
-for each finding whether an instance that behaves as documented can cause it, or only a text or an answer made
-for the purpose: three were of the first kind.
+Four reviews, and this time before the release that carries the answers to them: one of the fixes of 0.4.3,
+and then one of each round of answers. The first rated 10 of 13 as holding for the case they were written for
+and not for another, the second 6 of 8, the third 3 of 6, with the same pattern as before: a rule that stood
+where the fault was found and not where every path runs through. The third was asked to say for each finding
+whether an instance that behaves as documented can cause it, or only a text or an answer made for the purpose:
+three were of the first kind. The fourth was asked whether this can go out, and named one more of that kind.
 
 ### Security
 
@@ -57,7 +57,16 @@ for the purpose: three were of the first kind.
 - **A setting that cannot be read is neither on nor off.** Whether the instance answers a query it cannot use
   with no rows decides what counts as proof that a database view applies a condition. Where the property came
   back without a value, or did not come back and the instance did not say that there is none, it counted as
-  off. It counts as not known now, and the stricter proof is asked for.
+  off. It counts as not known now.
+- **How the instance is set is no part of a proof any more.** That a database view applies a condition on a
+  field took one question where the instance was known to drop what it cannot use, and that was read from the
+  property and kept for ten minutes. An administrator who turned the property on in between made a field the
+  view cannot use look like a filter that matched nothing: "no rows" where there were some, and the proof was
+  kept for ten minutes more. Both questions are asked every time now: no row where the field is empty and
+  filled at once, and a row where it is either. The second asks for one row and not for how many there are,
+  because counting is what made it slow (measured on eight views: up to eleven seconds with the count, a tenth
+  of one without). `sn_dependencies` still reads the property, to tell an empty answer from a condition that
+  was not understood, and keeps it for thirty seconds.
 
 ### Fixed
 
@@ -74,11 +83,40 @@ for the purpose: three were of the first kind.
   status says 200; where neither the server nor the direct read got a list, that is a difference and the run
   ends with 1; and a setting that cannot be read is not taken for "off".
 
+### Changed
+
+- **The id of a record is no secret.** What looks like a secret inside a text is told by the name of its element
+  or key, and `document_key` ends like a key. It is the platform's name for the record a row belongs to, and
+  every value of a workflow or of a flow carries it. Read over 24,811 texts of the test instance, 70 million
+  characters, the rule took something out in 3,601 places, and 3,345 of them were this one name, in 825 of 6,631
+  captured changes, a sys_id each time. Under that name a sys_id is passed on now. Anything else under it is
+  taken out as before, and so is a sys_id under any other name: a key can be written as 32 such characters.
+  With that name set aside, 0.4.3 and this release took the same out of every one of those texts, which is
+  also the measure of what the changes above did to real text: nothing.
+- What the note `[withheld]` says is in the limits that an answer lists: the name suggests a secret, not that
+  there was one. Of the 256 places left on that instance, 91 were counts and limits of tokens.
+- A proof for a database view costs two requests for each field, where it cost one or two and, on a view the
+  server had not yet seen a row of, a count of the whole view: up to eleven seconds, as measured.
+
 ### Looked at, and left as it is
 
 - A table that the list of rotated tables names as a part of one rotation is taken as that, also where its name
   reads like a part of another. A review pointed out that this goes wrong for ten minutes if a part is moved
   from one rotation to another. No part is: an instance creates the parts of a rotation under its name.
+- A look-up that began before everything about tables was dropped can still start a new one with the parents
+  of a table as it read them before: the rules that filter a query, the choices and the labels of a field. It
+  takes a table that is given another parent in the seconds between two requests, and it lasts until the next
+  drop or ten minutes.
+- Whether the account is told what a table extends, and whether the instance filters by it, is a matter of its
+  rights and not of the tables: it is asked again after ten minutes, and not with every table that changes.
+- Two fields whose names become the same once a secret is taken out of both would overwrite each other in an
+  answer. The name of a field has no place for a secret: small letters, digits and underscores.
+- A count of tokens, the template of a connection record and the cursor of a paged answer are taken out like a
+  token, a credential and a secret, because only the name is at hand inside a text. Telling them apart by what
+  they hold would let a short secret through: a one-time code is a number too.
+- The proof that a table applies a condition on the class of a row still counts the rows that have a class.
+  Measured on ten tables that is half a second for 1.2 million rows and 4.5 for 3.5 million, once in ten
+  minutes for each table, where asking for the one row alone took 0.1 and 1.0.
 
 ## 0.4.3 (2026-11-20)
 
