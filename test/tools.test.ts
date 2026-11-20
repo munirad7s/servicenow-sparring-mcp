@@ -3,9 +3,9 @@ import { test } from 'node:test'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { InstanceConfig } from '../src/config.js'
-import { buildServer } from '../src/server.js'
+import { buildServer, createContext } from '../src/server.js'
 import { queryByContent } from '../src/tools/origin.js'
-import { LOOKS_SECRET, payloadTables, scrubSecrets } from '../src/tools/shared.js'
+import { capturedByName, LOOKS_SECRET, payloadTables, scrubSecrets } from '../src/tools/shared.js'
 import { closedTables, column, dictionaryRoutes, fakeInstance, labelled, tableRow, type Route } from './fake.js'
 
 type Data = Record<string, any>
@@ -2572,6 +2572,33 @@ test('sn_upgrade_skips says who captured the changes to each skipped record, and
   const unsure = await blind.answer('sn_upgrade_skips', {})
   assert.equal(unsure.records[0].capturedBy, undefined)
   assert.match(unsure.warnings.join(' '), /Who captured the changes to these records could not be read \(sys_update_xml: acl\)/)
+})
+
+test('who captured a list of records is asked for in batches, and the second question only where there is something', async () => {
+  const names = Array.from({ length: 120 }, (_, index) => `sys_script_${String(index).padStart(32, '0')}`)
+  const groups = (list: string[]) => Object.fromEntries(list.map((name) => [name, 1]))
+  const { sn, calls } = fakeInstance([
+    // A person is on the rows of the first ten records. Sixty records have rows at all.
+    stats('sys_update_xml', groups(names.slice(0, 10)), 'sys_created_byNOT IN', 'name'),
+    stats('sys_update_xml', groups(names.slice(0, 60)), undefined, 'name'),
+  ])
+  const known = await capturedByName(createContext(sn), [...names, names[0], 'not a name^ORx=1'])
+
+  assert.deepEqual([known.get(names[0]), known.get(names[10]), known.get(names[60]), known.size], ['people', 'system_accounts', 'nobody', 120])
+  const queries = calls.map((call) => call.query)
+  const first = queries.filter((query) => !query.includes('NOT IN'))
+  const second = queries.filter((query) => query.includes('NOT IN'))
+  // 120 names in batches of at most 50, then the 60 that have rows in batches of at most 25.
+  assert.deepEqual([first.length, second.length], [3, 3])
+  assert.ok(queries.every((query) => query.length < 4_500), 'no query outgrows a request')
+  // A name that could change the query it is put into is never sent.
+  assert.ok(queries.every((query) => !query.includes('ORx=1')))
+
+  // A failure leaves the names it concerns without an answer, and says so once.
+  const kinds: string[] = []
+  const failing = fakeInstance([{ table: 'sys_update_xml', api: 'stats', status: 403 }])
+  const none = await capturedByName(createContext(failing.sn), names.slice(0, 3), (kind) => kinds.push(kind))
+  assert.deepEqual([none.size, kinds], [0, ['acl']])
 })
 
 test('sn_upgrade_skips counts each thing under the right filter', async () => {
