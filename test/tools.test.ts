@@ -3133,6 +3133,62 @@ test('sn_upgrade_skips says what it could not establish', async () => {
 
 const rule = (id: string, collection: string, extra: Data = {}) => ({ sys_id: id, sys_name: `Rule on ${collection}`, sys_update_name: `sys_script_${id}`, collection, active: 'true', when: 'before', ...extra })
 
+test('sn_dependencies asks each category with the query that was measured for it', async () => {
+  // What applies to a child table differs from one kind of record to the next: always, never, or only with a flag
+  // on the record. Each of these was measured on an instance. A changed word here changes an answer without a sign.
+  const tables = ['sys_script', 'sys_script_client', 'sys_ui_policy', 'sys_ui_action', 'sys_declarative_action_assignment', 'sys_data_policy2', 'sys_security_acl', 'sys_security_data_filter', 'sysevent_email_action', 'sysevent_in_email_action', 'contract_sla', 'sysrule_assignment', 'dl_definition', 'sys_transform_map', 'sc_cat_item_producer', 'sys_flow_record_trigger', 'wf_workflow_version', 'sys_relationship', 'sys_db_view_table', 'sys_dictionary_override', 'sys_ui_policy_action', 'sys_data_policy_rule', 'sys_choice', 'sys_ui_element', 'sys_ui_list_element']
+  const { answer } = await connect([...dictionaryRoutes, ...tables.flatMap((table): Route[] => [{ table, rows: [] }, { table, api: 'stats', rows: [] }])])
+  const queries = async (args: Data) => Object.fromEntries(Object.entries((await answer('sn_dependencies', args)).categories as Record<string, Data>).map(([key, category]) => [key, `${category.table}: ${category.query}`]))
+
+  assert.deepEqual(await queries({ table: 'incident' }), {
+    businessRules: 'sys_script: collectionINincident,task^active=true',
+    clientScripts: 'sys_script_client: table=incident^active=true^NQtableINtask^applies_extended=true^active=true',
+    uiPolicies: 'sys_ui_policy: table=incident^active=true^NQtableINtask^inherit=true^active=true',
+    uiActions: 'sys_ui_action: tableINincident,task^active=true',
+    declarativeActions: 'sys_declarative_action_assignment: tableINincident,task^active=true',
+    dataPolicies: 'sys_data_policy2: model_table=incident^active=true^NQmodel_tableINtask^inherit=true^active=true',
+    accessControls: 'sys_security_acl: nameINincident,task^ORnameSTARTSWITHincident.^ORnameSTARTSWITHtask.^active=true',
+    dataFilters: 'sys_security_data_filter: table_nameINincident,task^active=true',
+    notifications: 'sysevent_email_action: collectionINincident,task^active=true',
+    inboundEmailActions: 'sysevent_in_email_action: table=incident^active=true',
+    slaDefinitions: 'contract_sla: collectionINincident,task^active=true',
+    assignmentRules: 'sysrule_assignment: tableINincident,task^active=true',
+    dataLookups: 'dl_definition: source_tableINincident,task^active=true',
+    transformMaps: 'sys_transform_map: target_table=incident^active=true',
+    recordProducers: 'sc_cat_item_producer: table_name=incident^active=true',
+    flowRecordTriggers: 'sys_flow_record_trigger: table=incident^active=true^NQtableINtask^run_on_extended=true^active=true',
+    // Only the published version of a workflow runs, whether or not inactive ones are asked for.
+    workflows: 'wf_workflow_version: tableINincident,task^active=true^published=true',
+    relatedLists: 'sys_relationship: basic_apply_toINincident,task',
+    databaseViews: 'sys_db_view_table: table=incident^active=true',
+    dictionaryOverrides: 'sys_dictionary_override: nameINincident,task',
+    referencedBy: 'sys_dictionary: reference=incident^internal_typeINreference,glide_list^active=true',
+  })
+
+  const all = await queries({ table: 'incident', activeOnly: false })
+  assert.equal(all.clientScripts, 'sys_script_client: table=incident^NQtableINtask^applies_extended=true')
+  assert.equal(all.workflows, 'wf_workflow_version: tableINincident,task^published=true')
+  assert.equal(all.accessControls, 'sys_security_acl: nameINincident,task^ORnameSTARTSWITHincident.^ORnameSTARTSWITHtask.')
+
+  assert.deepEqual(await queries({ table: 'incident', field: 'state' }), {
+    // An action or a rule of a parent table applies only where its policy is marked to be inherited.
+    uiPolicyActions: 'sys_ui_policy_action: table=incident^field=state^ui_policy.active=true^NQtableINtask^ui_policy.inherit=true^field=state^ui_policy.active=true',
+    clientScripts: 'sys_script_client: table=incident^field=state^active=true^NQtableINtask^applies_extended=true^field=state^active=true',
+    dataPolicyRules: 'sys_data_policy_rule: table=incident^field=state^sys_data_policy.active=true^NQtableINtask^sys_data_policy.inherit=true^field=state^sys_data_policy.active=true',
+    accessControls: 'sys_security_acl: nameINincident.state,task.state^active=true',
+    dictionaryOverrides: 'sys_dictionary_override: nameINincident,task^element=state',
+    // One label per choice, the English one, and only the choices that are in use.
+    choices: 'sys_choice: nameINincident,task^element=state^inactive=false^language=en',
+    formSections: 'sys_ui_element: sys_ui_section.nameINincident,task^element=state',
+    listLayouts: 'sys_ui_list_element: list_id.nameINincident,task^element=state',
+    dependentFields: 'sys_dictionary: nameINincident,task^dependent_on_field=state^active=true',
+  })
+
+  // Without the parent tables, nothing of a parent is asked for.
+  const own = await queries({ table: 'incident', includeParents: false })
+  assert.equal(Object.values(own).filter((query) => query.includes('task')).length, 0)
+})
+
 test('sn_dependencies lists what is attached, with the query behind every category', async () => {
   // Nine levels below a table is as deep as its child tables are counted.
   const NINTH = `${'super_class.'.repeat(9)}name=incident`
