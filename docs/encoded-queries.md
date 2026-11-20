@@ -104,6 +104,12 @@ Also measured:
 - `=` without a value is applied as "is empty", and `!=` without a value as "is not empty", on text, reference,
   number, date and boolean fields alike.
 - A condition written behind an `ORDERBY` is applied.
+- The Aggregate API returned every group also where there were thousands: counted by `name`, the groups of
+  `sys_dictionary` add up to all 299,720 rows.
+- The Aggregate API can refuse a field that the Table API accepts. Counting `sys_metadata` by `sys_class_name`
+  was answered with HTTP 403, "Field(s) present in the query do not have permission to be read", for an
+  administrator, while `sys_class_name=sys_script` as a condition works. The server reports that as "could not be
+  checked" and says that the field is the reason, not the table.
 - Three carets in a row are read as a literal `^` followed by a separator: `active=false^^^priority=1` applies both
   conditions.
 

@@ -118,5 +118,8 @@ test('an error is an answer with a kind and a next step', () => {
   assert.match(text(fail(new ServiceNowError('x', 'redirect'))).hint, /single sign-on/)
   assert.match(text(fail(new ServiceNowError('x', 'too_large'))).hint, /fewer fields/)
   assert.match(text(fail(new ServiceNowError('x', 'blocked', 'sys_user'))).hint, /could not be checked/)
+  // Measured: the Aggregate API refuses to count by some fields. The table is readable, the field is the reason.
+  const field = fail(new ServiceNowError('example.service-now.com answered HTTP 403: "Insufficient rights to query records" ("Field(s) present in the query do not have permission to be read").', 'acl', 'sys_metadata', 403))
+  assert.match(text(field).hint, /because of a field in it.*"sys_metadata" itself may be readable.*could not be checked/)
   assert.equal(text(fail(new Error('y'.repeat(5_000)))).message.length, 1_001)
 })

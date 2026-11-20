@@ -3,6 +3,15 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## 0.3.1 (2026-11-20)
+
+### Fixed
+
+- When the instance refuses a request because of one field in it, the hint said the table could not be read.
+  Measured: the Aggregate API refuses to count `sys_metadata` by `sys_class_name` with "Field(s) present in the
+  query do not have permission to be read", while the table and the same field in a condition are readable. The
+  hint now names the field as the reason.
+
 ## 0.3.0 (2026-11-20)
 
 This release closes ways in which an answer could look like evidence and not be it. Most were found by sending

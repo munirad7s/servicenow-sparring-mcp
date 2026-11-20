@@ -214,12 +214,12 @@ export function fail(error: unknown, table?: string): ToolResult {
     error: kind,
     message: message.length > 1_000 ? `${message.slice(0, 1_000)}…` : message,
     ...(about ? { table: about } : {}),
-    hint: hintFor(kind, about),
+    hint: hintFor(kind, about, message),
   }
   return { isError: true, content: [{ type: 'text', text: JSON.stringify(payload) }] }
 }
 
-function hintFor(kind: string, table?: string): string {
+function hintFor(kind: string, table: string | undefined, message: string): string {
   switch (kind) {
     case 'validation':
       return 'Nothing was sent to the instance. Correct the input and call again.'
@@ -230,6 +230,10 @@ function hintFor(kind: string, table?: string): string {
     case 'auth':
       return 'The instance rejected the credentials. Check the SERVICENOW_* variables. With a token: it may have expired.'
     case 'acl':
+      // Measured: the Aggregate API refuses to count by some fields that a condition may name, with these words.
+      if (/field\(s\) present in the query/i.test(message)) {
+        return `The instance refused this request because of a field in it: an access rule does not let this account filter, sort or count by that field. "${table}" itself may be readable, so ask again without that field. Report this as "could not be checked", never as "nothing found".`
+      }
       return `This account may not read "${table}" through the REST API. That says something about access, not about the data: report it as "could not be checked", never as "nothing found".`
     case 'not_found':
       return `Table "${table}" does not exist on this instance. Search sys_db_object with nameLIKE to find the right name.`
