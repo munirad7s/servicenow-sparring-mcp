@@ -317,7 +317,10 @@ Also measured:
   same of the names of fields: the rule matches 3,181 of 288,610, and 1,079 of those are of a secret type. A
   field is judged by its type where that can be read; inside a text there is only the name. `[withheld]`
   therefore says that a name suggests a secret, not that there was one. Between 0.4.3 and 0.4.4 nothing else
-  changed for these texts: with that one name set aside, both took the same out of all 24,811.
+  changed for these texts: with that one name set aside, both took the same out of all 24,811. In none of them
+  did a list or an object behind such a key fail to close, which would take the rest of the text or of its
+  CDATA section along, and none was withheld whole. The largest removals were each one object: the template of
+  a connection record, a signed time stamp. The slowest text took 20 milliseconds to read.
 - The table of tables had 10,806 rows. Asked for the one changed last and for how many there are, it answered in
   about 120 milliseconds with 97 bytes. Asked for a name that ends in a given sys_id, the versions (49,263
   rows) answered in 0.2 seconds, and the entries of upgrades through their reference in 0.1.
