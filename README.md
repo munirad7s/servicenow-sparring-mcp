@@ -18,7 +18,7 @@ eight functions that read the instance and return evidence a person can run agai
 | `sn_instance` | Which release is this, how much was customized, and what can this account read? |
 | `sn_query` | What is really in this table, and how many of each? |
 | `sn_schema` | Which fields apply to a table, including the inherited ones and dictionary overrides? |
-| `sn_plugins` | Which plugins and applications are installed? |
+| `sn_plugins` | Which plugins and applications are installed, and which applications were developed here? |
 | `sn_delta` | What was changed on this instance, by whom and when? |
 | `sn_origin` | Is this record out-of-the-box, customized, or customer-created? |
 | `sn_dependencies` | What configuration is attached to this table, or to this field? |

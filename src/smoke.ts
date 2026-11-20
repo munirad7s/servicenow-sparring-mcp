@@ -133,7 +133,11 @@ if (viewName) {
 }
 
 const plugins = await call('sn_plugins', { limit: 3 })
-check('sn_plugins lists plugins and installed applications', !plugins.isError && plugins.data.plugins.returned > 0, `applications read from ${plugins.data.storeApps.table}, total ${plugins.data.storeApps.total}`)
+check(
+  'sn_plugins lists plugins, installed applications and those developed here',
+  !plugins.isError && plugins.data.plugins.returned > 0 && plugins.data.customApps.table === 'sys_app',
+  `applications read from ${plugins.data.storeApps.table}, total ${plugins.data.storeApps.total}; developed here ${plugins.data.customApps.total}`,
+)
 
 const delta = await call('sn_delta', { limit: 3 })
 check('sn_delta lists captured updates with a total', !delta.isError && typeof delta.data.total === 'number' && delta.data.notCaptured.length > 0, `total ${delta.data.total}`)

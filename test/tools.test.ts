@@ -2427,8 +2427,12 @@ test('sn_plugins matches name, plugin id and scope, and falls back to sys_scope'
     { table: 'v_plugin', rows: [{ id: 'com.example', name: 'Example', active: 'active', version: '1.0.0' }] },
     { table: 'sys_store_app', status: 403 },
     { table: 'sys_scope', rows: [{ name: 'Example app', scope: 'x_example', version: '2.0.0', active: 'true', vendor: 'Example Inc' }] },
+    { table: 'sys_app', rows: [{ name: 'Example claims', scope: 'x_acme_claims', version: '1.2.0', active: 'true' }] },
   ])
   const data = await answer('sn_plugins', { filter: 'example' })
+  // Applications developed on the instance are rows of another table, listed apart.
+  assert.deepEqual({ table: data.customApps.table, scope: data.customApps.items[0].scope, query: data.customApps.query }, { table: 'sys_app', scope: 'x_acme_claims', query: 'nameLIKEexample^ORscopeLIKEexample^active=true' })
+  assert.deepEqual(data.warnings, [])
 
   assert.equal(data.plugins.returned, 1)
   assert.equal(data.plugins.table, 'v_plugin')

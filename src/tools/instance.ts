@@ -280,8 +280,8 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         'establish which baseline a question is answered against, or whether a product is installed at all. The filter ' +
         'matches the name, the plugin id (com.snc.incident) and the application scope (sn_hr_core). Applications are ' +
         'read from sys_store_app, or through sys_scope when that table is not readable. They include applications of ' +
-        'the own company that were installed from its repository; applications developed on this instance are rows of ' +
-        'sys_app, which sn_instance counts and sn_query lists.',
+        'the own company that were installed from its repository. Applications developed on this instance (sys_app) ' +
+        'are listed apart, as customApps.',
       inputSchema: {
         filter: z.string().max(120).optional().describe('Text the name, plugin id or application scope must contain, e.g. "Incident", "com.snc.incident", "sn_hr_core".'),
         activeOnly: z.boolean().default(true).describe('true returns only active entries.'),
@@ -290,7 +290,8 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
       outputSchema: {
         ...sourceShape,
         plugins: z.object(partShape),
-        storeApps: z.object(partShape),
+        storeApps: z.object(partShape).describe('Applications installed from a store or a repository.'),
+        customApps: z.object(partShape).describe('Applications developed on this instance (sys_app).'),
       },
       annotations: READ_ONLY,
     },
@@ -332,13 +333,19 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         if (!apps) warnings.push(`Installed applications could not be read${appsClosed ? ': sys_store_app is closed on this machine' : ' from sys_store_app or sys_scope'}. That is "could not be checked", not "none installed".`)
         else withheldWarning('Installed applications', apps, warnings)
 
+        // Applications developed on this instance are rows of another table.
+        const custom = await attempt(sn.query<Row>({ table: 'sys_app', query: appQuery(), fields: appFields, limit }))
+        if (!custom) warnings.push(`Applications developed on this instance could not be read (sys_app: ${errorKind(failures.at(-1))}). That is "could not be checked", not "none".`)
+        else withheldWarning('Applications developed here', custom, warnings)
+
         // Nothing could be read at all: that is an error, with the reason of the first failure.
-        if (!plugins && !apps) throw failures[0] ?? new ServiceNowError('Neither plugins nor applications could be read.', 'unknown')
+        if (!plugins && !apps && !custom) throw failures[0] ?? new ServiceNowError('Neither plugins nor applications could be read.', 'unknown')
 
         return ok({
           ...source(sn, warnings),
           plugins: plugins ? part(plugins) : unread,
           storeApps: apps ? part(apps) : unread,
+          customApps: custom ? part(custom) : unread,
         })
       } catch (error) {
         return fail(error, 'v_plugin')

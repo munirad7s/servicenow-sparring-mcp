@@ -67,6 +67,8 @@ platform was measured on an instance before anything was changed; the numbers ar
   table a label comes from where a child table relabels a field (`labelFrom`), and for a field of a database
   view its name on the table it comes from (`sourceField`). The description says what `mandatory` does not cover.
 - `sn_delta` with `peopleOnly` still counts the rows it leaves out, and `since` takes a time of day as well.
+- `sn_plugins` lists the applications developed on the instance as well (`customApps`), which `sn_instance`
+  only counted.
 - A word on a choice that stores numbers (`priority=High`) is refused with the list of values and labels.
 - `sn_query` says when it could not check whether business rules hide rows, whether records are archived, or
   whether the table is rotated. Until now a failed look-up was silence.
