@@ -5,7 +5,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { InstanceConfig } from '../src/config.js'
 import { buildServer, createContext } from '../src/server.js'
 import { queryByContent } from '../src/tools/origin.js'
-import { capturedByName, LOOKS_SECRET, payloadTables, scrubSecrets } from '../src/tools/shared.js'
+import { capturedByName, isClosedRecord, LOOKS_SECRET, payloadTables, scrubSecrets } from '../src/tools/shared.js'
 import { closedTables, column, dictionaryRoutes, fakeInstance, labelled, tableRow, type Route } from './fake.js'
 
 type Data = Record<string, any>
@@ -854,6 +854,40 @@ test('a tool that walks a reference of its own is held to the closed tables like
   assert.equal(data.error, 'blocked')
   assert.match(data.message, /reads from sys_upgrade_history_log through a dot-walk/)
   assert.equal(sentTo('upgrade_history_task').length + sentTo('upgrade_history_task', 'stats').length, 0)
+})
+
+test('an update name is taken for a record of a closed table in every way it can be cut', async () => {
+  const deny = (list: string[], closed: Route) => createContext(fakeInstance([closed, ...dictionaryRoutes], { tables: { allow: [], deny: list } }).sn)
+  // With a deny list the closed tables are known by name, their child tables included.
+  const noUsers = deny(['sys_user'], closedTables(tableRow('sys_user', 'User'), tableRow('customer_contact', 'Contact', 'sys_user')))
+  for (const [name, closed] of [
+    [`sys_user_${ID}`, true],
+    // A sys_id is not always 32 hex digits.
+    ['sys_user_admin', true],
+    [`customer_contact_${ID}`, true],
+    [NAME, false],
+    ['sys_dictionary_incident_category', false],
+  ] as const) {
+    assert.equal(await isClosedRecord(noUsers, name), closed, name)
+  }
+  // A name built from what the record describes begins with its table as well.
+  const noDictionary = deny(['sys_dictionary'], closedTables(tableRow('sys_dictionary', 'Dictionary Entry', 'sys_metadata')))
+  assert.equal(await isClosedRecord(noDictionary, 'sys_dictionary_incident_category'), true)
+  assert.equal(await isClosedRecord(noDictionary, NAME), false)
+
+  // With a list of the only tables that may be read, the table has to be found and be open.
+  const listed = createContext(fakeInstance(dictionaryRoutes, { tables: { allow: ['incident', 'task', 'sys_*'], deny: [] } }).sn)
+  assert.equal(await isClosedRecord(listed, `incident_${ID}`), false)
+  assert.equal(await isClosedRecord(listed, `customer_contact_${ID}`), true)
+  // No table of that name is known to the instance: what the record is cannot be told.
+  assert.equal(await isClosedRecord(listed, 'sys_no_such_table_x'), true)
+  // Where the list of closed tables cannot be established, every record counts as closed.
+  const blind = createContext(fakeInstance([{ table: 'sys_db_object', status: 403 }], { tables: { allow: [], deny: ['sys_user'] } }).sn)
+  assert.equal(await isClosedRecord(blind, NAME), true)
+  // Nothing is closed: nothing is asked.
+  const open = fakeInstance([])
+  assert.equal(await isClosedRecord(createContext(open.sn), `sys_user_${ID}`), false)
+  assert.equal(open.calls.length, 0)
 })
 
 test('a text search is not a way to probe a field that holds a secret', async () => {
