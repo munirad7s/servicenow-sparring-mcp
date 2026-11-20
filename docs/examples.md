@@ -184,7 +184,7 @@ included. The server looks the value up first, because a sys_id is not always 32
   "requests": 10,
   "warnings": [],
   "table": "upgrade_history_task",
-  "query": "upgrade_detail.upgrade_history=…^upgrade_detail.dispositionIN4,10^ORDERBYDESCsys_created_on",
+  "query": "upgrade_detail.upgrade_history=…^upgrade_detail.dispositionIN4,10^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id",
   "total": 79,
   "returned": 3,
   "truncated": true,
