@@ -35,10 +35,11 @@ test('the doctor command lists what the account can read, and what it cannot', a
   assert.match(output, /does not have the role snc_read_only/)
   // One request per source, four for what lies beyond the tables, and one per field a function filters by, on
   // the sources that could be read. No source is asked twice.
-  // The business rules are not visible to this account, so it is not asked about their fields.
-  const fields = FILTERED_BY.filter((item) => item.table !== 'sys_script').flatMap((item) => item.fields).length
+  // The business rules and the applications of the store are not visible to this account, so it is not asked about their fields.
+  const fields = FILTERED_BY.filter((item) => !['sys_script', 'sys_store_app'].includes(item.table)).flatMap((item) => item.fields).length
   assert.match(output, new RegExp(`fields the functions filter by\\s+${fields} of ${fields} applied by this instance`))
-  assert.equal(calls.length, SOURCES.length + 4 + fields)
+  // Two questions per field: empty and filled at once, and one of the two.
+  assert.equal(calls.length, SOURCES.length + 4 + 2 * fields)
   assert.ok(calls.every((entry) => entry.method === 'GET'))
 })
 
@@ -57,8 +58,25 @@ test('the doctor command asks the instance whether it applies a condition on eac
 
   // A question the instance refuses is no proof either way: it is named, and the command does not fail for it.
   const refusing = await doctor([{ table: 'upgrade_history_task', exact: 'upgrade_detail.dispositionISEMPTY^upgrade_detail.dispositionISNOTEMPTY', status: 403 }, ...beyond, ...readable()])
-  assert.match(refusing.output, /could not be asked: upgrade_history_task\.upgrade_detail\.disposition \(acl\)/)
+  assert.match(refusing.output, /could not be asked: upgrade_history_task\.upgrade_detail\.disposition/)
   assert.equal(refusing.exitCode, 0)
+  // Neither is an empty answer without a total.
+  const blind = await doctor([{ table: 'sys_update_xml', exact: 'typeISEMPTY^typeISNOTEMPTY', rows: [], noTotal: true }, ...beyond, ...readable()])
+  assert.match(blind.output, /could not be asked: sys_update_xml\.type/)
+  assert.doesNotMatch(blind.output, /DROPPED/)
+
+  // An instance can be set to answer a query it cannot use with no rows. "Empty and filled at once" then matches
+  // nothing for a field it does not know either, so each field is also asked for the rows where it is one of the
+  // two, which is every row. No rows from a table that has rows: the field is not known here.
+  const silent = await doctor([{ table: 'sys_update_xml', exact: 'typeISEMPTY^ORtypeISNOTEMPTY', rows: [] }, ...beyond, ...readable()])
+  assert.match(silent.output, new RegExp(`${fields - 1} of ${fields} applied by this instance; ANSWERED WITH NOTHING: sys_update_xml\\.type`))
+  assert.match(silent.output, /is set to answer a query it cannot use with nothing/)
+  assert.equal(silent.exitCode, 1)
+
+  // A table without rows proves nothing, and is named as that: no application developed here, for example.
+  const empty = await doctor([{ table: 'sys_app', rows: [] }, ...beyond, ...readable(['sys_app'])])
+  assert.match(empty.output, /no rows to test with: sys_app\.name, sys_app\.scope, sys_app\.active/)
+  assert.equal(empty.exitCode, 0)
 
   // A source that cannot be read is not asked about its fields.
   const closed = await doctor([{ table: 'sys_update_version', status: 403 }, ...beyond, ...readable(['sys_update_version'])])

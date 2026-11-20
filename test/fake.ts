@@ -22,6 +22,8 @@ export interface Route {
   body?: string
   /** true for a request that never gets an answer: the connection fails. */
   unreachable?: boolean
+  /** true for a request the instance does not answer in time. */
+  timesOut?: boolean
   api?: 'table' | 'stats'
 }
 
@@ -92,6 +94,7 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
 
     if (!route) return json({ error: { message: `Invalid table ${table}`, detail: null }, status: 'failure' }, 400)
     if (route.unreachable) throw Object.assign(new TypeError('fetch failed'), { cause: { code: 'ECONNRESET' } })
+    if (route.timesOut) throw new DOMException('timed out', 'TimeoutError')
     const status = route.status ?? 200
     if (route.body !== undefined) return new Response(route.body, { status, headers: { 'content-type': 'text/html' } })
     if (status !== 200) return json({ error: ERRORS[status] ?? { message: `HTTP ${status}`, detail: '' }, status: 'failure' }, status)
@@ -190,7 +193,8 @@ export const closedTables = (...rows: Row[]): Route => ({ table: 'sys_db_object'
 /** What an instance answers when it is asked which of some names are tables: the names that are. */
 export function knownTables(...names: string[]): Route {
   // That question is nothing but a list of names. A list of child tables asks by name too, with more behind it.
-  return { table: 'sys_db_object', match: /^nameIN[^^]*$/, rows: names.map((name) => ({ name })) }
+  // Read whole, so in the order of the sys_id: see withAnOrder.
+  return { table: 'sys_db_object', match: /^nameIN[^^]*\^ORDERBYsys_id$/, rows: names.map((name) => ({ name })) }
 }
 
 /**

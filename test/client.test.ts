@@ -52,6 +52,12 @@ test('a sorted query is sent with the sys_id as its last key, on every page, and
   await sn.all({ table: 'sys_update_xml', query: 'ORDERBYtype', fields: ['name'] }, 1_000, 500)
   assert.deepEqual(calls.slice(1).map((call) => [call.query, call.params.get('sysparm_offset')]), [['ORDERBYtype^ORDERBYsys_id', null], ['ORDERBYtype^ORDERBYsys_id', '500']])
 
+  // A read of every row that asks for no order is sorted by the sys_id, on every page.
+  const lists = fakeInstance([{ table: 'sys_db_object', rows: [{ name: 'a' }], total: 900 }])
+  await lists.sn.all({ table: 'sys_db_object', query: 'nameINa,b', fields: ['name'] }, 1_000, 500)
+  await lists.sn.all({ table: 'sys_db_object', fields: ['name'] }, 500, 500)
+  assert.deepEqual(lists.calls.map((call) => [call.query, call.params.get('sysparm_offset')]), [['nameINa,b^ORDERBYsys_id', null], ['nameINa,b^ORDERBYsys_id', '500'], ['ORDERBYsys_id', null]])
+
   // A query that asks for no order goes out as it is, and so does a count per value.
   await sn.query({ table: 'sys_update_xml', query: 'type=Report', fields: ['name'], limit: 5, offset: 5 })
   assert.equal(calls.at(-1)!.query, 'type=Report')

@@ -230,6 +230,32 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
   }
 
   /** Rows per value of one field, through the Aggregate API. An unknown field would be ignored there too, and counted as one group. */
+  /**
+   * The fields that tell two rows of a sorted read apart: its last sort keys. The sys_id for a table. A row of a
+   * database view has none of its own: measured, a sorted read of a view by pages brought 322 different rows of
+   * 400, with "sys_id" as a key 327, and with the sys_ids of the joined tables every row once. Each of those is
+   * used where the instance proves that the view carries it; where one is missing, the answer says so.
+   */
+  async function rowKeys(table: string, warnings: string[]): Promise<string[] | undefined> {
+    const shape = await shapeOf(ctx, table)
+    if (shape.kind !== 'view' && shape.kind !== 'hidden_view') return undefined
+    const members = shape.info?.members ?? []
+    const keys: string[] = []
+    const without: string[] = []
+    for (const member of members) {
+      const key = `${member.prefix}_sys_id`
+      if (await ctx.dict.viewCarries(table, key)) keys.push(key)
+      else without.push(member.table)
+    }
+    if (!members.length || without.length) {
+      warnings.push(
+        `This is a sorted read of a database view, and ${members.length ? `the view does not carry the sys_id of ${without.join(', ')}` : 'the tables it joins could not be read'}, so its rows cannot all be told apart. ` +
+          'Rows that are equal in what the query sorts by change places from one page to the next: read by pages, a row can come twice and another not at all.',
+      )
+    }
+    return keys
+  }
+
   async function countPerValue(table: string, query: string, groupBy: string, limit: number, offset: number) {
     const guard = await guardFields(ctx, table, query, [], groupBy)
     const column = guard.described.get(groupBy)
@@ -253,7 +279,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
 
     // A view is asked first whether it applies a condition on the field: one that it drops would count every row
     // as one group. A field outside the list of the view was asked about when its name was checked.
-    if ((await shapeOf(ctx, table)).kind !== 'table' && !guard.resolved.get(groupBy.split('.')[0])?.outsideList) await requireProofOnView(ctx, table, [groupBy])
+    if ((await shapeOf(ctx, table)).kind !== 'table' && (groupBy.includes('.') || !guard.resolved.get(groupBy)?.outsideList)) await requireProofOnView(ctx, table, [groupBy])
 
     // The label of a group is the name behind a reference. The client leaves it out where that name could be the name
     // of a record in a closed table, and the answer says so.
@@ -370,14 +396,21 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
           ? (fields ?? []).map((field) => recordNameKey(table, field, guard.resolved.get(field), guard.owners.get(field)?.table)?.path).filter((key): key is string => Boolean(key))
           : []
         const readAlong = [...new Set([...(table === 'sys_properties' && fields?.includes('value') ? ['type', 'name'] : []), ...beside])].filter((field) => !fields?.includes(field))
-        const page = await ctx.sn.query<Row>({
-          table,
-          query: guard.query,
-          fields: fields && [...fields, ...readAlong],
-          limit,
-          offset,
-          display: displayValue,
-        })
+        const stableBy = guard.parsed.sorts.length ? await rowKeys(table, warnings) : undefined
+        const page = await ctx.sn
+          .query<Row>({ table, query: guard.query, fields: fields && [...fields, ...readAlong], limit, offset, display: displayValue, ...(stableBy ? { stableBy } : {}) })
+          .catch((error: unknown) => {
+            // Measured on a view of 12,000 rows: sorted by one field 9 seconds, by that field and two sys_ids 23.
+            if (error instanceof ServiceNowError && error.kind === 'timeout' && stableBy?.length) {
+              throw new ServiceNowError(
+                `${error.message} This was a sorted read of a database view. It is sorted by the sys_ids of the tables the view joins as well, so that every row comes once when it is read by pages, and on a large view that takes longer. ` +
+                  'Narrow the query, read without ORDERBY, or raise SERVICENOW_TIMEOUT_MS.',
+                'timeout',
+                table,
+              )
+            }
+            throw error
+          })
 
         const first = page.records[0]
         const leftOut = first ? (fields ?? []).filter((field) => !(field in first)) : []

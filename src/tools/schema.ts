@@ -173,7 +173,8 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
             label: info.label,
             kind: info.kind,
             extends: info.chain.slice(1),
-            ...(info.members ? { joins: info.members } : {}),
+            // Only what the answer declares: the fields a view takes from a table are in the columns.
+            ...(info.members ? { joins: info.members.map(({ table: joined, prefix }) => ({ table: joined, prefix })) } : {}),
           },
           fieldCount: all.length,
           ownFieldCount: own.length,

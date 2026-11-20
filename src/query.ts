@@ -320,16 +320,39 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
  * table of 3.5 million rows took five times as long, with it no longer than
  * without. A query that asks for no order is left as it is: read by pages, it
  * brought no row twice.
+ *
+ * A row of a database view has no sys_id of its own. Measured on eight views:
+ * a sorted read by pages lost rows there as well (322 different of 400), the
+ * key "sys_id" changed little (327), and the sys_ids of the tables the view
+ * joins, taken together, brought every row once. The caller names those keys.
  */
-export function withStableOrder(query: string): string {
+export function withStableOrder(query: string, keys: string[] = ['sys_id']): string {
   const sorts = splitTerms(query)
     .map((term) => /^(?:NQ)?(ORDERBYDESC|ORDERBY)(.*)$/s.exec(term))
     .filter((sort): sort is RegExpExecArray => sort !== null)
-  if (!sorts.length || sorts.some((sort) => sort[2] === 'sys_id')) return query
+  const missing = keys.filter((key) => !sorts.some((sort) => sort[2] === key))
+  if (!sorts.length || !missing.length) return query
   // A caret at the end would make two with the one that joins the key: a caret inside a value, and no key at all.
   // Measured: the instance then drops the sort that stands before it as well. Two at the end are one inside a value.
   const carets = /\^*$/.exec(query)![0].length
-  return `${carets % 2 ? query.slice(0, -1) : query}^${sorts.at(-1)![1]}sys_id`
+  const direction = sorts.at(-1)![1]
+  return `${carets % 2 ? query.slice(0, -1) : query}^${missing.map((key) => `${direction}${key}`).join('^')}`
+}
+
+/**
+ * Gives a query that asks for no order the sys_id as its order, for a read that goes over several pages.
+ *
+ * Measured: without an order, reads by pages brought every row once (five reads of 1,347 tables in three pages,
+ * and five other lists). But the instance promises no order, and the lists this server reads whole decide what is
+ * closed on a machine: a row that changed its place between two pages would be missing from such a list without a
+ * sign, because another row would come twice and the count would still be right. Sorted by the sys_id no row has
+ * an equal, and the read costs no more (measured on 3.5 million rows).
+ */
+export function withAnOrder(query: string): string {
+  if (splitTerms(query).some((term) => /^(?:NQ)?(ORDERBYDESC|ORDERBY)/.test(term))) return query
+  if (!query) return 'ORDERBYsys_id'
+  const carets = /\^*$/.exec(query)![0].length
+  return `${carets % 2 ? query.slice(0, -1) : query}^ORDERBYsys_id`
 }
 
 /**

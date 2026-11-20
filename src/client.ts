@@ -1,6 +1,6 @@
 import type { Auth, InstanceConfig } from './config.js'
 import { endsTheCall, quoteInstanceText, ServiceNowError, unusableAnswer, validation, type ErrorKind } from './errors.js'
-import { assertFieldPath, assertTableName, fieldsInEncodedQuery, withStableOrder } from './query.js'
+import { assertFieldPath, assertTableName, fieldsInEncodedQuery, withAnOrder, withStableOrder } from './query.js'
 import { currentCall } from './trace.js'
 import { NAME, VERSION } from './version.js'
 
@@ -16,6 +16,11 @@ export interface QueryOptions {
   display?: boolean
   /** For the lookups the gate of closed tables is built from: sent without passing through it. */
   trusted?: boolean
+  /**
+   * The fields that tell two rows apart, added as the last sort keys of a sorted query. The sys_id for a table,
+   * which is the default; for a database view the sys_ids of the tables it joins. Empty adds nothing.
+   */
+  stableBy?: string[]
 }
 
 /**
@@ -149,7 +154,7 @@ export class ServiceNowClient {
 
     // What is sent sorts by the sys_id last, so that rows which are equal in what was asked for keep their place
     // from one page to the next. The page names the query as it was sent.
-    const sent = withStableOrder(query)
+    const sent = withStableOrder(query, opts.stableBy)
 
     const params = new URLSearchParams()
     if (sent) params.set('sysparm_query', sent)
@@ -243,10 +248,12 @@ export class ServiceNowClient {
   ): Promise<{ records: T[]; total: number | null; complete: boolean }> {
     const records: T[] = []
     let total: number | null = null
+    // Every page in one order, so that no row changes its place between two of them.
+    const query = withAnOrder(opts.query ?? '')
 
     for (let offset = 0; offset < maxRows; offset += pageSize) {
       const limit = Math.min(pageSize, maxRows - offset)
-      const page = await this.query<T>({ ...opts, limit, offset })
+      const page = await this.query<T>({ ...opts, query, limit, offset })
       total = page.total
       for (const record of page.records) {
         if (records.length < maxRows) records.push(record)

@@ -81,9 +81,10 @@ export const FILTERED_BY: Array<{ table: string; fields: string[] }> = [
   { table: 'sys_metadata', fields: ['sys_update_name', 'sys_class_name'] },
   { table: 'upgrade_history_task', fields: ['state', 'upgrade_detail.upgrade_history', 'upgrade_detail.disposition', 'upgrade_detail.file_name', 'upgrade_detail.type', 'upgrade_detail.upgrade_history.to_version'] },
   { table: 'sys_upgrade_history', fields: ['to_version', 'upgrade_finished'] },
-  { table: 'v_plugin', fields: ['active'] },
-  { table: 'sys_scope', fields: ['sys_class_name', 'active'] },
-  { table: 'sys_app', fields: ['active'] },
+  { table: 'v_plugin', fields: ['name', 'id', 'active'] },
+  { table: 'sys_store_app', fields: ['name', 'scope', 'active'] },
+  { table: 'sys_scope', fields: ['sys_class_name', 'name', 'scope', 'active'] },
+  { table: 'sys_app', fields: ['name', 'scope', 'active'] },
   { table: 'sys_properties', fields: ['name', 'type'] },
 ]
 

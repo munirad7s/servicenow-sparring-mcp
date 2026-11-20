@@ -6,6 +6,7 @@
  * Run this against a new instance before trusting answers from it.
  */
 import { ServiceNowClient } from './client.js'
+import { proveCondition } from './dictionary.js'
 import { loadSettings } from './config.js'
 import { createContext } from './server.js'
 import { accountRoles, FILTERED_BY, probe, SOURCES } from './tools/instance.js'
@@ -68,24 +69,31 @@ export async function runDoctor(given?: ServiceNowClient, print: (line: string) 
   line('upgrade details through a reference', details)
 
   // The fields the functions filter by in queries of their own. An instance that does not know a field drops the
-  // condition and answers with every row. Asked for the rows where a field is empty and filled at once, it then
-  // answers with rows, where an instance that applies the condition answers with none.
+  // condition and answers with every row, or, where it is set that way, answers with none. Each field is asked for
+  // the rows where it is empty and filled at once, and for those where it is one of the two: see proveCondition.
   const asked = FILTERED_BY.filter((item) => results.find((result) => result.table === item.table)?.status === 'readable').flatMap((item) => item.fields.map((field) => ({ table: item.table, field })))
   const answers = await mapLimit(asked, 4, async ({ table, field }) => {
-    const both = await sn.query({ table, query: `${field}ISEMPTY^${field}ISNOTEMPTY`, fields: ['sys_id'], limit: 1 }).catch((error) => errorKind(error))
-    return { name: `${table}.${field}`, verdict: typeof both === 'string' ? both : both.total === 0 && !both.records.length ? 'applied' : 'dropped' }
+    const ask = (query: string) => sn.query({ table, query, fields: ['sys_id'], limit: 1 }).catch(() => null)
+    return { name: `${table}.${field}`, verdict: await proveCondition(ask, field) }
   })
-  const droppedHere = answers.filter((answer) => answer.verdict === 'dropped').map((answer) => answer.name)
-  const unasked = answers.filter((answer) => answer.verdict !== 'applied' && answer.verdict !== 'dropped').map((answer) => `${answer.name} (${answer.verdict})`)
+  const named = (verdict: string) => answers.filter((answer) => answer.verdict === verdict).map((answer) => answer.name)
+  const [applied, droppedHere, silent, untested, unasked] = ['applied', 'dropped', 'answers_nothing', 'no_rows', 'unanswered'].map(named)
   line(
     'fields the functions filter by',
-    `${answers.length - droppedHere.length - unasked.length} of ${answers.length} applied by this instance` +
+    `${applied.length} of ${answers.length} applied by this instance` +
       (droppedHere.length ? `; DROPPED: ${droppedHere.join(', ')}` : '') +
+      (silent.length ? `; ANSWERED WITH NOTHING: ${silent.join(', ')}` : '') +
+      (untested.length ? `; no rows to test with: ${untested.join(', ')}` : '') +
       (unasked.length ? `; could not be asked: ${unasked.join(', ')}` : ''),
   )
   if (droppedHere.length) {
     print('\nThis instance drops a condition on a field a function filters by, and answers with every row instead.')
     print('Answers of sn_delta, sn_origin, sn_upgrade_skips and sn_plugins that depend on that field are not to be trusted here.')
+  }
+  if (silent.length) {
+    print('\nThis instance answers with no rows where a function filters by one of its fields, although the table has rows:')
+    print('it does not know the field and is set to answer a query it cannot use with nothing. "Nothing found" from')
+    print('sn_delta, sn_origin, sn_upgrade_skips and sn_plugins is not to be trusted here where it depends on that field.')
   }
 
   const account = await accountRoles(sn)
@@ -101,5 +109,5 @@ export async function runDoctor(given?: ServiceNowClient, print: (line: string) 
   }
 
   print(`\n${sn.requestCount} requests, all GET.`)
-  return closed.length === results.length || droppedHere.length ? 1 : 0
+  return closed.length === results.length || droppedHere.length || silent.length ? 1 : 0
 }

@@ -197,7 +197,7 @@ test('without a dictionary, field names are checked against a row of the table',
   const dropping = await connect([{ table: 'v_virtual', exact: 'aISEMPTY^aISNOTEMPTY', rows: [{ a: '1', b: '2' }] }, ...routes])
   const lost = await dropping.call('sn_query', { table: 'v_virtual', query: 'a=1', fields: ['b'] })
   assert.equal(lost.data.error, 'validation')
-  assert.match(lost.data.message, /"a" is asked of "v_virtual", which is a database view or could be one, and the instance did not prove that it applies a condition on that field/)
+  assert.match(lost.data.message, /"a" is asked of "v_virtual", which is a database view or could be one, and the instance did not prove that it applies a condition on it/)
   assert.ok(!dropping.calls.some((entry) => entry.query === 'a=1'))
   // A field that is only returned needs no such proof.
   const returned = await connect([{ table: 'v_virtual', exact: 'bISEMPTY^bISNOTEMPTY', rows: [{ a: '1', b: '2' }] }, ...routes])
@@ -403,6 +403,8 @@ test('a view that lists the fields it takes from a table has no other field of t
   // The instance drops a condition it cannot use: "empty and filled at once" then matches every row.
   const dropped = (field: string): Route => ({ table: 'incident_caller', exact: `${field}ISEMPTY^${field}ISNOTEMPTY`, rows: [{ inc_number: 'INC1' }] })
   const proof = (field: string) => `${field}ISEMPTY^${field}ISNOTEMPTY`
+  // The second question: every row is empty or filled, so an instance that knows the field answers with rows.
+  const either = (field: string) => `${field}ISEMPTY^OR${field}ISNOTEMPTY`
 
   // sn_schema lists the fields on the list, and every field of a joined table that has no list.
   const described = await connect(world(listed, rows))
@@ -414,28 +416,91 @@ test('a view that lists the fields it takes from a table has no other field of t
 
   // A field that is only returned goes out without a question. A field the view is filtered by is asked about
   // first, also one on the list and one of a table without a list: measured, the instance dropped the condition
-  // on one of eight listed fields of a joined table. Asked once, while the view has rows.
+  // on one of eight listed fields of a joined table. Asked once per field, and once whether the view has a row
+  // at all, while it has one.
   await described.answer('sn_query', { table: 'incident_caller', fields: ['inc_number', 'usr_name'] })
   assert.deepEqual(described.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [''])
   for (let run = 0; run < 2; run++) await described.answer('sn_query', { table: 'incident_caller', query: 'inc_number=INC1^usr_nameLIKEa', fields: ['inc_number'] })
-  assert.deepEqual(described.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query).slice(1), [proof('inc_number'), '', proof('usr_name'), '', 'inc_number=INC1^usr_nameLIKEa', 'inc_number=INC1^usr_nameLIKEa'])
+  assert.deepEqual(described.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query).slice(1), [proof('inc_number'), '', proof('usr_name'), 'inc_number=INC1^usr_nameLIKEa', 'inc_number=INC1^usr_nameLIKEa'])
 
   // A field on the list, and the instance drops the condition all the same: refused, with what was asked.
   for (const args of [{ query: 'inc_state=1' }, { query: 'ORDERBYDESCinc_state' }, { groupBy: 'inc_state' }, { query: 'usr_nameLIKEa^inc_state=1' }]) {
     const lost = await connect(world(listed, dropped('inc_state'), rows))
     const refused = await lost.call('sn_query', { table: 'incident_caller', ...args })
     assert.deepEqual({ isError: refused.isError, error: refused.data.error }, { isError: true, error: 'validation' }, JSON.stringify(args))
-    assert.match(refused.data.message, /"inc_state" is asked of "incident_caller", which is a database view or could be one, and the instance did not prove that it applies a condition on that field/, JSON.stringify(args))
+    assert.match(refused.data.message, /"inc_state" is asked of "incident_caller", which is a database view or could be one, and the instance did not prove that it applies a condition on it.*so the query was not sent/, JSON.stringify(args))
     assert.ok(!lost.calls.some((entry) => entry.table === 'incident_caller' && /inc_state=1|ORDERBYDESCinc_state/.test(entry.query)), JSON.stringify(args))
   }
 
-  // A walk through a reference starts at a field of the view: that field is what the instance has to filter by.
+  // A walk through a reference is asked about as it is written. Measured: a view dropped the condition on 3 of 28
+  // walks from a reference that it filtered by itself.
   const withCaller: Route = { table: 'sys_db_view_table_field', rows: ['number', 'state', 'caller_id'].map((field) => ({ view_table: MEMBER, field })) }
-  const walked = await connect(world(withCaller, dropped('inc_caller_id'), rows))
+  const walked = await connect(world(withCaller, dropped('inc_caller_id.name'), rows))
   const lostWalk = await walked.call('sn_query', { table: 'incident_caller', query: 'inc_caller_id.name=Abel', fields: ['inc_number'] })
   assert.equal(lostWalk.data.error, 'validation')
-  assert.match(lostWalk.data.message, /"inc_caller_id" is asked of "incident_caller"/)
-  assert.ok(!walked.calls.some((entry) => entry.table === 'incident_caller' && entry.query.includes('inc_caller_id.name')))
+  assert.match(lostWalk.data.message, /"inc_caller_id\.name" is asked of "incident_caller"/)
+  assert.deepEqual(walked.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_caller_id.name')])
+  // The reference itself is another question: the view filters by it.
+  await walked.answer('sn_query', { table: 'incident_caller', query: 'inc_caller_idISNOTEMPTY', fields: ['inc_number'] })
+
+  // An instance can be set to answer a query it cannot use with no rows at all. "Empty and filled at once" then
+  // matches nothing for a field it does not know either, so the second question decides: every row is empty or
+  // filled, and an answer without rows from a view that has rows says that the field is not used.
+  // Where the instance is known to drop what it cannot use, as in the cases above, the first question is enough.
+  const strict: Route = { table: 'sys_properties', query: 'name=glide.invalid_query.returns_no_rows', rows: [{ name: 'glide.invalid_query.returns_no_rows', value: 'true' }] }
+  const silent = await connect(world(listed, strict, { table: 'incident_caller', exact: either('inc_state'), rows: [] }, rows))
+  const unusable = await silent.call('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })
+  assert.equal(unusable.data.error, 'validation')
+  assert.deepEqual(silent.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_state'), either('inc_state'), ''])
+  // On such an instance a field it does use answers the second question with rows, and the query goes out.
+  const careful = await connect(world(listed, strict, rows))
+  await careful.answer('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })
+  assert.deepEqual(careful.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [proof('inc_state'), either('inc_state'), 'inc_state=1'])
+  // The same where the setting cannot be read: nothing is taken on trust.
+  const unreadSetting = await connect(world(listed, { table: 'sys_properties', query: 'name=glide.invalid_query.returns_no_rows', status: 403 }, rows))
+  await unreadSetting.answer('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })
+  assert.ok(unreadSetting.calls.some((entry) => entry.query === either('inc_state')))
+  // Without a total an empty answer proves nothing.
+  const blind = await connect(world(listed, { table: 'incident_caller', exact: proof('inc_state'), rows: [], noTotal: true }, rows))
+  assert.equal((await blind.call('sn_query', { table: 'incident_caller', query: 'inc_state=1', fields: ['inc_number'] })).data.error, 'validation')
+
+  // A sorted read of a view gets the sys_ids of the tables it joins as its last keys: a row of a view has no sys_id
+  // of its own, and rows that are equal in what a query sorts by change places between pages. Each key is used
+  // where the instance proves that the view carries it, and the answer names the query as it was sent.
+  const sorted = await connect(world(listed, rows))
+  const inOrder = await sorted.answer('sn_query', { table: 'incident_caller', query: 'ORDERBYDESCinc_number', fields: ['inc_number'] })
+  assert.equal(inOrder.query, 'ORDERBYDESCinc_number^ORDERBYDESCinc_sys_id^ORDERBYDESCusr_sys_id')
+  assert.equal(sorted.calls.filter((entry) => entry.table === 'incident_caller').at(-1)!.query, 'ORDERBYDESCinc_number^ORDERBYDESCinc_sys_id^ORDERBYDESCusr_sys_id')
+  assert.doesNotMatch(inOrder.warnings.join(' '), /told apart/)
+  // A view that does not carry the sys_id of one of its tables: the key is left out, and the answer says what
+  // that means for a read by pages.
+  const partly = await connect(world(listed, dropped('usr_sys_id'), rows))
+  const loose = await partly.answer('sn_query', { table: 'incident_caller', query: 'ORDERBYinc_number', fields: ['inc_number'] })
+  assert.equal(loose.query, 'ORDERBYinc_number^ORDERBYinc_sys_id')
+  assert.match(loose.warnings.join(' '), /sorted read of a database view, and the view does not carry the sys_id of sys_user, so its rows cannot all be told apart.*a row can come twice and another not at all/)
+  // Sorting a large view by those keys takes longer: measured 23 seconds where one sort key took 9. An answer that
+  // does not come in time says what was asked for and what to do.
+  const slow = await connect(world(listed, { table: 'incident_caller', query: 'ORDERBYinc_number^ORDERBYinc_sys_id', timesOut: true }, rows))
+  const late = await slow.call('sn_query', { table: 'incident_caller', query: 'ORDERBYinc_number', fields: ['inc_number'] })
+  assert.equal(late.data.error, 'timeout')
+  assert.match(late.data.message, /This was a sorted read of a database view\. It is sorted by the sys_ids of the tables the view joins as well.*read without ORDERBY, or raise SERVICENOW_TIMEOUT_MS/)
+  const slowTable = await connect([{ table: 'incident', query: 'ORDERBYnumber', timesOut: true }, ...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  const lateTable = await slowTable.call('sn_query', { table: 'incident', query: 'ORDERBYnumber', fields: ['number'] })
+  assert.equal(lateTable.data.error, 'timeout')
+  assert.doesNotMatch(lateTable.data.message, /database view/)
+
+  // A read that asks for no order gets no key and no question about one.
+  const unsorted = await connect(world(listed, rows))
+  await unsorted.answer('sn_query', { table: 'incident_caller', fields: ['inc_number'] })
+  assert.deepEqual(unsorted.calls.filter((entry) => entry.table === 'incident_caller').map((entry) => entry.query), [''])
+
+  // A text search on a view finds nothing, also where the table it joins finds rows: measured on thirty views.
+  // (A view that shows a field which holds a secret is refused for that reason before: this one joins incidents only.)
+  const searched = await connect(world(listed, rows).map((route) => (route.table === 'sys_db_view_table' ? { ...route, rows: [{ sys_id: MEMBER, table: 'incident', variable_prefix: 'inc' }] } : route)))
+  const noSearch = await searched.call('sn_query', { table: 'incident_caller', query: '123TEXTQUERY321=printer' })
+  assert.equal(noSearch.data.error, 'validation')
+  assert.match(noSearch.data.message, /A text search \(123TEXTQUERY321\) on the database view "incident_caller" finds nothing.*Search the table instead \(incident\)/)
+  assert.equal(searched.calls.filter((entry) => entry.table === 'incident_caller').length, 0)
 
   // A field outside the list, and the instance drops the condition: refused, in a condition, a sort, a field to
   // count by and a field to return alike. Nothing but the question went to the view.
@@ -1532,7 +1597,7 @@ test('the tables of a page of update names are asked for together, not name by n
   assert.equal(data.updates.length, 200)
   // The table is found and open, so the names stay.
   assert.equal(data.updates[7].target_name, 'Field 7')
-  const asked = calls.filter((call) => call.table === 'sys_db_object' && /^nameIN[^^]*$/.test(call.query))
+  const asked = calls.filter((call) => call.table === 'sys_db_object' && /^nameIN[^^]*\^ORDERBYsys_id$/.test(call.query))
   assert.ok(asked.length >= 1 && asked.length <= 3, `${asked.length} requests for the tables of 200 names`)
   assert.ok(calls.length < 40, `${calls.length} requests in all`)
 })
@@ -1595,7 +1660,7 @@ test('with a deny list, what stands before the sys_id of each name on a page is 
   const { answer, calls } = await connect(world, { tables: { allow: [], deny: ['sys_script'] } })
   const data = await answer('sn_delta', { limit: 200 })
   assert.equal(data.updates[7].target_name, 'Util 7')
-  assert.equal(calls.filter((call) => call.table === 'sys_db_object' && /^nameIN[^^]*$/.test(call.query)).length, 1)
+  assert.equal(calls.filter((call) => call.table === 'sys_db_object' && /^nameIN[^^]*\^ORDERBYsys_id$/.test(call.query)).length, 1)
 })
 
 test('an update name is taken for a record of a closed table in every way it can be cut', async () => {

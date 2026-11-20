@@ -272,7 +272,7 @@ test('the tables a long deny list closes are asked for in several requests, each
   assert.ok(asked.length > 1, `${asked.length} requests`)
   for (const call of asked) {
     assert.ok(call.query.length < 3_500, `a query of ${call.query.length} characters`)
-    assert.ok(call.query.endsWith('^ORname=sys_db_object'), 'each asks for the table of tables as proof')
+    assert.ok(call.query.endsWith('^ORname=sys_db_object^ORDERBYsys_id'), 'each asks for the table of tables as proof')
   }
   // Every level of parents is asked for, for the names and for the pattern.
   const whole = asked.map((call) => call.query).join('^OR')
@@ -301,7 +301,7 @@ test('the tables below a table are listed only where the answer can be trusted',
   // Each with its parents up to the table, so that a closed table in between can be seen.
   assert.deepEqual([...((await new Dictionary(fine.sn).childTables('task')) ?? [])], [['incident', ['incident', 'task']], ['u_major_incident', ['u_major_incident', 'incident', 'task']]])
   // Every level of parents is asked for, and the table itself as proof that the query was applied.
-  assert.match(fine.calls.filter((call) => !isProof(call))[1].query, /^super_class\.nameINtask\^ORsuper_class\.super_class\.nameINtask\^OR.*\^ORname=task$/)
+  assert.match(fine.calls.filter((call) => !isProof(call))[1].query, /^super_class\.nameINtask\^ORsuper_class\.super_class\.nameINtask\^OR.*\^ORname=task\^ORDERBYsys_id$/)
   assert.equal((await new Dictionary(below([task]).sn).childTables('task'))?.size, 0)
 
   // Not trusted: the table itself is missing from the answer, a row matches none of the conditions, rows are
@@ -340,7 +340,7 @@ test('a child table more than eight levels below a closed table is found, with i
   // Up to the root: a query on any table above them has to leave their rows out.
   assert.deepEqual(closed.get('u_deep'), ['u_deep', ...mids, 'u_base', 'u_root'])
   assert.deepEqual(closed.get('u_deeper'), ['u_deeper', 'u_deep', ...mids, 'u_base', 'u_root'])
-  assert.equal(calls.filter((call) => call.query.endsWith('^ORname=sys_db_object')).length, 2)
+  assert.equal(calls.filter((call) => call.query.endsWith('^ORname=sys_db_object^ORDERBYsys_id')).length, 2)
 })
 
 test('the tables below a table are followed deeper than one request sees', async () => {
@@ -436,7 +436,7 @@ test('a list of child tables is trusted only where the instance filters by every
   await assert.rejects(new Dictionary(fakeInstance([dropsOwnName, showsParents, ...lists], { tables: { allow: [], deny: ['task'] } }).sn).closedTables(), notTrusted)
   assert.equal(await new Dictionary(fakeInstance([dropsNames, showsParents, ...lists]).sn).childTables('task'), null)
   // Nothing was asked of the list itself.
-  assert.equal(byName.calls.filter((call) => call.query.endsWith('^ORname=sys_db_object')).length, 0)
+  assert.equal(byName.calls.filter((call) => call.query.endsWith('^ORname=sys_db_object^ORDERBYsys_id')).length, 0)
 
   // "Starts with" is asked only where the list has a pattern, and then for every level as well.
   const plain = fakeInstance([dropsPatterns, showsParents, ...lists], { tables: { allow: [], deny: ['task'] } })
@@ -484,7 +484,7 @@ test('many tables at the eighth level are asked for in requests that stay reques
   const { sn, calls } = fakeInstance([showsParents, { table: 'sys_db_object', query: 'super_class.nameINu_root^', rows: [tableRow('u_root', 'Root'), ...deep] }, { table: 'sys_db_object', query: '^ORname=u_root', rows: [tableRow('u_root', 'Root')] }])
   const below = await new Dictionary(sn).childTables('u_root')
   assert.equal(below?.size, 40)
-  const asked = calls.filter((call) => call.query.endsWith('^ORname=u_root'))
+  const asked = calls.filter((call) => call.query.endsWith('^ORname=u_root^ORDERBYsys_id'))
   assert.ok(asked.length > 3, `${asked.length} requests`)
   for (const call of asked) assert.ok(encodeURIComponent(call.query).length < 6_000, `a query of ${encodeURIComponent(call.query).length} characters in the address`)
 })

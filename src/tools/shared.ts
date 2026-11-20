@@ -740,11 +740,13 @@ export interface Guard {
  * answers with every row. Its definition does not say which.
  */
 export async function requireProofOnView(ctx: Context, view: string, paths: string[]): Promise<void> {
-  for (const field of new Set(paths.map((path) => path.split('.')[0]))) {
-    if (await ctx.dict.viewCarries(view, field)) continue
+  // The path as it is written: measured, a view dropped the condition on 3 of 28 walks from a reference that it
+  // filtered by itself.
+  for (const path of new Set(paths)) {
+    if (await ctx.dict.viewCarries(view, path)) continue
     throw validation(
-      `"${field}" is asked of "${view}", which is a database view or could be one, and the instance did not prove that it applies a condition on that field: asked for rows where it is empty and filled at once, it did not answer with none. ` +
-        'Measured: a view drops a condition on some of its fields and answers unfiltered, so nothing was sent.',
+      `"${path}" is asked of "${view}", which is a database view or could be one, and the instance did not prove that it applies a condition on it: asked for the rows where it is empty and filled at once, and for those where it is one of the two, it did not answer with none and with rows. ` +
+        'Measured: a view drops a condition on some of its fields and answers unfiltered, so the query was not sent.',
       view,
     )
   }
@@ -783,8 +785,10 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
     const details = check.unknown
       .map((item) => `${item.field}: ${item.reason}${item.suggestions.length ? ` (similar: ${item.suggestions.join(', ')})` : ''}`)
       .join('; ')
+    // For a field of a view the instance was asked whether it applies a condition on it: that question went out.
+    const asked = check.unknown.some((item) => item.asked)
     throw validation(
-      `Unknown field. ${details}. ServiceNow ignores a condition on an unknown field and answers unfiltered, so nothing was sent.`,
+      `Unknown field. ${details}. ServiceNow ignores a condition on an unknown field and answers unfiltered, so ${asked ? 'the query was not sent' : 'nothing was sent'}.`,
       table,
     )
   }
@@ -813,11 +817,22 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   refuseValuesOfTheWrongKind(table, parsed, check.resolved)
   await refuseNamesInPlaceOfIds(ctx, table, parsed, check.resolved, warnings)
 
+  // Measured on thirty views that join a table with a text index: a text search on the view finds nothing, where the
+  // same word finds rows on the table. A zero that says nothing is not passed on.
+  if (parsed.textSearch && shape.kind === 'view') {
+    throw validation(
+      `A text search (123TEXTQUERY321) on the database view "${table}" finds nothing: measured, a view answers such a search with no rows, also where the table it joins finds some. ` +
+        `Search the table instead (${(shape.info?.members ?? []).map((member) => member.table).join(', ')}), or filter the view by a field. Nothing was sent.`,
+      table,
+    )
+  }
+
   // What a view is filtered or sorted by is asked of the instance first, after everything that refuses a query
   // without a request. A field to count by is asked about where the count is made, for the same reason.
   // The same where it could not be read what the name stands for: it can be a view all the same.
   const proveOnView = async () => {
-    if (shape.kind !== 'table') await requireProofOnView(ctx, table, parsed.fields.filter((path) => !check.resolved.get(path.split('.')[0])?.outsideList))
+    // A plain field outside the list of the view was asked about when its name was checked.
+    if (shape.kind !== 'table') await requireProofOnView(ctx, table, parsed.fields.filter((path) => path.includes('.') || !check.resolved.get(path)?.outsideList))
   }
 
   if (check.status === 'checked') {

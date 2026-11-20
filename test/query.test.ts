@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { ServiceNowError } from '../src/errors.js'
-import { assertFieldPath, assertPlainValue, assertSysId, assertTableName, fieldsInEncodedQuery, isPlainValue, parseEncodedQuery, withCondition, withStableOrder } from '../src/query.js'
+import { assertFieldPath, assertPlainValue, assertSysId, assertTableName, fieldsInEncodedQuery, isPlainValue, parseEncodedQuery, withAnOrder, withCondition, withStableOrder } from '../src/query.js'
 
 const refused = (run: () => unknown) =>
   assert.throws(run, (error: unknown) => error instanceof ServiceNowError && error.kind === 'validation')
@@ -325,7 +325,31 @@ test('a sorted query gets the sys_id as its last sort key, in the direction of t
   ]
   for (const [given, sent] of cases) assert.equal(withStableOrder(given), sent, given)
 
+  // A row of a database view is told apart by the sys_ids of the tables the view joins: the caller names them.
+  // Measured on eight views: with "sys_id" as the key a read by pages brought 327 different rows of 400, with
+  // those keys every row once.
+  assert.equal(withStableOrder('ORDERBYDESCinc_number', ['inc_sys_id', 'usr_sys_id']), 'ORDERBYDESCinc_number^ORDERBYDESCinc_sys_id^ORDERBYDESCusr_sys_id')
+  assert.equal(withStableOrder('ORDERBYusr_sys_id^ORDERBYinc_number', ['inc_sys_id', 'usr_sys_id']), 'ORDERBYusr_sys_id^ORDERBYinc_number^ORDERBYinc_sys_id')
+  assert.equal(withStableOrder('ORDERBYinc_number', []), 'ORDERBYinc_number')
+  assert.equal(withStableOrder('inc_active=true', ['inc_sys_id']), 'inc_active=true')
+
   // Nothing is added to a query that asks for no order, or that sorts by the sys_id already.
   const untouched = ['', 'active=true', 'active=true^NQpriority=1', 'ORDERBYsys_id', 'ORDERBYDESCsys_id', 'ORDERBYnumber^ORDERBYDESCsys_id', 'ORDERBYsys_id^ORDERBYnumber', 'a=1^NQORDERBYsys_id', 'short_description=ORDERBYnumber', 'short_descriptionLIKEa^^ORDERBYnumber', 'active=true^EQ']
   for (const query of untouched) assert.equal(withStableOrder(query), query, query)
+})
+
+test('a read of every row is sorted by the sys_id where it asks for no order', () => {
+  // The lists the server reads whole decide what is closed. Without an order nothing says that a row keeps its
+  // place between two pages; with one that no two rows share, it does.
+  const cases: Array<[given: string, sent: string]> = [
+    ['', 'ORDERBYsys_id'],
+    ['nameINtask,incident', 'nameINtask,incident^ORDERBYsys_id'],
+    ['super_class.nameINtask^ORname=task', 'super_class.nameINtask^ORname=task^ORDERBYsys_id'],
+    ['a=1^NQb=2', 'a=1^NQb=2^ORDERBYsys_id'],
+    ['name=a^', 'name=a^ORDERBYsys_id'],
+    ['label=a^^', 'label=a^^^ORDERBYsys_id'],
+  ]
+  for (const [given, sent] of cases) assert.equal(withAnOrder(given), sent, given)
+  // A read that asks for an order keeps it: the client adds the sys_id behind it.
+  for (const query of ['ORDERBYname', 'element=state^ORDERBYsequence', 'a=1^NQORDERBYDESCb', 'ORDERBYsys_id']) assert.equal(withAnOrder(query), query, query)
 })

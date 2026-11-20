@@ -61,6 +61,46 @@ export interface UnknownField {
   segment: string
   reason: string
   suggestions: string[]
+  /** true where the instance was asked about the field before it was called unknown. */
+  asked?: boolean
+}
+
+/**
+ * Asks an instance whether it applies a condition on a field, without knowing what the field holds.
+ *
+ * An instance that cannot use a condition drops it and answers with every row. So the rows where the field is empty
+ * and filled at once are asked for first: an instance that applies the condition answers with none ("dropped"
+ * otherwise). That question is cheap, because nothing matches.
+ *
+ * An instance can also be set to answer a query it cannot use with no rows at all
+ * (glide.invalid_query.returns_no_rows); the first question then proves nothing. Where it is known that the
+ * instance is not set that way ("dropsUnusable"), it is enough to know that the table has a row: without one
+ * nothing can be proven, and nothing can come back either ("no_rows"). Where it is not known, the rows where the
+ * field is empty or filled are asked for, which is every row: an answer with rows says "applied", and one with
+ * none from a table that has rows says that the instance answered the question with nothing ("answers_nothing").
+ * That second question counts the whole table, which took nine seconds on a view of 12,000 rows.
+ *
+ * A question that fails, or an empty answer without a total, is "unanswered".
+ */
+export async function proveCondition(
+  ask: (query: string) => Promise<{ total: number | null; records: unknown[] } | null>,
+  path: string,
+  dropsUnusable = false,
+): Promise<'applied' | 'dropped' | 'answers_nothing' | 'no_rows' | 'unanswered'> {
+  const some = (answer: { total: number | null; records: unknown[] }) => answer.records.length > 0 || (answer.total ?? 0) > 0
+  const both = await ask(`${path}ISEMPTY^${path}ISNOTEMPTY`)
+  if (!both) return 'unanswered'
+  if (some(both)) return 'dropped'
+  if (both.total === null) return 'unanswered'
+  if (!dropsUnusable) {
+    const either = await ask(`${path}ISEMPTY^OR${path}ISNOTEMPTY`)
+    if (!either) return 'unanswered'
+    if (some(either)) return 'applied'
+  }
+  const any = await ask('')
+  if (!any || (any.total === null && !any.records.length)) return 'unanswered'
+  if (!some(any)) return 'no_rows'
+  return dropsUnusable ? 'applied' : 'answers_nothing'
 }
 
 export interface FieldCheck {
@@ -236,6 +276,7 @@ export class Dictionary {
     for (const key of [...this.choiceLists.keys()]) if (key.startsWith(`${name}.`)) this.choiceLists.delete(key)
     // What a view was seen to carry belongs to its definition: a field taken off its list is asked about again.
     for (const key of [...this.carried.keys()]) if (key.startsWith(`${name}.`)) this.carried.delete(key)
+    this.someRow.delete(name)
     this.knownNames.delete(name)
   }
 
@@ -373,6 +414,7 @@ export class Dictionary {
                 ? `"${segment}" is a field of "${column.definedOn}", which the view "${current}" joins, but it could not be read which fields the view takes from that table, and the instance did not prove that it applies a condition on this one`
                 : `"${segment}" is a field of "${column.definedOn}", which the view "${current}" joins, but the view lists the fields it takes from that table and this is not one of them`,
               suggestions: [],
+              asked: true,
             })
             break
           }
@@ -818,32 +860,48 @@ export class Dictionary {
   }
 
   private readonly carried = new Map<string, Entry<boolean>>()
+  /** The views that were seen to have a row, and when. */
+  private readonly someRow = new Map<string, number>()
 
   /**
-   * true if the instance applies a condition on this field of a view.
+   * true if the instance applies a condition on this field of a view, or on this path from one of its fields.
    *
    * Measured on 40 views with a field list: a field outside the list is applied where a row of the view carries it
    * all the same (sys_id, sys_class_name and the two domain fields, not always the same ones) and dropped where no
    * row does, or refused with 403. A field on the list is applied, but not every one: of eight listed fields of one
    * joined table, the instance dropped the condition on one. So the definition of a view does not say which of its
-   * fields can be filtered by, and the instance is asked. A condition that is dropped matches every row, so the
-   * question "empty and filled at once" then matches every row too, where it should match none. Without a row in
-   * the view the question proves nothing, and the answer is not remembered.
+   * fields can be filtered by, and the instance is asked: see proveCondition. Without a row in the view the
+   * questions prove nothing, and the answer is not remembered.
    */
-  async viewCarries(view: string, field: string): Promise<boolean> {
-    const key = `${view}.${field}`
+  async viewCarries(view: string, path: string): Promise<boolean> {
+    const key = `${view}.${path}`
     const known = this.carried.get(key)
     if (known && Date.now() - known.at < this.ttlMs) return known.value
-    const ask = (query: string) => this.gated.query({ table: view, query, fields: ['sys_id'], limit: 1 }).catch(unlessNoConnection(null))
-    const both = await ask(`${field}ISEMPTY^${field}ISNOTEMPTY`)
-    if (!both || both.total !== 0 || both.records.length > 0) return false
-    const any = await ask('')
-    const lasting = Boolean(any && (any.records.length > 0 || (any.total ?? 0) > 0))
-    if (lasting) {
+    // A view that is closed on this machine is refused as that, not as a field that could not be proven.
+    const read = (query: string) =>
+      this.gated.query({ table: view, query, fields: ['sys_id'], limit: 1 }).catch((error) => {
+        if (noConnection(error) || (error instanceof ServiceNowError && error.kind === 'blocked')) throw error
+        return null
+      })
+    // Whether the view has a row is asked once for all of its fields: on a large view that question is the slow
+    // one. Only "it has one" is remembered: a view that was empty can have rows by the next question.
+    const ask = async (query: string) => {
+      if (query !== '') return read(query)
+      const seen = this.someRow.get(view)
+      if (seen !== undefined && Date.now() - seen < this.ttlMs) return { total: 1, records: [{}] }
+      const answer = await read('')
+      if (answer && (answer.records.length > 0 || (answer.total ?? 0) > 0)) {
+        if (this.someRow.size >= MAX_ENTRIES) this.someRow.clear()
+        this.someRow.set(view, Date.now())
+      }
+      return answer
+    }
+    const proof = await proveCondition(ask, path, (await this.emptyOnInvalidQuery()) === false)
+    if (proof === 'applied') {
       if (this.carried.size >= MAX_ENTRIES) this.carried.clear()
       this.carried.set(key, { value: Promise.resolve(true), at: Date.now() })
     }
-    return true
+    return proof === 'applied' || proof === 'no_rows'
   }
 
   /** The fields of a table, and whether the list is complete. null if the table is unknown. */

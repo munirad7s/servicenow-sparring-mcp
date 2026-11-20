@@ -361,8 +361,11 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
                   ['ORDERBY', 'ORDERBYDESC'].map((order) => sn.query<Record<string, string>>({ table: 'sys_metadata', query: `${named}^${order}sys_update_name`, fields: ['sys_id', 'sys_class_name', 'sys_update_name'], limit: PEERS })),
                 ).catch(kindOf)
               : 'invalid_response'
-            // Both ends have to show records: where one came back empty although records match, nothing is concluded.
-            const prefix = typeof ends !== 'string' && ends.every((end) => end.records.length > 0) ? prefixOfNames(kind, ends.flatMap((end) => end.records)) : null
+            // Both ends have to show their records: where one came back empty although records match, or with rows
+            // hidden from this account, or without a total, nothing is concluded. A hidden row can be the one that
+            // is named another way.
+            const shown = typeof ends !== 'string' && ends.every((end) => end.records.length > 0 && end.total !== null && !hidesRows(end))
+            const prefix = typeof ends !== 'string' && shown ? prefixOfNames(kind, ends.flatMap((end) => end.records)) : null
             if (typeof ends !== 'string' && ends.every((end) => end.total === 0 && !end.records.length)) {
               warnings.push(`This record carries no update name, and neither does any other record of ${kind} on this instance. Records of this kind are captured as part of another record, or not at all, so its change history cannot be looked up.`)
             } else if (prefix) {
@@ -427,7 +430,10 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         // true where the record was read from its own table and it could not be told whether it belongs to a package.
         let packageUnknown = false
         const tail = /^(.+)_([0-9a-f]{32})$/.exec(name)
-        if (!file && !hidden && tail && isTableName(tail[1])) {
+        // Only in a table: a database view has no sys_id of its own, drops the condition on it and answers with
+        // some row, which would then be taken for the record.
+        const tailed = !file && !hidden && tail && isTableName(tail[1]) ? await ctx.dict.table(tail[1]).catch(unlessNoConnection(null)) : null
+        if (!file && !hidden && tail && isTableName(tail[1]) && tailed?.kind !== 'database_view') {
           // The table of application files said "no such record": then this is none, and it has no package. Where that
           // table could not be asked, or gave no total, the record can be an application file all the same, and its own
           // table says whether it carries a package.
@@ -437,7 +443,8 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           const own = await sn
             .query<Row>({ table: tail[1], query: `sys_id=${tail[2]}`, fields: isFile ? FILE_FIELDS : ['sys_id', 'sys_created_on', 'sys_created_by', 'sys_updated_on', 'sys_updated_by'], limit: 1, display: true })
             .catch(kindOf)
-          if (typeof own !== 'string' && own.records[0]) {
+          // The row has to be the one asked for: an instance that dropped the condition hands back another.
+          if (typeof own !== 'string' && own.records[0] && rawOf(tidy(own.records[0]).sys_id) === tail[2]) {
             file = tidy(own.records[0])
             ownTable = tail[1]
             packageUnknown = !noSuchFile && !isFile && (!columns || columns.partial)
