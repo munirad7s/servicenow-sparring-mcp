@@ -12,6 +12,12 @@ answer; such changes are listed under "Changed".
   rows and without a sign. 0.3.2 asked for proof on database views only. Now a table and a reference are asked
   the same question first: rows whose class is empty and filled at once, which has to match nothing. Not seen on
   an instance: the test account is an administrator, and it passes.
+- **Dependencies with known advisories.** The lock file held the MCP SDK at 1.29.0 and zod at 4.4.3, and `npm
+  audit` listed nine advisories against them and what they bring along (one critical, four high, four moderate).
+  Most are about the HTTP transports and the OAuth client of the SDK, which this server does not use: it speaks
+  over stdio only. One is about zod, which checks every input of every function. The package now asks for the SDK
+  from 1.32.2 and zod from 4.6.7, so that no installation resolves to an older one, and `npm audit` lists nothing.
+  Checked with the unit tests, the live test, and a call over stdio against the built server.
 
 ### Fixed
 
