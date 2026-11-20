@@ -18,7 +18,12 @@ export interface Column {
   definedOn: string
   /** The nearest table whose dictionary override changes the field for the inspected table. */
   overriddenOn?: string
+  /** Everything the overrides along the chain change, taken together. */
   overrides?: string[]
+  /** Each dictionary override that applies, nearest table first: a record of its own, with what it changes. */
+  overrideRecords?: Array<{ table: string; sysId: string; changes: string[] }>
+  /** The table whose label record gives the field its label, where that is not the table that defines the field. */
+  labelFrom?: string
   /** For a field of a database view: its name on the table it comes from. */
   sourceField?: string
 }
@@ -98,7 +103,7 @@ export class Dictionary {
   private readonly tables = new Map<string, Entry<TableInfo | null>>()
   private readonly columnSets = new Map<string, Entry<ColumnSet | null>>()
   private readonly choiceLists = new Map<string, Entry<Choice[]>>()
-  private readonly labelSets = new Map<string, Entry<Map<string, string>>>()
+  private readonly labelSets = new Map<string, Entry<Map<string, { label: string; table: string }>>>()
   private readonly ruleCounts = new Map<string, Entry<{ count: number; query: string } | null>>()
   private readonly archiveCounts = new Map<string, Entry<{ count: number; query: string } | null>>()
   private readonly rotations = new Map<string, Entry<{ rotations: number; days: number } | null>>()
@@ -137,7 +142,8 @@ export class Dictionary {
    * For a database view, call it for the tables it joins as well.
    */
   forget(name: string): void {
-    for (const cache of [this.tables, this.columnSets, this.labelSets]) cache.delete(name)
+    for (const cache of [this.tables, this.columnSets, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.childSets]) cache.delete(name)
+    for (const key of [...this.choiceLists.keys()]) if (key.startsWith(`${name}.`)) this.choiceLists.delete(key)
   }
 
   /** Own and inherited fields of a table, without dictionary overrides. null if the table is unknown. */
@@ -156,9 +162,11 @@ export class Dictionary {
 
     // A child table can give an inherited field its own label: "Close notes" on task is "Resolution notes" on incident.
     const labels = await this.cached(this.labelSets, name, () => this.loadLabels(info.chain)).catch(() => null)
-    for (const [element, label] of labels ?? []) {
+    for (const [element, { label, table }] of labels ?? []) {
       const column = columns.get(element)
-      if (column && label) column.label = label
+      if (!column || !label) continue
+      column.label = label
+      if (table !== column.definedOn) column.labelFrom = table
     }
 
     let overridesRead = true
@@ -166,7 +174,7 @@ export class Dictionary {
       const { records, total, complete } = await this.sn.all<Record<string, string>>({
         table: 'sys_dictionary_override',
         query: `nameIN${info.chain.join(',')}`,
-        fields: ['name', 'element', ...OVERRIDABLE.map((key) => `${key}_override`), 'mandatory', 'read_only'],
+        fields: ['sys_id', 'name', 'element', ...OVERRIDABLE.map((key) => `${key}_override`), 'mandatory', 'read_only'],
       })
       if (!complete || (total !== null && records.length < total)) overridesRead = false
 
@@ -181,6 +189,7 @@ export class Dictionary {
           if (changed.includes('read_only')) column.readOnly = row.read_only === 'true'
           column.overriddenOn = table
           column.overrides = [...new Set([...(column.overrides ?? []), ...changed])]
+          column.overrideRecords = [{ table, sysId: String(row.sys_id ?? ''), changes: changed }, ...(column.overrideRecords ?? [])]
         }
       }
     } catch {
@@ -191,7 +200,7 @@ export class Dictionary {
   }
 
   /** The English label of each field, from the nearest table in the chain that has one. */
-  private async loadLabels(chain: string[]): Promise<Map<string, string>> {
+  private async loadLabels(chain: string[]): Promise<Map<string, { label: string; table: string }>> {
     const { records, total, complete } = await this.sn.all<Record<string, string>>({
       table: 'sys_documentation',
       query: `nameIN${chain.join(',')}^language=en^elementISNOTEMPTY`,
@@ -201,11 +210,11 @@ export class Dictionary {
       throw new ServiceNowError('The field labels could not be read completely: rows are hidden from this account, or there are more than 5,000.', 'acl', 'sys_documentation')
     }
 
-    const labels = new Map<string, string>()
+    const labels = new Map<string, { label: string; table: string }>()
     // Root first, so a label closer to the inspected table wins.
     for (const table of [...chain].reverse()) {
       for (const row of records) {
-        if (row.name === table && typeof row.element === 'string' && row.label) labels.set(row.element, String(row.label))
+        if (row.name === table && typeof row.element === 'string' && row.label) labels.set(row.element, { label: String(row.label), table })
       }
     }
     return labels
@@ -295,6 +304,7 @@ export class Dictionary {
    * value that does not exist.
    */
   async choices(table: string, field: string): Promise<Choice[]> {
+    if (!/^[a-z_][a-z0-9_]*$/.test(field)) throw new ServiceNowError(`"${field}" is not the name of a field.`, 'validation', table)
     const info = await this.table(table)
     if (!info) return []
 
@@ -310,9 +320,13 @@ export class Dictionary {
       if (!complete || (total !== null && records.length < total)) {
         throw new ServiceNowError(`The choices of "${field}" could not be read completely: rows are hidden from this account, or there are more than 2,000.`, 'acl', 'sys_choice')
       }
+      // A row without its value is one whose value this account may not read: the list is then not complete.
+      if (records.some((row) => typeof row.value !== 'string')) {
+        throw new ServiceNowError(`The choices of "${field}" came back without their values: this account may not read them.`, 'acl', 'sys_choice')
+      }
       const owner = info.chain.find((name) => records.some((row) => row.name === name))
       return records
-        .filter((row) => row.name === owner && typeof row.value === 'string')
+        .filter((row) => row.name === owner)
         .map((row) => ({ value: row.value, label: String(row.label ?? ''), language: String(row.language ?? '') }))
     })
   }
@@ -445,7 +459,8 @@ export class Dictionary {
       // Measured: the duration is stored as a point in time counted from 1970-01-01, seven days as "1970-01-08 00:00:00".
       const length = row ? Date.parse(`${String(row.duration).replace(' ', 'T')}Z`) / 86_400_000 : NaN
       const rotations = Number(row?.rotations)
-      return Number.isFinite(length) && length > 0 && Number.isInteger(rotations) && rotations > 0 ? { rotations, days: Math.round(length * 10) / 10 } : null
+      // Two decimals: a rotation of six hours is a quarter of a day, not "0.3" and not "0".
+      return Number.isFinite(length) && length > 0 && Number.isInteger(rotations) && rotations > 0 ? { rotations, days: Math.round(length * 100) / 100 } : null
     })
   }
 

@@ -71,7 +71,7 @@ export async function runDoctor(given?: ServiceNowClient, print: (line: string) 
   line(
     'account',
     !account
-      ? 'roles unknown (a token does not name its user, or sys_user_has_role is not readable)'
+      ? 'roles unknown (a token does not name its user, sys_user_has_role is not readable, or the tables of users or roles are closed on this machine)'
       : `${account.roles} roles, admin: ${account.admin ? 'yes' : 'no'}, snc_read_only: ${account.readOnlyRole ? 'yes' : 'NO'}`,
   )
   if (account && !account.readOnlyRole) {

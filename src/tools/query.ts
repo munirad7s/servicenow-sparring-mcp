@@ -70,7 +70,11 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     const carriesClosed = async (payload: string) => {
       const tables = payloadTables(payload)
       if (!tables.length) return true
-      for (const name of tables) if (await ctx.closed.reason(name)) return true
+      for (const name of tables) {
+        if (await ctx.closed.reason(name)) return true
+        // A name the instance does not know as a table: what the payload carries cannot be told.
+        if (!(await ctx.dict.table(name).catch(() => null))) return true
+      }
       return false
     }
 
@@ -214,6 +218,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     if (column?.type === 'glide_list') {
       warnings.push(`"${groupBy}" is a list. It is counted by its whole content: a row with "a,b" and a row with "a" are two groups. This does not say how often each entry occurs.`)
     }
+    if (!groups.length && guard.parsed.conditions.length) warnings.push(...(await explainEmpty(ctx, guard).catch(() => [])))
     await warnAboutQueryRules(table, warnings)
     const end = offset + shown.length
     return ok({

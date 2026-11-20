@@ -18,9 +18,12 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
         'overrides applied, each with the table that defines it and the label it has on this table. Use "filter" to ' +
         'look for one field: unless a warning says the dictionary was only partly readable, a field that is not in the ' +
         'answer does not exist on the table. Also answers for database views, whose fields carry the prefix of the ' +
-        'table they come from. Reports the chain of parent tables and the kind of table. To judge a field of a table ' +
-        'with sn_origin, pass the update name "sys_dictionary_<definedOn>_<name>". The dictionary is read anew for ' +
-        'every call. Structure only; for records use sn_query.',
+        'table they come from. Reports the chain of parent tables and the kind of table. "mandatory" and "readOnly" are ' +
+        'what the dictionary says: UI policies, data policies and client scripts can change both on a form, which ' +
+        'sn_dependencies with "field" lists. A field is three kinds of record, each judged on its own by sn_origin: ' +
+        'the dictionary entry (updateName "sys_dictionary_<definedOn>_<name>"), its label ' +
+        '("sys_documentation_<labelFrom or definedOn>_<name>_en"), and each dictionary override (the sysId under ' +
+        '"overrideRecords"). The dictionary is read anew for every call. Structure only; for records use sn_query.',
       inputSchema: {
         table: z.string().min(1).max(80).describe('Table name, e.g. "incident".'),
         filter: z.string().max(80).optional().describe('Text the field name or label must contain, e.g. "business" or "assign".'),
@@ -44,9 +47,11 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
         columns: z.array(
           z.object({
             name: z.string(),
-            label: z.string(),
+            label: z.string().describe('The English label the field has on this table.'),
             type: z.string(),
-            definedOn: z.string(),
+            definedOn: z.string().describe('The table in the parent chain that defines the field. For a field of a database view: the table it comes from.'),
+            sourceField: z.string().optional().describe('For a field of a database view: its name on the table it comes from, without the prefix of the view. Use it in place of "name" in an update name.'),
+            labelFrom: z.string().optional().describe('The table whose label record gives the field this label, where that is not definedOn: a child table can relabel an inherited field.'),
             reference: z.string().optional().describe('Table a reference field points to.'),
             maxLength: z.number().optional(),
             mandatory: z.literal(true).optional().describe('Present only when true.'),
@@ -54,7 +59,11 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
             choice: z.literal(true).optional().describe('Present when the field takes its values from a choice list. Queries need the stored value, not the label.'),
             inactive: z.literal(true).optional().describe('Present when the dictionary entry is deactivated.'),
             overriddenOn: z.string().optional().describe('Nearest table whose dictionary override changes the field.'),
-            overrides: z.array(z.string()).optional(),
+            overrides: z.array(z.string()).optional().describe('What the overrides along the chain change, taken together: mandatory, read_only, default_value, reference_qual, attributes, dependent, calculation, display.'),
+            overrideRecords: z
+              .array(z.object({ table: z.string(), sysId: z.string(), changes: z.array(z.string()) }))
+              .optional()
+              .describe('Each dictionary override that applies, nearest table first. An override is a record of its own (sys_dictionary_override): pass its sysId to sn_origin.'),
           }),
         ),
       },
@@ -109,7 +118,9 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
             ...(column.readOnly ? { readOnly: true as const } : {}),
             ...(column.choice ? { choice: true as const } : {}),
             ...(column.active ? {} : { inactive: true as const }),
-            ...(column.overriddenOn ? { overriddenOn: column.overriddenOn, overrides: column.overrides } : {}),
+            ...(column.sourceField ? { sourceField: column.sourceField } : {}),
+            ...(column.labelFrom ? { labelFrom: column.labelFrom } : {}),
+            ...(column.overriddenOn ? { overriddenOn: column.overriddenOn, overrides: column.overrides, overrideRecords: column.overrideRecords } : {}),
           }))
 
         let size = 0

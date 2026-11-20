@@ -234,24 +234,26 @@ export function fail(error: unknown, table?: string): ToolResult {
   return { isError: true, content: [{ type: 'text', text: JSON.stringify(payload) }] }
 }
 
-function hintFor(kind: string, table: string | undefined, message: string): string {
+function hintFor(kind: string, about: string | undefined, message: string): string {
+  // An error can come without the table it is about: then the hint names none.
+  const named = about ? `"${about}"` : 'the table that was asked for'
   switch (kind) {
     case 'validation':
       return 'Nothing was sent to the instance. Correct the input and call again.'
     case 'config':
       return 'The server is not configured correctly. This is for the person who set it up, not something to work around.'
     case 'blocked':
-      return `This machine is configured not to ask for "${table}". Report it as "could not be checked": it says nothing about the data.`
+      return `Tables are closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY), and this request would have read from one of them: the message says which and why. Report it as "could not be checked": it says nothing about the data.`
     case 'auth':
       return 'The instance rejected the credentials. Check the SERVICENOW_* variables. With a token: it may have expired.'
     case 'acl':
       // Measured: the Aggregate API refuses to count by some fields that a condition may name, with these words.
       if (/field\(s\) present in the query/i.test(message)) {
-        return `The instance refused this request because of a field in it: an access rule does not let this account filter, sort or count by that field. "${table}" itself may be readable, so ask again without that field. Report this as "could not be checked", never as "nothing found".`
+        return `The instance refused this request because of a field in it: an access rule does not let this account filter, sort or count by that field. ${named[0].toUpperCase()}${named.slice(1)} itself may be readable, so ask again without that field. Report this as "could not be checked", never as "nothing found".`
       }
-      return `This account may not read "${table}" through the REST API. That says something about access, not about the data: report it as "could not be checked", never as "nothing found".`
+      return `This account may not read ${named} through the REST API. That says something about access, not about the data: report it as "could not be checked", never as "nothing found".`
     case 'not_found':
-      return `Table "${table}" does not exist on this instance. Search sys_db_object with nameLIKE to find the right name.`
+      return `${about ? `Table "${about}"` : 'That table'} does not exist on this instance. Search sys_db_object with nameLIKE to find the right name.`
     case 'bad_request':
       return 'The instance rejected the request. Check the query syntax.'
     case 'rate_limited':

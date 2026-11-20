@@ -155,8 +155,8 @@ test('dictionary overrides change the effective field, and overrides of several 
     {
       table: 'sys_dictionary_override',
       rows: [
-        { name: 'incident', element: 'short_description', mandatory_override: 'true', mandatory: 'true' },
-        { name: 'u_major', element: 'short_description', default_value_override: 'true' },
+        { sys_id: 'o1', name: 'incident', element: 'short_description', mandatory_override: 'true', mandatory: 'true' },
+        { sys_id: 'o2', name: 'u_major', element: 'short_description', default_value_override: 'true' },
       ],
     },
     ...dictionaryRoutes,
@@ -166,6 +166,11 @@ test('dictionary overrides change the effective field, and overrides of several 
   assert.equal(field?.mandatory, true)
   assert.equal(field?.overriddenOn, 'u_major')
   assert.deepEqual(field?.overrides, ['mandatory', 'default_value'])
+  // Each override is a record of its own, with what it changes: the nearest table first.
+  assert.deepEqual(field?.overrideRecords, [
+    { table: 'u_major', sysId: 'o2', changes: ['default_value'] },
+    { table: 'incident', sysId: 'o1', changes: ['mandatory'] },
+  ])
   assert.equal(effective?.overridesRead, true)
 })
 
@@ -181,6 +186,9 @@ test('a child table can rename an inherited field', async () => {
   const onIncident = await dict.effectiveColumns('incident')
   assert.equal(onIncident?.columns.find((item) => item.name === 'short_description')?.label, 'Summary')
   assert.equal(onIncident?.columns.find((item) => item.name === 'number')?.label, 'Number')
+  // The label is a record of its own, and this one belongs to another table than the field does.
+  assert.equal(onIncident?.columns.find((item) => item.name === 'short_description')?.labelFrom, 'incident')
+  assert.equal(onIncident?.columns.find((item) => item.name === 'number')?.labelFrom, undefined)
   assert.equal(onIncident?.labelsRead, true)
 
   const unreadable = fakeInstance([{ table: 'sys_documentation', status: 403 }, ...dictionaryRoutes])

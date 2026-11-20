@@ -2,7 +2,7 @@ import type { Row, ServiceNowClient } from '../client.js'
 import type { ClosedTables } from '../closed.js'
 import type { Choice, Column, Dictionary, FieldCheck } from '../dictionary.js'
 import { quoteInstanceText, ServiceNowError, validation } from '../errors.js'
-import { assertFieldPath, isTableName, parseEncodedQuery, withCondition, type Condition, type ParsedQuery } from '../query.js'
+import { assertFieldPath, isPlainValue, isTableName, parseEncodedQuery, withCondition, type Condition, type ParsedQuery } from '../query.js'
 
 export interface Context {
   sn: ServiceNowClient
@@ -41,6 +41,10 @@ const PAYLOAD_FIELDS = new Map<string, string[]>([
   ['sys_update_preview_xml', ['payload', 'payload_diff']],
   ['sys_upgrade_history_log', ['payload', 'payload_diff']],
   ['sys_update_diff', ['payload_diff']],
+  // Measured: a deleted record is kept whole, as XML under the name of its table, and so is a linked application file.
+  ['sys_audit_delete', ['payload']],
+  ['sys_archive_log', ['payload']],
+  ['sys_metadata_link', ['payload']],
 ])
 
 /** "payload" or "diff" if the field carries a whole record, as itself or as a comparison of two. */
@@ -163,7 +167,10 @@ export function payloadTables(text: string): string[] {
   const root = /<record_update\s[^<>]*?(?<![\w-])table\s*=\s*["']([a-z0-9_]{1,80})["']/.exec(text)?.[1]
   if (root) names.add(root)
   for (const match of text.matchAll(/<([a-z0-9_]{1,80})\s[^<>]*?(?<![\w-])action\s*=\s*["']/g)) names.add(match[1])
-  names.delete('record_update')
+  // Measured: a deleted record is stored under an element that carries the name of its table and nothing else.
+  const outer = /^\s*(?:<\?xml[^>]*\?>\s*)?<([a-z0-9_]{1,80})[\s>]/.exec(text)?.[1]
+  if (outer) names.add(outer)
+  for (const wrapper of ['record_update', 'unload', 'xml']) names.delete(wrapper)
   return [...names]
 }
 
@@ -780,5 +787,50 @@ export function withPeopleOnly(filter: string): string {
 }
 
 export function isSystemAccount(user: string): boolean {
-  return user === '' || user === 'system' || user === 'guest' || user.includes('@snc.')
+  // Without regard to case, as the instance compares the same names in the filters above.
+  const name = user.toLowerCase()
+  return name === '' || name === 'system' || name === 'guest' || name.includes('@snc.')
+}
+
+export type CapturedBy = 'people' | 'system_accounts' | 'nobody'
+
+/**
+ * For each update name: who made its captured changes. "people" if a person is on any of its update rows,
+ * "system_accounts" if rows exist and no person is on any of them, "nobody" if no row exists. Asked in batches,
+ * the second question only for the names that have rows. A name is missing from the answer where its batch could
+ * not be read: that is "not known", and the caller says so.
+ */
+export async function capturedByName(ctx: Context, names: string[], onFailure: (kind: string) => void = () => {}): Promise<Map<string, CapturedBy>> {
+  const known = new Map<string, CapturedBy>()
+  // Never a query longer than the address of a request should be.
+  const batches = (list: string[], most: number, length: number) => {
+    const chunks: string[][] = [[]]
+    for (const name of list) {
+      const last = chunks[chunks.length - 1]
+      if (last.length >= most || last.join(',').length + name.length > length) chunks.push([name])
+      else last.push(name)
+    }
+    return chunks.filter((chunk) => chunk.length)
+  }
+  const wanted = [...new Set(names)].filter(isPlainValue)
+  const captured: string[] = []
+  try {
+    for (const chunk of batches(wanted, 50, 4_000)) {
+      const groups = await ctx.sn.groupCount('sys_update_xml', 'name', `nameIN${chunk.join(',')}`)
+      const found = new Set(groups.filter((group) => group.count > 0).map((group) => group.value))
+      for (const name of chunk) {
+        if (found.has(name)) captured.push(name)
+        else known.set(name, 'nobody')
+      }
+    }
+    // The filter stands in the query twice, once for who created a row and once for who changed it last.
+    for (const chunk of batches(captured, 25, 1_800)) {
+      const groups = await ctx.sn.groupCount('sys_update_xml', 'name', withPeopleOnly(`nameIN${chunk.join(',')}`))
+      const byPeople = new Set(groups.filter((group) => group.count > 0).map((group) => group.value))
+      for (const name of chunk) known.set(name, byPeople.has(name) ? 'people' : 'system_accounts')
+    }
+  } catch (error) {
+    onFailure(errorKind(error))
+  }
+  return known
 }

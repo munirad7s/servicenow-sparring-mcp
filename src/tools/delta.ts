@@ -1,11 +1,18 @@
 import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Row } from '../client.js'
+import { quoteInstanceText } from '../errors.js'
 import { DELTA_GAPS } from '../limitations.js'
 import { assertPlainValue } from '../query.js'
 import { clip, fail, listing, listShape, ok, rawOf, rowSchema, tidy } from '../result.js'
 import { traced } from '../trace.js'
 import { BY_SYSTEM_ACCOUNT, CLOSED_NAME, isClosedRecord, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
+
+/** A day or a moment as the caller wrote it, in the one form the instance is asked with: YYYY-MM-DD HH:MM:SS. */
+const moment = (given: string) => {
+  const [day, time = '00:00:00'] = given.replace('Z', '').split(/[ T]/)
+  return `${day} ${time.length === 5 ? `${time}:00` : time}`
+}
 
 export function registerDeltaTool(server: McpServer, ctx: Context) {
   const { sn } = ctx
@@ -35,7 +42,8 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
         'Return what was changed on this instance, from the Customer Updates table (sys_update_xml): which record, ' +
         'what kind, insert-or-update or delete, by whom, when, in which update set. Also returns exact counts per type ' +
         'for the same filter, and how many of the rows were captured under system accounts (installations, upgrades and ' +
-        'jobs) rather than by people, so "how customized is this instance" needs one call. Rows, not records: one ' +
+        'jobs) rather than by people. With peopleOnly the list and the counts per type cover the rows a person is on, ' +
+        'and the rows that were left out are still counted. Rows, not records: one ' +
         'record can have a row in several update sets. Coverage is partial by design of the platform; the answer lists ' +
         'what the table does not capture. To judge one record use sn_origin. For what an upgrade skipped use sn_upgrade_skips.',
       inputSchema: {
@@ -55,9 +63,9 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
         changedBy: z.string().max(120).optional().describe('User name. Matches the user who first captured the change or who changed it last.'),
         since: z
           .string()
-          .regex(/^\d{4}-\d{2}-\d{2}$/)
+          .regex(/^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?Z?)?$/)
           .optional()
-          .describe('Only changes last made on or after this day, YYYY-MM-DD (UTC).'),
+          .describe('Only changes last made at or after this moment: YYYY-MM-DD or YYYY-MM-DD HH:MM:SS, in UTC.'),
         peopleOnly: z.boolean().default(false).describe('true leaves out rows no person is on: first captured and last changed by a system account (system, guest, ServiceNow maintenance logins).'),
         limit: z.number().int().min(1).max(200).default(50),
         offset: z.number().int().min(0).default(0),
@@ -71,7 +79,7 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
         capturedBySystemAccounts: z
           .number()
           .nullable()
-          .describe('Rows of the whole filter that no person is on: first captured and last changed by a system account. null if unknown.'),
+          .describe('Rows under the same conditions that no person is on: first captured and last changed by a system account. With peopleOnly these are the rows that were left out of the list. null if unknown.'),
         updates: z.array(rowSchema),
         notCaptured: z.array(z.string()).describe('What sys_update_xml does not record. Say "captured customizations", never "all".'),
       },
@@ -86,7 +94,7 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
         const withoutType = [
           nameContains ? `nameLIKE${nameContains}` : '',
           changedBy ? `sys_created_by=${changedBy}^ORsys_updated_by=${changedBy}` : '',
-          since ? `sys_updated_on>=${since} 00:00:00` : '',
+          since ? `sys_updated_on>=${moment(since)}` : '',
         ].filter(Boolean)
         const scope = (conditions: string[]) => (peopleOnly ? withPeopleOnly(conditions.join('^')) : conditions.join('^'))
         const filter = scope([...withoutType, type ? `type=${type}` : ''].filter(Boolean))
@@ -102,17 +110,20 @@ export function registerDeltaTool(server: McpServer, ctx: Context) {
             display: true,
           }),
           typeCounts(filter),
-          peopleOnly ? Promise.resolve(0) : total([filter, BY_SYSTEM_ACCOUNT].filter(Boolean).join('^')),
+          // Counted under the conditions as given, without the restriction to people: with it the answer would always be 0.
+          total([...withoutType, type ? `type=${type}` : '', BY_SYSTEM_ACCOUNT].filter(Boolean).join('^')),
         ])
 
         if (!byType) warnings.push('The counts per type could not be read (Aggregate API). The list itself is valid.')
         if (page.total === 0 && type) {
           const known = await typeCounts(scope(withoutType))
           if (known?.length) {
-            warnings.push(`No row has the type "${type}". The type must be the exact label. Types under this filter: ${known.map((item) => item.type).join(', ')}.`)
+            warnings.push(`No row has the type "${type}". The type must be the exact label. Types under this filter: ${known.map((item) => quoteInstanceText(item.type, 60)).join(', ')}.`)
           }
         }
-        if (page.total && bySystem && bySystem / page.total >= 0.2) {
+        if (peopleOnly && bySystem) {
+          warnings.push(`${bySystem} more row(s) under the same conditions have no person on them (installations, upgrades and jobs) and were left out by peopleOnly. The platform treats those records as customized too.`)
+        } else if (page.total && bySystem && bySystem / page.total >= 0.2) {
           warnings.push(
             `${bySystem} of the ${page.total} rows were captured under system accounts: installations, upgrades and jobs, not edits by people. ` +
               'The platform still treats those records as customized.',

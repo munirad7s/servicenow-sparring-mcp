@@ -1,7 +1,9 @@
 # What the answers look like
 
 These answers come from the stand-in instance of the test suite, so the names and numbers are invented. The shape
-is what an agent receives; long parts are shortened with "…".
+is what an agent receives; long parts are shortened with "…". `requests` is the count of a call on a table the
+server has looked at before: the first call on a table costs five to seven more, for its field names and for the
+rules that filter, archive or rotate it.
 
 ## A misspelled field
 
@@ -152,6 +154,57 @@ user" returns 49.
 }
 ```
 
+## A name where a reference stores a sys_id
+
+```json
+{ "tool": "sn_query", "arguments": { "table": "incident", "query": "assignment_group!=Service Desk", "fields": ["sys_id"], "limit": 1 } }
+```
+
+```json
+{
+  "error": "validation",
+  "message": "\"assignment_group\" is a reference to sys_user_group and stores a sys_id, and no record there has the sys_id \"Service Desk\". With a name, \"!=\" leaves no row out: measured, the answer then counts the rows it was meant to exclude. To leave out a record by one of its fields write assignment_group.<field>!=…, for example assignment_group.name!=Service Desk. If \"Service Desk\" is a sys_id after all, write assignment_group.sys_id!=Service Desk. Nothing was sent.",
+  "table": "incident",
+  "hint": "Nothing was sent to the instance. Correct the input and call again."
+}
+```
+
+Sent as it is, the instance would have answered with every incident that has a group, those of the Service Desk
+included. The server looks the value up first, because a sys_id is not always 32 hex digits.
+
+## What did people here change that the upgrade skipped?
+
+```json
+{ "tool": "sn_upgrade_skips", "arguments": { "excludeErrors": true, "limit": 3 } }
+```
+
+```json
+{
+  "instance": "example.service-now.com",
+  "requests": 10,
+  "warnings": [],
+  "table": "upgrade_history_task",
+  "query": "upgrade_detail.upgrade_history=…^upgrade_detail.dispositionIN4,10^ORDERBYDESCsys_created_on",
+  "total": 79,
+  "returned": 3,
+  "truncated": true,
+  "nextOffset": 3,
+  "upgrade": { "from": "glide-zurich-…", "to": "glide-australia-…", "finished": "2026-09-25 17:41:09", "kind": "family" },
+  "byDisposition": [{ "name": "Skipped", "count": 42 }, { "name": "Skipped Manual Merge", "count": 37 }],
+  "notReviewed": 79,
+  "records": [
+    { "file": "sys_script_…", "target": "Example rule", "type": "Business Rule", "disposition": "Skipped Manual Merge", "review": "Not Reviewed", "capturedBy": "people", "…": "…" },
+    { "file": "sys_ui_action_…", "target": "Example action", "type": "UI Action", "disposition": "Skipped", "review": "Not Reviewed", "capturedBy": "system_accounts", "…": "…" },
+    { "file": "sys_properties_…", "target": "example.property", "type": "System Property", "disposition": "Skipped", "review": "Not Reviewed", "capturedBy": "nobody", "…": "…" }
+  ],
+  "capturedBy": { "people": 1, "system_accounts": 1, "nobody": 1 }
+}
+```
+
+`capturedBy` says who made the captured changes to each record: a person, only installations, upgrades and jobs,
+or nobody. "Nobody" does not mean unchanged: the upgrade found the record different, so it was changed without
+being captured.
+
 ## Is this business rule out-of-the-box?
 
 ```json
@@ -162,7 +215,7 @@ user" returns 49.
 {
   "instance": "example.service-now.com",
   "fetchedAt": "2026-11-20T02:14:07.512Z",
-  "requests": 5,
+  "requests": 4,
   "warnings": [],
   "verdict": "customized",
   "explanation": "Delivered with the platform or an installed application, and changed on this instance.",
@@ -192,11 +245,15 @@ user" returns 49.
       "firstCapturedOn": "2026-03-01 10:00:00",
       "rows": [
         {
+          "name": "sys_script_0123456789abcdef0123456789abcdef",
           "action": "INSERT_OR_UPDATE",
           "type": "Business Rule",
           "update_set": { "value": "…", "display": "Incident form rework" },
+          "replace_on_upgrade": "false",
           "sys_created_by": "abel",
-          "sys_created_on": "2026-03-01 10:00:00"
+          "sys_created_on": "2026-03-01 10:00:00",
+          "sys_updated_by": "abel",
+          "sys_updated_on": "2026-03-01 10:00:00"
         }
       ]
     },

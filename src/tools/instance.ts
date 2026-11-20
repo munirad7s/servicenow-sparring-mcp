@@ -155,7 +155,7 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         counts: z.object({
           customerUpdates: z.number().nullable().describe('Rows in sys_update_xml: captured changes, by people and by system accounts.'),
           storeApps: z.number().nullable().describe('Active applications installed from a store or repository, applications of the own company that came from its repository included. null if they could not be counted.'),
-          customApps: z.number().nullable().describe('Applications developed on this instance (sys_app).'),
+          customApps: z.number().nullable().describe('Applications developed on this instance (sys_app), active or not.'),
           activePlugins: z.number().nullable(),
         }),
         account: z
@@ -216,6 +216,10 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         else if (!build) warnings.push('The system property glide.war was not returned (hidden from this account, or not set), so the release is unknown.')
         if (!upgrades) warnings.push('sys_upgrade_history could not be read, so the upgrades are unknown.')
 
+        // Not readable is not "no domains": only a table that does not exist says that the instance has none.
+        if (domains.status !== 'readable' && domains.status !== 'row_restricted' && domains.status !== 'not_found') {
+          warnings.push(`Whether this instance separates its data into domains could not be checked (table "domain": ${domains.status}). If it does, every answer is limited to the domains of this account.`)
+        }
         if ((domains.total ?? 0) > 0) {
           warnings.push(
             `This instance separates its data into domains (${domains.total} in the table "domain"). Rows and totals are those of the domains this account can see: ` +

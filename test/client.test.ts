@@ -250,6 +250,20 @@ test('a rate limit is waited out once, and never for long', async () => {
   assert.equal(await kindOf(() => always.query({ table: 'incident' })), 'rate_limited')
   // A day asked for is capped at five seconds; without a number it is half a second.
   assert.deepEqual(slept, [5_000, 500])
+
+  // A token can expire while a request waits for the rate limit: the renewed one is still tried, once.
+  const seen: string[] = []
+  const answers = [() => json({ error: { message: 'Too Many Requests' } }, 429), () => json({ error: { message: 'User Not Authenticated' } }, 401), () => json({ result: [{ number: 'INC1' }] })]
+  const renewed = new ServiceNowClient(
+    { ...config, auth: { kind: 'bearer', token: 'old' }, reloadAuth: () => ({ kind: 'bearer', token: 'new' }) },
+    async (_url, init) => {
+      seen.push((init.headers as Record<string, string>).Authorization)
+      return answers[seen.length - 1]()
+    },
+    recorded,
+  )
+  assert.equal((await renewed.query({ table: 'incident' })).records.length, 1)
+  assert.deepEqual(seen, ['Bearer old', 'Bearer old', 'Bearer new'])
 })
 
 test('a rejected login is retried only with credentials that changed, and only once', async () => {

@@ -22,7 +22,7 @@ eight functions that read the instance and return evidence a person can run agai
 | `sn_delta` | What was changed on this instance, by whom and when? |
 | `sn_origin` | Is this record out-of-the-box, customized, or customer-created? |
 | `sn_dependencies` | What configuration is attached to this table, or to this field? |
-| `sn_upgrade_skips` | What did the upgrade skip, and still needs a review? |
+| `sn_upgrade_skips` | What did the upgrade skip, who had changed it, and what still needs a review? |
 
 It also serves three MCP prompts, `verify_claim`, `review_upgrade` and `assess_change`, and one resource,
 `servicenow-sparring://limitations`.
@@ -35,7 +35,7 @@ Every answer names where it came from, what it cost, and how complete it is:
 {
   "instance": "example.service-now.com",
   "fetchedAt": "2026-11-20T02:14:07.512Z",
-  "requests": 5,
+  "requests": 6,
   "warnings": [],
   "table": "sys_script",
   "query": "collection=incident^active=true",
@@ -52,7 +52,8 @@ Every answer names where it came from, what it cost, and how complete it is:
 }
 ```
 
-More examples, also of refusals: [docs/examples.md](docs/examples.md).
+`requests` is 6 here because it is the first call on this table: five of them looked at the table itself. The
+next call on it costs one. More examples, also of refusals: [docs/examples.md](docs/examples.md).
 
 The Table API does not reject a condition it cannot use. It drops the condition and answers with every row, or it
 matches nothing. Both look like an answer. Five rules keep the evidence from lying:
@@ -69,9 +70,12 @@ matches nothing. Both look like an answer. Five rules keep the evidence from lyi
    answered with nothing, and the forms that are refused because they are documented to run script.
 3. **A value that cannot match is refused or explained.** `state=Resolved` matches nothing, because the field
    stores `6`. That query is refused, and the error names the stored value. `caller_id=Abel Tuter` matches nothing,
-   because a reference is compared with a sys_id. That answer comes with the reason. `assigned_to!=<sys_id>` leaves
-   out every row without an assignee, and the answer says that too. The check of choice values needs `sys_choice`
-   to be readable and covers the fields of the table itself; where it could not be made, the answer says so.
+   because a reference is compared with a sys_id. That answer comes with the reason. `assignment_group!=Service
+   Desk` leaves no row out at all, because no row holds the name: that query is refused once the server has looked
+   the value up and found no record with it as its sys_id. `assigned_to!=<sys_id>` leaves out every row without an
+   assignee, and the answer says that too. The check of choice values needs `sys_choice` to be readable. It covers
+   the fields of the table, inherited ones included, the fields of a database view, and fields reached through a
+   reference; where it could not be made, the answer says so.
 4. **Counts say what they count.** `total` is what matched on the server before row-level access rules; `returned`
    is what is in the answer. When rows were withheld, the answer says so. Three things can stand between a table
    and its answer without a trace in it: business rules that run on every read and add conditions depending on
@@ -116,16 +120,20 @@ provider, the data leaves your network. Five things limit what can go that way:
 - **Secrets are withheld.** Fields of a password type or an encrypted type, and system properties of a password
   type, come back as `[withheld: this field holds a secret]`. The Table API would hand them out as stored. The
   server knows the type of a field from the dictionary. Where it cannot read the type, it withholds a field whose
-  name suggests a secret (password, token, secret, key), and the answer says that types were missing.
+  name suggests a secret (password, token, secret, key), and the answer says that types were missing. The value of
+  a system property that is reached through a reference or a database view comes without its type, so it is
+  withheld there whatever it holds: read it from `sys_properties`.
 - **A secret cannot be found out by trying.** "Starts with a", "starts with b": the number of matches would give a
   value away piece by piece, and so would the order of rows sorted by it. A field that holds a secret can be asked
   whether it is filled, and nothing else. A query that compares or sorts by the value of system properties leaves
   out the properties of a password type and those without a type, and says so; a count per property value is
   refused. A text search reads fields it does not name: it is refused on a table that has a field with a secret
   or a field that carries whole records, and on a table whose fields cannot be read completely.
-- **A record inside a text is cleaned.** The payload of a captured change, of a version or of an upgrade entry is
-  the whole record as text. What looks like a secret in it is taken out, by the name of its element, and a system
-  property in it is judged as one read from its table. Such a payload can be read, but not searched.
+- **A record inside a text is cleaned.** The payload of a captured change, of a version, of an upgrade entry or of
+  a deleted record is the whole record as text. What looks like a secret in it is taken out, by the name of its
+  element, and a system property in it is judged as one read from its table. Such a payload can be read, but not
+  searched. The same is done with every text an answer carries: a script that holds `"api_key": "…"` comes back
+  with that value taken out, and the answer says how many values were withheld.
 - **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
   away from the server. `SERVICENOW_TABLE_ALLOW` names the only tables the server may ask for; that list has to
   include the tables the server reads for its own checks (`npm run doctor` lists them, `sys_*` covers most). A
@@ -165,7 +173,8 @@ appends one line per request:
 
 `sent` is the number of HTTP requests this took: 0 for a request that was refused or held back, 2 after a retry.
 The file holds no credentials and no record content. A query can contain values, so keep it as private as the
-instance; it is created readable by its owner only. The lines stand in the order the requests ended. If the file
+instance; on Linux and macOS it is created readable by its owner only, on Windows it takes the access rules of
+its folder. The lines stand in the order the requests ended. If the file
 cannot be written, the server says so once on its error output and keeps answering. The npm scripts do not write
 it.
 
@@ -173,8 +182,9 @@ it.
 
 - One `sn_query` is one request, plus five to seven the first time a table is used: to check its field names, and
   to look for rules that filter, archive or rotate it. The other functions cost more: `sn_origin` 4 to 9,
-  `sn_dependencies` 25 to 30 (about 15 for one field), `sn_instance` about 50. Every answer carries its count in
-  `requests`. At most six requests of one function are in flight at a time.
+  `sn_upgrade_skips` about 10, `sn_dependencies` 25 to 35 (about 15 for one field), `sn_instance` about 50. Every
+  answer carries its count in `requests`. At most eight requests of one function are in flight at a time. With tables closed on the machine, the first call
+  on each table costs a few more: the server has to establish what the table is a child or a parent of.
 - What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is
   missing from an entry older than 30 seconds is looked up once more, so a field created during a session is
   found. `sn_schema` reads the dictionary anew for every call, for a database view also that of the tables it
@@ -233,7 +243,7 @@ account can read each one, and finally the release, the Aggregate API and the ro
 be installed on the instance.
 
 Which roles the account needs depends on the access rules of your instance. Start with a read-only account and let
-`doctor` show what is closed; the functions report a closed source as "could not be checked".
+`doctor` show what it cannot read; the functions report such a source as "could not be checked".
 
 ### Register with an MCP client
 
@@ -282,9 +292,12 @@ It asks the instance four questions and shows the rows behind each answer, with 
 | Question | Evidence | Answer |
 |---|---|---|
 | Who delivered the record? | the class of the package it belongs to (`sys_metadata.sys_package`), and for an installed application its scope | `provenance`: vendor, installed application, company application, custom application, global scope, or unknown |
-| Was it changed here? | customer update rows (`sys_update_xml`), the version marked current (`sys_update_version`), and the newest entry of an upgrade that refused to overwrite it (`upgrade_history_task`) | `divergence` |
-| Was it created here, or delivered? | a vendor version of the record exists; inside a delivered package also: the record is older than its first captured change | `created` |
-| Who made the captured changes? | the authors of the update rows | `capturedBy`: people, or system accounts only |
+| Was it changed here? | customer update rows (`sys_update_xml`), the version marked current (`sys_update_version`), and the newest entry of an upgrade that refused to overwrite it (`upgrade_history_task`) | `divergence`: customer changes captured, changed without capture, no customer changes captured, or unknown |
+| Was it created here, or delivered? | delivered: a vendor version of the record exists, or, inside a delivered package, the record is older than its first captured change. Here: no vendor version exists and the record is not older than its first capture, or it belongs to no package and has a captured change | `created`: here, delivered, or unknown |
+| Who made the captured changes? | the authors of the update rows; where none is left, the author of a current version that came from an update set | `capturedBy`: people, system accounts, nobody, or unknown |
+
+"No vendor version exists" is said only where the versions of every source could be counted and each source is one
+the tool classifies. A version from an update set counts as a capture also where its update row is gone.
 
 | Delivered by | Changed here | Created | Verdict |
 |---|---|---|---|
@@ -293,23 +306,32 @@ It asks the instance four questions and shows the rows behind each answer, with 
 | platform or installed application | no | | `out_of_box_as_captured` |
 | platform or installed application | yes | delivered | `customized` |
 | platform or installed application | yes | here | `customer_created` |
-| installed application | yes | not decided | `unknown` |
-| platform | yes | not decided | `customized` |
-| no package (global scope) | yes | delivered: a vendor version exists | `customized` |
-| no package (global scope) | yes | here: no vendor version | `customer_created` |
-| no package (global scope) | no | delivered: a vendor version exists | `out_of_box_as_captured` |
-| no package (global scope) | no | otherwise | `unknown` |
-| a package that cannot be read, or an application customization | any | | `unknown` |
-| any but a custom application | the evidence it needs is not readable, or rows of it are hidden | | `unknown` |
+| platform or installed application | an upgrade found it changed, nothing is captured | not decided | `customized` |
+| installed application | a change is captured | not decided | `unknown` |
+| platform | a change is captured | not decided | `customized`, or `unknown` where its versions could not be counted |
+| no package (global scope, or a record outside the application files) | yes | delivered: a vendor version exists | `customized` |
+| no package | yes | here | `customer_created` |
+| no package | yes | not decided | `unknown` |
+| no package | no | delivered: a vendor version exists | `out_of_box_as_captured` |
+| no package | no | otherwise | `unknown` |
+| a package that cannot be read, a package of a class without a rule, an application customization | any | | `unknown` |
+| any but a custom or company application | not decided: evidence is not readable, rows of it are hidden, or it came without a total | | `unknown` |
+| no record answers | the newest update row in view deleted it, and none is hidden | | `deleted_here` |
+| no record answers | nothing is recorded under the name: no update row, no version, no entry of an upgrade | | `not_found` |
+| no record answers | otherwise | | `unknown` |
 
 Inside an installed application both happen often, a file made here and a delivered file changed here, so an
 undecided case stays undecided. In a platform package a file made here is rare (5 of 1,885 changed files on the
-test instance), so there a captured change means `customized`.
+test instance), so there a captured change means `customized` unless the dates show that the file was made with
+its first capture.
 
 Two kinds of record need a detour. A dictionary entry or a field label that was never captured stores no update
 name; asked for by the name it would get, it is found by the table and field that name describes. And the entry of
-a system field such as `sys_id` belongs to no package, because the platform generates it together with the table:
-for it, the package of the table answers the first question, and the answer says so.
+a system field belongs to no package, because the platform generates it together with the table: for it, the
+package of the table answers the first question, and the answer says so. The system fields are `sys_id`,
+`sys_created_on`, `sys_created_by`, `sys_updated_on`, `sys_updated_by`, `sys_mod_count`, `sys_class_name`,
+`sys_class_path`, `sys_domain` and `sys_domain_path`. Where the package of the table cannot be read, the verdict
+is `unknown`.
 
 An application a company develops on one instance and installs on another from its own repository arrives there
 like an application from the store. Its scope tells them apart: it begins with `x_`, followed by the company code
@@ -372,7 +394,8 @@ What follows from that:
   scripts and conditions that only name the table or field, the flow behind a record trigger, wildcard access
   controls, reports or integrations. The answer lists what is not covered.
 - `sn_upgrade_skips` lists records an upgrade did not overwrite and that have a review entry. Each one needs a
-  review. It is not a prediction that something breaks, and it describes only the instance that answered.
+  review. It is not a prediction that something breaks, and it describes only the instance that answered. For each
+  entry it says who made the captured changes to the record: people, system accounts only, or nobody.
 - Encoded queries are parsed with a strict grammar. Related-list queries (`RLQUERY`), tag conditions, catalog
   variables and the shorthand operators `*`, `%`, `!*` are refused, because they cannot be checked.
 - One answer carries about 60,000 characters of rows. Longer values are cut and marked.

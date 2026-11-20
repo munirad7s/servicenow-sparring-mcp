@@ -294,7 +294,9 @@ export class ServiceNowClient {
     table: string,
     params: URLSearchParams,
     count: { sent: number },
-    attempt = 0,
+    // Each kind of second try is made once, and one does not use up the other: a token can expire while a request
+    // waits for the rate limit.
+    tried: { login?: boolean; rate?: boolean } = {},
   ): Promise<{ body: { result?: unknown }; headers: Headers }> {
     if (this.paused?.rejected) {
       // A pause after a rejected login holds for the credentials that were rejected. Others end it at once:
@@ -344,9 +346,9 @@ export class ServiceNowClient {
 
     if (response.status === 401) {
       // Try again once with other credentials: those another request picked up in the meantime, or those now in the env file.
-      const fresh = attempt === 0 ? this.config.reloadAuth?.() : undefined
+      const fresh = tried.login ? undefined : this.config.reloadAuth?.()
       if (fresh && !sameAuth(fresh, sent)) this.auth = fresh
-      if (attempt === 0 && !sameAuth(this.auth, sent)) return this.send(api, table, params, count, attempt + 1)
+      if (!tried.login && !sameAuth(this.auth, sent)) return this.send(api, table, params, count, { ...tried, login: true })
 
       const error = new ServiceNowError(`${this.host} rejected the credentials (HTTP 401).`, 'auth', table, 401)
       // Back to one request at a time: an expired token must not be retried by everything in flight.
@@ -355,10 +357,10 @@ export class ServiceNowClient {
       throw error
     }
 
-    if (response.status === 429 && attempt === 0) {
+    if (response.status === 429 && !tried.rate) {
       const wait = Number(response.headers.get('retry-after'))
       await this.sleep(Number.isFinite(wait) && wait > 0 ? Math.min(wait, 5) * 1000 : 500)
-      return this.send(api, table, params, count, attempt + 1)
+      return this.send(api, table, params, count, { ...tried, rate: true })
     }
 
     let body: { result?: unknown; error?: { message?: unknown; detail?: unknown } } | undefined

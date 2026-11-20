@@ -42,6 +42,7 @@ export const DEPENDENCIES_NOT_COVERED = [
 
 export const FIELD_DEPENDENCIES_NOT_COVERED = [
   'conditions and scripts that mention the field: business rule conditions, UI policy conditions, flows, script includes',
+  'client scripts that run when a form loads or is submitted (onLoad, onSubmit): only those that run when this field changes are listed, and any client script can make the field mandatory or hide it',
   'access controls with a wildcard (table.*, *.field), which apply to the field as well',
   'reports, filters, notifications and templates that use the field',
   'reference qualifiers and calculated values of other fields that read it',
@@ -76,10 +77,11 @@ against what is actually there instead of answering from memory.
 How to use it:
 - Call sn_instance once at the start. It says which release answers and which sources this account can read.
 - Check the instance before you state a fact about tables, fields, configuration or customization.
-- With every claim, name the instance and the table and query it came from. Use the "table" and "query" the answer
-  carries. Never make up a query to cite.
-- "total" is what matched on the server before row-level access rules; "returned" is what is in the answer. "total"
-  is not the number of rows this account can see. If they differ, say so.
+- With every claim, name the instance and the table it came from, and the query where the answer carries one. Use
+  the "table" and "query" of the answer. Never make up a query to cite.
+- "total" is what matched on the server before row-level access rules; "returned" is what is in the answer. To
+  count, read "total". Fewer rows than "total" means there are more pages ("truncated", "nextOffset"), or that rows
+  are hidden from this account: a warning then says so, and you pass it on.
 - An error of kind "acl" or "blocked", a source marked not readable, or a part marked not_checked means "could not
   be checked". It never means "nothing found".
 - Every answer has "warnings". Pass them on with the result they belong to.

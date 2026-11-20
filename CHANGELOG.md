@@ -45,6 +45,9 @@ platform was measured on an instance before anything was changed; the numbers ar
 - `ref_<the table itself>.<field>` was refused only where the dictionary was fully readable.
 - A system property whose name and type both come back empty is withheld.
 - A payload reached through a reference could be searched where the dictionary was not readable.
+- Deleted records are kept whole as text (`sys_audit_delete.payload`; 41,281 on the test instance), and so are
+  archived records and linked application files. These fields are treated like the payload of a captured change:
+  cleaned of secrets, not searchable, and withheld where the record is in a closed table.
 
 ### Added
 
@@ -56,6 +59,14 @@ platform was measured on an instance before anything was changed; the numbers ar
   because not every sys_id is 32 hex digits.
 - **`sn_query` with `groupBy` says how many different values there are** (`totalGroups`), and pages through the
   groups with `offset`.
+- **`sn_upgrade_skips` says for each entry who made the captured changes to the record:** people, system
+  accounts only, or nobody. "What did people here change that the upgrade skipped" needed one `sn_origin` call per
+  entry before. `excludeErrors` leaves out the files the upgrade could not apply. `sn_dependencies` says the same
+  for each item that has a captured change (`capturedBy`).
+- `sn_schema` names each dictionary override that applies to a field, with its sys_id (`overrideRecords`), the
+  table a label comes from where a child table relabels a field (`labelFrom`), and for a field of a database
+  view its name on the table it comes from (`sourceField`). The description says what `mandatory` does not cover.
+- `sn_delta` with `peopleOnly` still counts the rows it leaves out, and `since` takes a time of day as well.
 - A word on a choice that stores numbers (`priority=High`) is refused with the list of values and labels.
 - `sn_query` says when it could not check whether business rules hide rows, whether records are archived, or
   whether the table is rotated. Until now a failed look-up was silence.
@@ -72,6 +83,30 @@ platform was measured on an instance before anything was changed; the numbers ar
   `!=NULL`, which asks for the opposite. It now comes for `NSAMEAS` as well, which leaves them out too.
 - A field that holds a secret can be asked whether it is filled also as `=NULL` and `!=NULL`.
 - A journal field read without a list of fields came back empty without a word, and could be counted by.
+- **`sn_origin` overclaimed in seven cases and abstained in four where it need not have.** It no longer says
+  "created here" for a record whose package it could not read (read from its own table because the table of
+  application files was not readable, or the entry of a system field whose table could not be looked up); it no
+  longer takes an answer without a total for a complete one; "deleted" is not said over an update row it cannot
+  see; a version from a source it does not classify counts as a possible vendor version; two records that spell
+  the same update name are not told apart by guessing; a version from an update set counts as a capture where
+  its update row is gone; and an update row without an author counts as a system account, as in `sn_delta`. It
+  now decides from a vendor version in view where the versions could not be counted, from a vendor's current
+  version where earlier versions could not be counted, and finds a field by its update name where the table of
+  application files could not be asked. It sends no request whose answer it would not use: 1 instead of 4 for a
+  record the account may not read. Checked again on the test instance: 77 of the 79 files the upgrade skipped
+  as changed are `customized`, as before, and every `unknown` in a sample of 672 has one of the known reasons.
+- `sn_dependencies` listed the choices of a parent table beside those of the table where it could not count
+  which table they belong to, listed every language of a choice when inactive ones were asked for, and listed
+  unpublished workflow versions then. It names what it does not see for a field: client scripts that run when
+  a form loads or is submitted.
+- `sn_plugins` and `sn_instance` treat an application table that is closed on the machine as "could not be
+  checked", and `sn_instance` says when it could not check for domain separation.
+- The disposition and review codes of upgrade entries are read from the instance without an exception: "not
+  reviewed" was the built-in code 1. A failure to read them is not remembered for ten minutes any more, and
+  neither is a failure to read the company code.
+- A renewed token is tried also where the request had waited for the rate limit before.
+- The warning that only installations are on the captured rows of a record applies to accounts written in
+  another case as well (`System`), as the instance compares them.
 - **`sn_dependencies` took an empty category for "nothing attached" on an instance that answers a query it cannot
   use with no rows** (`glide.invalid_query.returns_no_rows`, a setting of hardened instances). Its check that a
   condition was understood needs a row to look at. Where no row matches and that setting is on, or cannot be read,

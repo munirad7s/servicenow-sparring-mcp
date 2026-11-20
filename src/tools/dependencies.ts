@@ -6,7 +6,7 @@ import { DEPENDENCIES_NOT_COVERED, FIELD_DEPENDENCIES_NOT_COVERED } from '../lim
 import { assertTableName, fieldsInEncodedQuery, isPlainValue } from '../query.js'
 import { fail, labelOf, ok, rawOf, source, sourceShape, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { errorKind, mapLimit, READ_ONLY, type Context } from './shared.js'
+import { capturedByName, errorKind, mapLimit, READ_ONLY, type CapturedBy, type Context } from './shared.js'
 
 interface Category {
   key: string
@@ -26,6 +26,8 @@ interface Category {
   fieldField?: string
   /** Condition added when only active items are wanted. Default "active=true". */
   active?: string | null
+  /** Condition added in every case. */
+  always?: string
   /** Extra fields worth showing. */
   show?: string[]
   /** Fields that make a better name than the record's display name, joined with a dot. */
@@ -69,7 +71,8 @@ const CATEGORIES: Category[] = [
   { key: 'transformMaps', table: 'sys_transform_map', tableField: 'target_table', parents: 'never', show: ['source_table'] },
   { key: 'recordProducers', table: 'sc_cat_item_producer', tableField: 'table_name', parents: 'never', label: ['name'] },
   { key: 'flowRecordTriggers', table: 'sys_flow_record_trigger', tableField: 'table', parents: { flag: 'run_on_extended' }, label: ['name'] },
-  { key: 'workflows', table: 'wf_workflow_version', tableField: 'table', parents: 'always', active: 'published=true^active=true', label: ['name'] },
+  // Only the published version of a workflow runs. That holds whether or not inactive ones are asked for.
+  { key: 'workflows', table: 'wf_workflow_version', tableField: 'table', parents: 'always', active: 'active=true', always: 'published=true', label: ['name'] },
   { key: 'relatedLists', table: 'sys_relationship', tableField: 'basic_apply_to', parents: 'always', active: null, label: ['name'], show: ['basic_query_from'] },
   { key: 'databaseViews', table: 'sys_db_view_table', tableField: 'table', parents: 'never', label: ['view'] },
   { key: 'dictionaryOverrides', table: 'sys_dictionary_override', tableField: 'name', parents: 'always', active: null, show: ['base_table'], label: ['name', 'element'] },
@@ -110,10 +113,12 @@ const FIELD_CATEGORIES: Category[] = [
     parents: 'always',
     // A table that has choices of its own for a field does not use those of its parent.
     nearestWins: true,
-    active: 'inactive=false^language=en',
+    active: 'inactive=false',
+    // One label per choice: the English one. Without this every language would be listed, as often as it has labels.
+    always: 'language=en',
     label: ['label'],
     show: ['value'],
-    updateName: (row) => `sys_choice_${rawOf(row.name)}_${rawOf(row.element)}`,
+    updateName: (row) => (rawOf(row.name) && rawOf(row.element) ? `sys_choice_${rawOf(row.name)}_${rawOf(row.element)}` : ''),
   },
   {
     key: 'formSections',
@@ -126,7 +131,7 @@ const FIELD_CATEGORIES: Category[] = [
     unnamed: 'default view',
     show: ['sys_ui_section.caption'],
     also: ['sys_ui_section'],
-    updateName: (row) => `sys_ui_section_${rawOf(row.sys_ui_section)}`,
+    updateName: (row) => (rawOf(row.sys_ui_section) ? `sys_ui_section_${rawOf(row.sys_ui_section)}` : ''),
   },
   { key: 'listLayouts', table: 'sys_ui_list_element', tableField: 'list_id.name', fieldField: 'element', parents: 'always', active: null, label: ['list_id.view_name'], unnamed: 'default view', show: ['list_id.parent'] },
   { key: 'dependentFields', table: 'sys_dictionary', tableField: 'name', fieldField: 'dependent_on_field', parents: 'always', label: ['name', 'element'] },
@@ -141,7 +146,14 @@ const itemSchema = z.object({
   sysId: z.string(),
   definedOn: z.string().optional().describe('The inspected table or parent the item is attached to.'),
   active: z.boolean().optional(),
-  customerUpdate: z.boolean().optional().describe('true if a captured customer update exists for this item; absent if that could not be told. See sn_origin for a verdict.'),
+  customerUpdate: z
+    .boolean()
+    .optional()
+    .describe('true if a captured change exists for this item, whoever made it: an installation or an upgrade counts as well. false does not mean "delivered by the vendor": a file of an application installed from a repository has none either. Absent if it could not be told. For a verdict see sn_origin.'),
+  capturedBy: z
+    .enum(['people', 'system_accounts'])
+    .optional()
+    .describe('With customerUpdate true: "people" if a person is on any captured change of the item, "system_accounts" if only installations, upgrades and jobs are.'),
   details: z.record(z.string(), z.string()).optional(),
 })
 
@@ -165,7 +177,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
   function queryFor(category: Category, table: string, chain: string[], field: string, activeOnly: boolean): string {
     const active = activeOnly ? (category.active === undefined ? 'active=true' : category.active) : null
     const about = field && category.fieldField ? `${category.fieldField}=${field}` : null
-    const branch = (condition: string) => [condition, about, active].filter(Boolean).join('^')
+    const branch = (condition: string) => [condition, about, active, category.always].filter(Boolean).join('^')
     const parents = chain.slice(1)
     const attachedTo = category.tableField
 
@@ -178,15 +190,21 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
 
   async function readCategory(category: Category, table: string, all: string[], field: string, limit: number, activeOnly: boolean): Promise<{ result: CategoryResult; rows: Row[] }> {
     let chain = all
+    let uncounted = ''
     if (category.nearestWins && all.length > 1) {
       // Which tables of the chain have any items: the nearest of them is the one that counts.
-      const perTable = await sn.groupCount(category.table, category.tableField, queryFor(category, table, all, field, activeOnly)).catch(() => null)
+      const perTable = await sn.groupCount(category.table, category.tableField, queryFor(category, table, all, field, activeOnly)).catch((error) => {
+        uncounted = errorKind(error)
+        return null
+      })
       const nearest = perTable && all.find((name) => perTable.some((group) => group.value === name && group.count > 0))
       if (nearest) chain = [nearest]
     }
     const query = queryFor(category, table, chain, field, activeOnly)
     const empty = { table: category.table, query, total: null, returned: 0, truncated: false, items: [] }
     const notChecked = (reason: string) => ({ result: { status: 'not_checked' as const, reason, ...empty }, rows: [] })
+    // Without the count per table the items of a parent cannot be told from those that apply: both would be listed as one.
+    if (uncounted) return notChecked(`it could not be counted which table of ${all.join(', ')} the items belong to (${category.table}: ${uncounted}), and only those of the nearest one apply`)
 
     try {
       // Every field the query names. If the instance does not know one, it would have ignored that condition.
@@ -252,30 +270,6 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
     }
   }
 
-  /** Which of these update names have a captured customer update. null for a name whose lookup failed. */
-  async function capturedNames(names: string[], warnings: string[]): Promise<Map<string, boolean>> {
-    const known = new Map<string, boolean>()
-    // At most 50 names per request, and never a query longer than the address of a request should be.
-    const chunks: string[][] = [[]]
-    for (const name of new Set(names)) {
-      const last = chunks[chunks.length - 1]
-      if (last.length >= 50 || last.join(',').length + name.length > 4_000) chunks.push([name])
-      else last.push(name)
-    }
-    for (const chunk of chunks) {
-      if (!chunk.length) continue
-      try {
-        const groups = await sn.groupCount('sys_update_xml', 'name', `nameIN${chunk.join(',')}`)
-        const found = new Set(groups.filter((group) => group.count > 0).map((group) => group.value))
-        for (const name of chunk) known.set(name, found.has(name))
-      } catch (error) {
-        warnings.push(`Customer updates could not be looked up (${errorKind(error)}), so some items carry no customerUpdate flag.`)
-        break
-      }
-    }
-    return known
-  }
-
   server.registerTool(
     'sn_dependencies',
     {
@@ -290,9 +284,10 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
         'overrides, choices, the forms and lists that show it, and the fields that depend on it. Parent tables are ' +
         'included, because their logic applies to the table too; client scripts, UI policies, data policies and flow ' +
         'triggers of a parent only when they are marked to apply to child tables. Every category names the table and ' +
-        'query it came from. Each item is flagged if a captured customer update exists for it. This is not everything ' +
-        'that touches a table or a field: the answer lists what is not covered. A category that could not be read is ' +
-        'marked not_checked.',
+        'query it came from: where a category holds more items than are listed, read on with sn_query and that query. ' +
+        'Each item is flagged if a captured change exists for it, with who captured it: people, or system accounts ' +
+        'only. This is not everything that touches a table or a field: the answer lists what is not covered. A ' +
+        'category that could not be read is marked not_checked. For a table, not for a database view.',
       inputSchema: {
         table: z.string().min(1).max(80).describe('Table name, e.g. "incident".'),
         field: z.string().max(80).optional().describe('A field of the table, e.g. "category". The answer then covers what is tied to that field.'),
@@ -362,11 +357,13 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
 
         const nameOf = (category: Category, row: Row) => (category.updateName ? category.updateName(row) : rawOf(row.sys_update_name))
         const names = read.flatMap(([category, { rows }]) => rows.map((row) => nameOf(category, row))).filter(isPlainValue)
-        const captured = names.length ? await capturedNames(names, warnings) : new Map<string, boolean>()
+        const captured = names.length
+          ? await capturedByName(ctx, names, (kind) => warnings.push(`Customer updates could not be looked up (${kind}), so some items carry no customerUpdate flag.`))
+          : new Map<string, CapturedBy>()
         for (const [category, { result, rows }] of read) {
           result.items = result.items.map((item, index) => {
-            const flag = captured.get(nameOf(category, rows[index]))
-            return flag === undefined ? item : { ...item, customerUpdate: flag }
+            const who = captured.get(nameOf(category, rows[index]))
+            return who === undefined ? item : { ...item, customerUpdate: who !== 'nobody', ...(who === 'nobody' ? {} : { capturedBy: who }) }
           })
         }
 
@@ -387,7 +384,7 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
             direct: children?.total ?? null,
             descendants: descendants?.total ?? null,
             names: children?.records.map((row) => String(row.name ?? '')).filter(Boolean) ?? [],
-            truncated: children ? (children.total === null ? children.records.length === 50 : children.total > children.records.length) : false,
+            truncated: children ? (children.total === null ? children.records.length === 50 : children.total > 50) : false,
           },
           notCovered: field ? FIELD_DEPENDENCIES_NOT_COVERED : DEPENDENCIES_NOT_COVERED,
         })
