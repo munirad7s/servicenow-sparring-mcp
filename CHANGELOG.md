@@ -19,7 +19,10 @@ answer; such changes are listed under "Changed".
   66 single lines of those rules, one at a time, and running the tests. Each has a test now, among them: a child
   table and a database view are refused for the request of any tool, not only for a query the agent wrote;
   `sn_schema` and `sn_dependencies` refuse a closed table; a misspelled field of a closed child table is not
-  answered with the names that are close; a payload that names no table is withheld.
+  answered with the names that are close; a payload that names no table is withheld. A second run over 49 lines of
+  the rules for secrets, the parser and the client found eight more, among them: the value of a system property
+  behind a reference whose table cannot be read, a text search on a table whose fields are partly hidden, the
+  comparison of two payloads, and the time limit of a request.
 
 ## 0.3.3 (2026-11-20)
 

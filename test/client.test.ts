@@ -377,6 +377,16 @@ test('tables can be closed on the machine that runs the server', async () => {
   assert.equal(allowed.calls.length, 1)
 })
 
+test('every request carries a time limit', async () => {
+  let signal: unknown
+  const sn = new ServiceNowClient(config, async (_url, init) => {
+    signal = init.signal
+    return json({ result: [] })
+  })
+  await sn.query({ table: 'incident' })
+  assert.ok(signal instanceof AbortSignal)
+})
+
 test('every request is written to the audit log with the tool that asked, and nothing secret', async () => {
   const entries: AuditEntry[] = []
   const { sn } = fakeInstance([{ table: 'incident', rows: [{ number: 'INC1', short_description: 'private text' }], total: 9 }, { table: 'sys_user', status: 403 }], {}, (entry) => entries.push(entry))

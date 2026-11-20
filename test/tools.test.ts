@@ -1078,6 +1078,11 @@ test('a text search is not a way to probe a field that holds a secret', async ()
   const blind = await connect([...unreadable, { table: 'incident', rows: [{ number: 'INC1' }] }])
   assert.match((await blind.call('sn_query', { table: 'incident', query: '123TEXTQUERY321=printer' })).data.message, /could not be read completely/)
   assert.equal(blind.sentTo('incident').length, 0)
+  // The same where some of its fields are hidden from this account: one of those can be the one with the secret.
+  const hiding = dictionaryRoutes.map((route) => (route.table === 'sys_dictionary' && route.query === 'nameINincident,task' ? { ...route, total: (route.rows?.length ?? 0) + 2 } : route))
+  const halfBlind = await connect([...hiding, { table: 'incident', rows: [{ number: 'INC1' }] }])
+  assert.match((await halfBlind.call('sn_query', { table: 'incident', query: '123TEXTQUERY321=printer' })).data.message, /could not be read completely/)
+  assert.equal(halfBlind.sentTo('incident').length, 0)
   // A field whose type did not come back is judged by its name.
   const untyped = dictionaryRoutes.map((route) => (route.query === 'nameINsys_user' ? { ...route, rows: [column('sys_user', 'name'), column('sys_user', 'user_password', '')] } : route))
   const byName = await connect([...untyped, { table: 'sys_user', rows: [{ name: 'Abel' }] }])
@@ -1377,6 +1382,8 @@ test('where field types cannot be read, a secret is recognised by its name, and 
   const named = await partial.answer('sn_query', { table: 'sys_user', fields: ['name', 'user_password'] })
   assert.deepEqual(named.records, [{ name: 'Abel', user_password: '[withheld: this field holds a secret]' }])
   assert.match(named.warnings.join(' '), /name suggests a secret: user_password/)
+  // Asked for by name, a field without a type in view is said to be one: its name was all there was to go by.
+  assert.match(named.warnings.join(' '), /The types of some fields could not be read/)
   const whole = await partial.answer('sn_query', { table: 'sys_user' })
   assert.deepEqual(whole.records, [{ name: 'Abel', user_password: '[withheld: this field holds a secret]', u_api_token: '[withheld: this field holds a secret]', email: 'abel@example.org' }])
   assert.match(whole.warnings.join(' '), /recognised by its name only/)
@@ -1587,6 +1594,48 @@ test('a secret is taken out of markup that sits inside a CDATA section too', () 
   const two = scrubSecrets('<sys_properties><name>a</name><type>password2</type><value>one</value></sys_properties><sys_properties><name>b</name><type>string</type><value>two</value></sys_properties>')
   assert.equal(two.withheld, 1)
   assert.match(two.text, /<value>\[withheld\]<\/value>.*<value>two<\/value>/)
+})
+
+test('the value of a system property is withheld behind a reference whose table cannot be read', async () => {
+  // The dictionary of the properties is not readable, so nothing says what "u_property.value" is. A path that ends
+  // in ".value" can be the value of a property, and some properties hold secrets.
+  const world: Route[] = [
+    { table: 'sys_db_object', query: 'name=u_setting', rows: [tableRow('u_setting', 'Setting')] },
+    { table: 'sys_dictionary', query: 'nameINu_setting', rows: [column('u_setting', 'u_name'), column('u_setting', 'u_property', 'reference', 'sys_properties')] },
+    { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property')] },
+    { table: 'sys_dictionary', query: 'nameINsys_properties', status: 403 },
+    ...dictionaryRoutes,
+    { table: 'u_setting', rows: [{ u_name: 'mail', 'u_property.value': 'ciphertext' }] },
+  ]
+  const { answer, call } = await connect(world)
+  const data = await answer('sn_query', { table: 'u_setting', fields: ['u_name', 'u_property.value'] })
+  assert.deepEqual(data.records, [{ u_name: 'mail', 'u_property.value': '[withheld: this field holds a secret]' }])
+  // It cannot be compared either: the type of the property, which would say whether it is a secret, is not at hand.
+  const probing = await call('sn_query', { table: 'u_setting', query: 'u_property.valueSTARTSWITHa', fields: ['u_name'] })
+  assert.equal(probing.data.error, 'validation')
+  assert.match(probing.data.message, /is the value of a system property/)
+})
+
+test('the comparison of two payloads is not passed on', async () => {
+  const world: Route[] = [
+    { table: 'sys_db_object', query: 'name=sys_update_preview_xml', rows: [tableRow('sys_update_preview_xml', 'Preview')] },
+    { table: 'sys_dictionary', query: 'nameINsys_update_preview_xml', rows: [column('sys_update_preview_xml', 'name'), column('sys_update_preview_xml', 'payload_diff')] },
+    ...dictionaryRoutes,
+    { table: 'sys_update_preview_xml', rows: [{ name: NAME, payload_diff: '<diff><old><user_password>one</user_password></old><new><user_password>two</user_password></new></diff>' }] },
+  ]
+  const { answer } = await connect(world)
+  const data = await answer('sn_query', { table: 'sys_update_preview_xml', fields: ['name', 'payload_diff'] })
+  // It is markup around the content of both: cleaning it like a payload would not be enough to rely on.
+  assert.equal(data.records[0].payload_diff, '[withheld: the comparison of two payloads is not passed on]')
+  assert.match(data.warnings.join(' '), /The comparison of two payloads \(payload_diff\) is not passed on/)
+})
+
+test('only an element that holds text and is closed is taken for a field', () => {
+  // A field of a record is a leaf. What holds more than text, or is never closed, is left as it stands, and so is
+  // everything around it.
+  for (const text of ['<password>abc<br/>def</password>', '<password>abc<b>d</b>', 'ab</password><password><![CDATA[zzz', '<token>']) {
+    assert.deepEqual(scrubSecrets(text), { text, withheld: 0 }, text)
+  }
 })
 
 test('the tables of the records a payload carries are all found', () => {

@@ -399,3 +399,20 @@ test('a login the instance rejects is passed on as that, and one unusable answer
   // "ref_<the table itself>." is refused by its name alone, before anything is read.
   assert.match(unreadable.unknown[0].reason, /names the table itself/)
 })
+
+test('a view whose list of tables is partly hidden is not taken for a smaller view', async () => {
+  // A table that is joined and not seen would be read without any of the checks that go by the tables of a view.
+  const hidden: Array<[string, Partial<Route>]> = [
+    ['a hidden row', { rows: [{ table: 'incident', variable_prefix: 'inc' }, null] }],
+    ['no total', { rows: [{ table: 'incident', variable_prefix: 'inc' }], noTotal: true }],
+  ]
+  for (const [name, members] of hidden) {
+    const { sn } = fakeInstance([
+      { table: 'sys_db_object', query: 'name=incident_sla', rows: [] },
+      { table: 'sys_db_view', query: 'name=incident_sla', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_sla', label: 'Incident SLA' }] },
+      { table: 'sys_db_view_table', ...members },
+      ...dictionaryRoutes,
+    ])
+    await assert.rejects(new Dictionary(sn).table('incident_sla'), (error: unknown) => error instanceof ServiceNowError && error.kind === 'acl', name)
+  }
+})
