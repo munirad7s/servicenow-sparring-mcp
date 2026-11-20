@@ -3,6 +3,16 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## Unreleased
+
+### Security
+
+- The rows of closed child tables are left out of a parent table by a condition on the class of a row. An
+  instance that drops that condition, for an account that may not filter by the field, would answer with those
+  rows and without a sign. 0.3.2 asked for proof on database views only. Now a table and a reference are asked
+  the same question first: rows whose class is empty and filled at once, which has to match nothing. Not seen on
+  an instance: the test account is an administrator, and it passes.
+
 ## 0.3.3 (2026-11-20)
 
 ### Security

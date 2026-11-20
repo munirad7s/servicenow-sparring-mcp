@@ -57,6 +57,7 @@ const ERRORS: Record<number, { message: string; detail: string }> = {
  *
  * - a field named in sysparm_fields that a row does not have is left out;
  * - sysparm_display_value=all wraps every value as {value, display_value};
+ * - a query that asks for a field to be empty and filled at once matches no row;
  * - a table without a route answers "Invalid table", as a real instance does.
  */
 export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig> = {}, audit?: (entry: AuditEntry) => void) {
@@ -68,16 +69,20 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     const query = parsed.searchParams.get('sysparm_query') ?? ''
     calls.push({ method: String(init.method), origin: parsed.origin, pathname: parsed.pathname, body: init.body, api, table, query, params: parsed.searchParams, headers: init.headers as Record<string, string> })
 
-    const route = routes.find(
-      (candidate) =>
-        candidate.table === table &&
-        (candidate.api ?? 'table') === api &&
-        (candidate.query === undefined || query.includes(candidate.query)) &&
-        (candidate.exact === undefined || query === candidate.exact) &&
-        (candidate.groupBy === undefined || parsed.searchParams.get('sysparm_group_by') === candidate.groupBy),
-    )
+    const fits = (candidate: Route) =>
+      candidate.table === table &&
+      (candidate.api ?? 'table') === api &&
+      (candidate.query === undefined || query.includes(candidate.query)) &&
+      (candidate.exact === undefined || query === candidate.exact) &&
+      (candidate.groupBy === undefined || parsed.searchParams.get('sysparm_group_by') === candidate.groupBy)
     const json = (body: unknown, status: number, headers: Record<string, string> = {}) =>
       new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', ...headers } })
+
+    // A field that is empty and filled at once: no row is. An instance that applies the query answers with none,
+    // whatever the table holds. A test that wants an instance which drops the condition says so with a route for
+    // exactly this query.
+    const impossible = /^([a-z0-9_.]+)ISEMPTY\^\1ISNOTEMPTY$/.test(query)
+    const route = impossible ? (routes.find((candidate) => candidate.exact === query && fits(candidate)) ?? (routes.some((candidate) => candidate.table === table) ? { table, rows: [] } : undefined)) : routes.find(fits)
 
     if (!route) return json({ error: { message: `Invalid table ${table}`, detail: null }, status: 'failure' }, 400)
     const status = route.status ?? 200

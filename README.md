@@ -148,8 +148,9 @@ provider, the data leaves your network. Five things limit what can go that way:
   - What the instance lists neither as a table nor as a database view counts as closed, and so does a database
     view that joins another view: nothing says whose rows it holds.
   - A parent table answers without the rows of its closed child tables. The same holds where a query walks a
-    reference into such a parent, or reads it through a database view. A view is first asked a question that has
-    to match nothing; where it matches, the instance does not apply the condition there, and the view is not read.
+    reference into such a parent, or reads it through a database view. Those rows are left out by a condition on
+    the class of a row, and an instance that drops that condition would answer with them. So it is first asked
+    for rows whose class is empty and filled at once: where that matches anything, nothing is read.
   - The name behind a reference is left out where the record can be a row of a closed table: the reference points
     into one, or into a table that has one below it, or it cannot be told where it points. This goes for single
     references, lists and the labels of counted groups. Such a reference can be compared with a sys_id, but not

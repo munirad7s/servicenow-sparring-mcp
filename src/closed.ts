@@ -118,19 +118,24 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
   }
 
   /**
-   * Whether the instance applies a condition on a field of a database view. A view can list the fields it shows of
-   * a table. Measured on one instance, on views whose list leaves the class out: a condition on
-   * "<prefix>_sys_class_name" was applied all the same. That is not taken for granted. A query that asks for the
-   * field to be empty and filled at once has to match nothing; where it matches, the instance drops conditions on
-   * that field, and the rows of closed child tables could not be left out.
+   * Whether the instance applies a condition on a class field for this account. The rows of closed child tables
+   * are left out by such a condition, and an instance that drops it answers with them, without a sign. It can drop
+   * one: for a field it does not know, for a view that lists the fields it shows (measured: applied all the same
+   * on one instance), or for an account that may not filter by the field. So the instance is asked once per table
+   * and field for rows whose class is empty and filled at once, which has to match nothing.
    */
   const applied = new Set<string>()
-  async function appliesCondition(view: string, field: string): Promise<boolean> {
-    if (applied.has(`${view}.${field}`)) return true
-    const page = await sn.query({ table: view, query: `${field}ISEMPTY^${field}ISNOTEMPTY`, fields: [field], limit: 1, trusted: true }).catch(unless(null))
+  async function appliesCondition(table: string, field: string): Promise<boolean> {
+    if (applied.has(`${table}.${field}`)) return true
+    const page = await sn.query({ table, query: `${field}ISEMPTY^${field}ISNOTEMPTY`, fields: ['sys_id'], limit: 1, trusted: true }).catch(unless(null))
     if (!page || page.total !== 0 || page.records.length) return false
-    applied.add(`${view}.${field}`)
+    applied.add(`${table}.${field}`)
     return true
+  }
+  /** The condition, after the instance has shown that it applies one on that field. */
+  async function proven(table: string, field: string, condition: string | null, what: string): Promise<string | null> {
+    if (!condition || (await appliesCondition(table, field))) return condition
+    throw blocked(`${what}, and it could not be established that the instance applies a condition on "${field}" for this account: the rows of those tables could not be left out.`, table)
   }
 
   return {
@@ -155,7 +160,8 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
         }
         // A reference into a parent table reaches the rows of its closed child tables as well.
         for (const [prefix, target] of check.walks) {
-          const condition = await classCondition(target, `${prefix}.sys_class_name`)
+          const field = `${prefix}.sys_class_name`
+          const condition = await proven(table, field, await classCondition(target, field), `"${prefix}" points into "${target}", which has closed tables below it`)
           if (condition) conditions.push(condition)
         }
       }
@@ -171,15 +177,11 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
             throw blocked(`"${table}" is a database view that joins "${member.table}", which is ${joined ? 'a view itself' : 'not known as a table'}: with tables closed on this machine it cannot be established whose rows it holds.`, table)
           }
           const field = `${member.prefix}_sys_class_name`
-          const condition = await classCondition(member.table, field)
-          if (!condition) continue
-          if (!(await appliesCondition(table, field))) {
-            throw blocked(`"${table}" is a database view that joins "${member.table}", which has closed tables below it, and it could not be established that the instance applies a condition on "${field}": the rows of those tables could not be left out.`, table)
-          }
-          conditions.push(condition)
+          const condition = await proven(table, field, await classCondition(member.table, field), `"${table}" is a database view that joins "${member.table}", which has closed tables below it`)
+          if (condition) conditions.push(condition)
         }
       } else {
-        const condition = await classCondition(table, 'sys_class_name')
+        const condition = await proven(table, 'sys_class_name', await classCondition(table, 'sys_class_name'), `"${table}" has closed tables below it`)
         if (condition) conditions.push(condition)
       }
       if (!conditions.length) return query
