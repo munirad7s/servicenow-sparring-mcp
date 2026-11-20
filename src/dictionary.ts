@@ -95,6 +95,7 @@ export class Dictionary {
   private readonly ruleCounts = new Map<string, Entry<{ count: number; query: string } | null>>()
   private readonly archiveCounts = new Map<string, Entry<{ count: number; query: string } | null>>()
   private readonly rotations = new Map<string, Entry<{ rotations: number; days: number } | null>>()
+  private readonly settings = new Map<string, Entry<boolean | null>>()
 
   constructor(
     private readonly sn: ServiceNowClient,
@@ -300,6 +301,20 @@ export class Dictionary {
       // The answer checks its own query: a row without the field means the instance does not know it and ignored the condition.
       if (page.total === null || (page.records[0] && !('action_query' in page.records[0]))) return null
       return { count: page.total, query }
+    })
+  }
+
+  /**
+   * Whether the instance answers a query it cannot use with no rows (glide.invalid_query.returns_no_rows), where it
+   * would otherwise drop the condition and answer with every row. A hardened instance has this on. Then an empty
+   * answer no longer shows that a condition was understood. null if the property could not be read.
+   */
+  emptyOnInvalidQuery(): Promise<boolean | null> {
+    return this.cached(this.settings, 'emptyOnInvalidQuery', async () => {
+      const name = 'glide.invalid_query.returns_no_rows'
+      const page = await this.sn.query<Record<string, string>>({ table: 'sys_properties', query: `name=${name}`, fields: ['name', 'value'], limit: 1 }).catch(() => null)
+      if (!page || (page.records.length === 0 && (page.total ?? 0) > 0)) return null
+      return page.records.find((row) => row.name === name)?.value === 'true'
     })
   }
 

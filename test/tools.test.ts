@@ -2018,6 +2018,32 @@ test('sn_dependencies with a field: the choices of the nearest table count, and 
   assert.match(sentTo('sys_update_xml', 'stats')[0].query, new RegExp(`^nameIN(sys_choice_incident_state,sys_ui_section_${section}|sys_ui_section_${section},sys_choice_incident_state)$`))
 })
 
+test('sn_dependencies does not take an empty answer for "none" on an instance that answers unusable queries with nothing', async () => {
+  // A hardened instance: glide.invalid_query.returns_no_rows is on. A condition on a field this release does not
+  // have then gives no rows, where it would otherwise give all of them and so betray itself.
+  const hardened: Route[] = [
+    { table: 'sys_properties', query: 'name=glide.invalid_query.returns_no_rows', rows: [{ name: 'glide.invalid_query.returns_no_rows', value: 'true' }] },
+    { table: 'sys_db_object', query: 'name=sys_script_client', rows: [tableRow('sys_script_client', 'Client Script')] },
+    { table: 'sys_dictionary', query: 'nameINsys_script_client', rows: [column('sys_script_client', 'table'), column('sys_script_client', 'active', 'boolean')] },
+    { table: 'sys_db_object', query: 'name=sys_script', rows: [tableRow('sys_script', 'Business Rule')] },
+    { table: 'sys_dictionary', query: 'nameINsys_script', rows: [column('sys_script', 'collection'), column('sys_script', 'active', 'boolean')] },
+    { table: 'sys_script_client', rows: [] },
+    { table: 'sys_script', rows: [] },
+    ...dictionaryRoutes,
+  ]
+  const { answer } = await connect(hardened)
+  const data = await answer('sn_dependencies', { table: 'incident', categories: ['clientScripts', 'businessRules'] })
+  // The flag that passes a client script down to child tables is not a field here: the zero says nothing.
+  assert.equal(data.categories.clientScripts.status, 'not_checked')
+  assert.match(data.categories.clientScripts.reason, /has no field applies_extended on this instance, and this instance answers a query it cannot use with no rows/)
+  // Every field of this condition exists: here the zero is a zero.
+  assert.deepEqual({ status: data.categories.businessRules.status, total: data.categories.businessRules.total }, { status: 'checked', total: 0 })
+
+  // The usual instance drops such a condition and answers with every row: an empty answer there was understood.
+  const usual = await connect(hardened.slice(1))
+  assert.equal((await usual.answer('sn_dependencies', { table: 'incident', categories: ['clientScripts'] })).categories.clientScripts.status, 'checked')
+})
+
 test('sn_dependencies says so when some rows of a category are hidden', async () => {
   const rule = { sys_id: 'r1', sys_name: 'Example rule', sys_update_name: 'sys_script_r1', collection: 'incident', active: 'true' }
   const { answer } = await connect([{ table: 'sys_script', rows: [rule, null, null] }, stats('sys_update_xml', {}), ...dictionaryRoutes])

@@ -207,6 +207,14 @@ export function registerDependenciesTool(server: McpServer, ctx: Context) {
         if (missing.length) return notChecked(`"${category.table}" has no field ${missing.join(', ')} on this instance, so the condition would have been ignored`)
       } else if ((page.total ?? 0) > 0) {
         return notChecked(`${page.total} row(s) match, but none is visible to this account`)
+      } else if ((await dict.emptyOnInvalidQuery()) !== false) {
+        // No row to check the query against, and this instance answers a query it cannot use with no rows too
+        // (or does not say whether it does): the fields of the condition are looked up in the dictionary instead.
+        const check = await dict.checkFields(category.table, required)
+        if (check.unknown.length) {
+          return notChecked(`"${category.table}" has no field ${check.unknown.map((item) => item.field).join(', ')} on this instance, and this instance answers a query it cannot use with no rows`)
+        }
+        if (check.status !== 'checked') return notChecked('no row matched, and it could not be verified that the instance understood the query: it answers a query it cannot use with no rows')
       }
       // A field to name the items by that the instance does not know: then an empty name says nothing, and no name is made up for it.
       const named = (category.label ?? []).every((field) => !first || field in first)

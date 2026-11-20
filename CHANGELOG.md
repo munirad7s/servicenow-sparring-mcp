@@ -3,6 +3,15 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## 0.3.2 (2026-11-20)
+
+### Fixed
+
+- **`sn_dependencies` took an empty category for "nothing attached" on an instance that answers a query it cannot
+  use with no rows** (`glide.invalid_query.returns_no_rows`, a setting of hardened instances). Its check that a
+  condition was understood needs a row to look at. Where no row matches and that setting is on, or cannot be read,
+  the fields of the condition are looked up in the dictionary instead.
+
 ## 0.3.1 (2026-11-20)
 
 ### Security

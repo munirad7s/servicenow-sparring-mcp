@@ -174,6 +174,8 @@ export const dictionaryRoutes: Route[] = [
   },
   { table: 'sys_dictionary_override', rows: [] },
   { table: 'sys_documentation', rows: [] },
+  // Not set, as on most instances: a query the instance cannot use is answered with every row.
+  { table: 'sys_properties', query: 'name=glide.invalid_query.returns_no_rows', rows: [] },
   {
     table: 'sys_choice',
     query: 'element=state',
