@@ -21,6 +21,13 @@ export const SECRET_NOTE = '[withheld: this field holds a secret]'
 /** Where the type of a field cannot be read, its name is the only sign left. */
 export const LOOKS_SECRET = /passw(or)?d|passphrase|secret|token|credential|private_?key|api_?key/i
 
+/**
+ * Comments, work notes and the like. Their entries are stored in sys_journal_field, not in the record. Measured: the
+ * field comes back empty unless display values are asked for, "is empty" and "is not empty" on it return the same
+ * rows, and LIKE on it also finds text of the record's other journal fields.
+ */
+export const JOURNAL_TYPES = new Set(['journal', 'journal_input', 'journal_list'])
+
 /** Operators that only ask whether a field is filled. They say nothing about what it holds. */
 const ASKS_IF_FILLED = new Set(['ISEMPTY', 'ISNOTEMPTY', 'ISEMPTYSTRING', 'ANYTHING'])
 /**
@@ -123,6 +130,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   }
 
   const sent = await keepSecretsOutOfReach(ctx, table, query, parsed, check.resolved, warnings)
+  refuseJournalConditions(table, parsed, check.resolved)
   warnAboutEmptyFields(parsed, check.resolved, warnings)
   await refuseChoiceLabels(ctx, table, parsed, check.resolved, warnings)
 
@@ -231,6 +239,20 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
       'were left out of it, so that no secret can be found out by trying. The total does not count them.',
   )
   return withCondition(query, NO_SECRET_PROPERTIES)
+}
+
+/** A condition on a journal field is applied, but not as written. The entries themselves can be queried exactly. */
+function refuseJournalConditions(table: string, parsed: ParsedQuery, resolved: Map<string, Column>): void {
+  const used = [...parsed.conditions.flatMap(({ field, second }) => (second ? [field, second] : [field])), ...parsed.sorts]
+  const journal = used.find((field) => JOURNAL_TYPES.has(resolved.get(field)?.type ?? ''))
+  if (!journal) return
+  const element = journal.split('.').at(-1)
+  throw validation(
+    `"${journal}" is a journal field. Its entries are stored in the table sys_journal_field, and a condition on the field itself does not do what it says: ` +
+      'measured, "is empty" and "is not empty" return the same rows, and LIKE also finds text of the other journal fields of a record. ' +
+      `Query sys_journal_field instead, for example element=${element}^valueLIKE<text>: "element_id" is the sys_id of the record, "name" its table. Nothing was sent.`,
+    table,
+  )
 }
 
 /** Measured: "is not" leaves out the rows where the field is empty. An agent counting "everything except X" misses them. */

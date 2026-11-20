@@ -17,6 +17,10 @@ answer; such changes are listed under "Changed".
 
 ### Fixed
 
+- **A condition on a journal field was sent, and a journal field read without display values came back empty
+  without a word.** Measured: `work_notesISEMPTY` and `work_notesISNOTEMPTY` return the same rows, and
+  `work_notesLIKEa` finds more incidents than there are work notes. Such a condition is refused, with the query on
+  `sys_journal_field` that answers the question exactly. An empty journal field in an answer is explained.
 - When the instance refuses a request because of one field in it, the hint said the table could not be read.
   Measured: the Aggregate API refuses to count `sys_metadata` by `sys_class_name` with "Field(s) present in the
   query do not have permission to be read", while the table and the same field in a condition are readable. The

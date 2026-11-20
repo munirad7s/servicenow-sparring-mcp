@@ -61,6 +61,7 @@ return no rows instead of all rows, though not in every case. `sn_instance` repo
 | `SAMEAS` with a unit it does not know | compares the exact values instead | refuses units other than `year`, `month`, `week`, `day`, `hour` |
 | `GT_FIELD` with `@day` behind the field | answers with a different count than without | refuses: these operators take a plain field |
 | `^OR` in front of a text search | applies something, but not an "or" | refuses |
+| A condition on a journal field such as `work_notes` or `comments` | does not look at that field: `work_notesISEMPTY` and `work_notesISNOTEMPTY` both returned the same 36 of 82 incidents, and `work_notesLIKEa` returned 34 incidents although only 24 work notes exist | refuses, and names the exact source: `sys_journal_field` with `element=work_notes^valueLIKE<text>` |
 | `!=`, `NOT IN`, `NOT LIKE` | leaves out the rows where the field is empty: of 82 incidents, 33 without an assignee, `assigned_to!=<sys_id nobody has>` returns 49 | sends it, with a warning that names `^OR<field>ISEMPTY` |
 
 ## Runs script on the instance
@@ -108,6 +109,9 @@ Also measured:
 - `=` without a value is applied as "is empty", and `!=` without a value as "is not empty", on text, reference,
   number, date and boolean fields alike.
 - A condition written behind an `ORDERBY` is applied.
+- A journal field comes back empty unless display values are asked for: the stored value of `work_notes` had
+  length 0 where its display value had 1,020 characters. The entries are rows of `sys_journal_field`. The server
+  says so when such a field is read without `displayValue`.
 - A date and time in a condition is compared as UTC, not in the time zone of the account. With an account seven
   hours behind UTC, `sys_created_on=<value>` matched a record with its stored value and not with the value the
   list shows. The server returns the stored UTC value of a timestamp for that reason.

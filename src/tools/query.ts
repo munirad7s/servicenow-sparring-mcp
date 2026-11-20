@@ -6,7 +6,7 @@ import { validation } from '../errors.js'
 import { assertTableName } from '../query.js'
 import { clip, fail, listing, listShape, ok, rawOf, rowSchema, source, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { explainEmpty, guardFields, LOOKS_SECRET, propertyValueFields, READ_ONLY, SECRET_NOTE, SECRET_TYPES, type Context, type Guard } from './shared.js'
+import { explainEmpty, guardFields, JOURNAL_TYPES, LOOKS_SECRET, propertyValueFields, READ_ONLY, SECRET_NOTE, SECRET_TYPES, type Context, type Guard } from './shared.js'
 
 /** System properties of these types hold credentials. Their value is never passed on. */
 const SECRET_PROPERTY_TYPES = new Set(['password', 'password2'])
@@ -171,7 +171,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         displayValue: z
           .boolean()
           .default(false)
-          .describe('true adds display values: a reference or choice comes back as {value, display}.'),
+          .describe('true adds display values: a reference or choice comes back as {value, display}. Needed to read journal fields such as comments and work_notes.'),
       },
       outputSchema: {
         ...listShape,
@@ -210,6 +210,13 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
 
         const { known, complete } = await describeFields(table, fields, guard)
         const rows = await withhold(table, displayValue ? page.records.map(tidy) : page.records, known, complete, warnings)
+        const journals = displayValue ? [] : (fields ?? []).filter((field) => JOURNAL_TYPES.has(known.get(field)?.type ?? ''))
+        if (journals.length) {
+          warnings.push(
+            `${journals.join(', ')}: a journal field comes back empty unless displayValue is true. An empty value here does not mean that nothing was written. ` +
+              'The single entries, with author and time, are in sys_journal_field.',
+          )
+        }
         for (const field of readAlong) rows.forEach((row) => delete row[field])
 
         if (page.total === 0 && guard.parsed.conditions.length) {

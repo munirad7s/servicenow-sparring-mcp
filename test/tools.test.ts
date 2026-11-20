@@ -364,6 +364,31 @@ test('a closed table gives away no names through a list of references, an unknow
   assert.match(all.warnings.join(' '), /could not be told which table these fields point to, so their display values were left out: caller_id, watch_list/)
 })
 
+test('journal fields: a condition on one is refused, and an empty value is explained', async () => {
+  // Measured: the entries are in sys_journal_field. "Is empty" and "is not empty" on the field return the same rows.
+  const withNotes: Route[] = [
+    { table: 'sys_dictionary', query: 'nameINincident,task', rows: [column('task', 'number'), column('task', 'work_notes', 'journal_input'), column('task', 'comments_and_work_notes', 'journal_list')] },
+    ...dictionaryRoutes,
+    { table: 'incident', rows: [{ number: 'INC1', work_notes: labelled('', '2026-03-01 10:00:00 - Abel (Work notes)\nRestarted the service') }] },
+  ]
+  const { answer, call, sentTo } = await connect(withNotes)
+
+  for (const query of ['work_notesISEMPTY', 'work_notesISNOTEMPTY', 'work_notesLIKErestart', 'ORDERBYwork_notes', 'comments_and_work_notesLIKEx']) {
+    const { data } = await call('sn_query', { table: 'incident', query, fields: ['number'] })
+    assert.equal(data.error, 'validation', query)
+    assert.match(data.message, /is a journal field.*Query sys_journal_field instead, for example element=(work_notes|comments_and_work_notes)\^valueLIKE/, query)
+  }
+  assert.equal(sentTo('incident').length, 0)
+
+  const empty = await answer('sn_query', { table: 'incident', fields: ['number', 'work_notes'] })
+  assert.deepEqual(empty.records, [{ number: 'INC1', work_notes: '' }])
+  assert.match(empty.warnings.join(' '), /work_notes: a journal field comes back empty unless displayValue is true/)
+
+  const shown = await answer('sn_query', { table: 'incident', fields: ['number', 'work_notes'], displayValue: true })
+  assert.match(shown.records[0].work_notes.display, /Restarted the service/)
+  assert.deepEqual(shown.warnings, [])
+})
+
 test('a field to count by that cannot be verified is not sent', async () => {
   // No dictionary, and no visible row to check the name against: an ignored field would give one group of all rows.
   const { call, sentTo } = await connect([{ table: 'sys_db_object', status: 403 }, { table: 'incident', rows: [null], total: 35 }, stats('incident', { '': 35 })])
