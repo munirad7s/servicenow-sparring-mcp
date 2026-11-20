@@ -288,7 +288,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         for (const field of readAlong) rows.forEach((row) => delete row[field])
 
         if (page.total === 0 && guard.parsed.conditions.length) {
-          warnings.push(...(await explainEmpty(ctx, table, guard).catch(() => [])))
+          warnings.push(...(await explainEmpty(ctx, guard).catch(() => [])))
         }
         await warnAboutQueryRules(table, warnings)
 

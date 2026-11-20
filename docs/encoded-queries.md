@@ -148,4 +148,6 @@ dot-walk, in a sort, and as the second field of a comparison. `IN_HIERARCHY` wit
 strength of its documentation only.
 
 The refusal of a choice label looks at the labels, in every language the instance has, of fields of the queried
-table, and of fields a database view takes from its tables. A field reached by a dot-walk is not checked, and the answer says so.
+table, of fields a database view takes from its tables, and of fields reached by a dot-walk. For a dot-walk the list
+is the one of the table the reference points to: a child table of it can carry a list of its own, which is not
+looked at. Where a list cannot be read, the answer says that the values were not checked.

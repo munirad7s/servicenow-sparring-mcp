@@ -5,6 +5,14 @@ answer; such changes are listed under "Changed".
 
 ## 0.3.2 (2026-11-20)
 
+### Added
+
+- **A choice label is refused behind a dot-walk too.** `parent_incident.category=Inquiry / Help` was answered with
+  0 rows and a note that the values "could not be checked", and so was every correct query of that shape. The
+  values are now compared with the choice list of the table the reference points to: a label is refused with the
+  stored value to write, a stored value passes without a warning, and an unknown value is explained when nothing
+  matches.
+
 ### Fixed
 
 - **`sn_dependencies` took an empty category for "nothing attached" on an instance that answers a query it cannot

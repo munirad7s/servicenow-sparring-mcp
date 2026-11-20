@@ -1,5 +1,5 @@
 import type { Row, ServiceNowClient } from '../client.js'
-import type { Column, Dictionary } from '../dictionary.js'
+import type { Column, Dictionary, FieldCheck } from '../dictionary.js'
 import { quoteInstanceText, ServiceNowError, validation } from '../errors.js'
 import { assertFieldPath, isTableName, parseEncodedQuery, withCondition, type ParsedQuery } from '../query.js'
 
@@ -173,6 +173,8 @@ export interface Guard {
   parsed: ParsedQuery
   /** Dictionary entries of the verified paths. Empty if the dictionary could not be used. */
   resolved: Map<string, Column>
+  /** The table and field each verified path takes its values from. */
+  owners: FieldCheck['owners']
   warnings: string[]
 }
 
@@ -204,7 +206,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
     warnings.push('The query contains "^^". ServiceNow reads that as a literal ^ inside a value, not as a separator between conditions.')
   }
 
-  if (!paths.length && !ctx.sn.restricted) return { fieldCheck: 'not needed: the call names no fields', query, parsed, resolved: new Map(), warnings }
+  if (!paths.length && !ctx.sn.restricted) return { fieldCheck: 'not needed: the call names no fields', query, parsed, resolved: new Map(), owners: new Map(), warnings }
 
   const check = await ctx.dict.checkFields(table, paths)
 
@@ -254,12 +256,12 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   }
   refuseJournalConditions(table, parsed, check.resolved)
   warnAboutEmptyFields(parsed, check.resolved, warnings)
-  await refuseChoiceLabels(ctx, table, parsed, check.resolved, warnings)
+  await refuseChoiceLabels(ctx, table, parsed, check, warnings)
   refuseValuesOfTheWrongKind(table, parsed, check.resolved)
 
   if (check.status === 'checked') {
     const fieldCheck = paths.length ? 'all field names verified against sys_dictionary' : 'not needed: the call names no fields'
-    return { fieldCheck, query: sent, parsed, resolved: check.resolved, warnings }
+    return { fieldCheck, query: sent, parsed, resolved: check.resolved, owners: check.owners, warnings }
   }
 
   // Not every name could be checked against the dictionary. What it did resolve was still checked for choice labels.
@@ -282,11 +284,11 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
         table,
       )
     }
-    return { fieldCheck: `field names verified against a row of the table, because ${why}`, query: sent, parsed, resolved: check.resolved, warnings }
+    return { fieldCheck: `field names verified against a row of the table, because ${why}`, query: sent, parsed, resolved: check.resolved, owners: check.owners, warnings }
   }
 
   if (probe.total === 0) {
-    return { fieldCheck: `not possible: ${why}, and the table has no rows to check against. An empty table answers every query with 0 rows.`, query: sent, parsed, resolved: check.resolved, warnings }
+    return { fieldCheck: `not possible: ${why}, and the table has no rows to check against. An empty table answers every query with 0 rows.`, query: sent, parsed, resolved: check.resolved, owners: check.owners, warnings }
   }
   // An ignored condition answers unfiltered, and an ignored field to count by answers with one group of all rows.
   if (parsed.fields.length || groupBy) {
@@ -297,7 +299,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
       table,
     )
   }
-  return { fieldCheck: `not possible: ${why}, and no row of the table is visible to check against`, query: sent, parsed, resolved: check.resolved, warnings }
+  return { fieldCheck: `not possible: ${why}, and no row of the table is visible to check against`, query: sent, parsed, resolved: check.resolved, owners: check.owners, warnings }
 }
 
 /**
@@ -490,19 +492,17 @@ const COMPARES_VALUES = new Set(['=', '!=', 'IN', 'NOT IN'])
  * in whatever language the instance has one, the query is refused and the stored
  * value is named.
  */
-async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQuery, resolved: Map<string, Column>, warnings: string[]): Promise<void> {
+async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQuery, check: FieldCheck, warnings: string[]): Promise<void> {
   for (const { field, operator, value } of parsed.conditions) {
-    const column = resolved.get(field)
-    if (!column?.choice || !COMPARES_VALUES.has(operator)) continue
+    const column = check.resolved.get(field)
+    const owner = check.owners.get(field)
+    if (!column?.choice || !owner || !COMPARES_VALUES.has(operator)) continue
 
-    // A field of a database view takes its choices from the table it comes from. A dot-walked field belongs to a
-    // table that is not known here, and its choices can differ per child table: those are not looked up.
-    const walked = field.includes('.')
-    const choices = walked
-      ? null
-      : await (column.sourceField ? ctx.dict.choices(column.definedOn, column.sourceField) : ctx.dict.choices(table, field)).catch(() => null)
+    // The list of the table the field belongs to: for a dot-walked field the table the walk ends on, for a field
+    // of a database view the table it comes from.
+    const choices = await ctx.dict.choices(owner.table, owner.field).catch(() => null)
     if (!choices) {
-      warnings.push(`"${field}" is a choice field, and its values could not be checked${walked ? '' : ' (sys_choice is not readable)'}. A label in place of the stored value would match nothing.`)
+      warnings.push(`"${field}" is a choice field, and its values could not be checked (the choice list could not be read). A label in place of the stored value would match nothing.`)
       continue
     }
     if (!choices.length) continue
@@ -526,7 +526,7 @@ async function refuseChoiceLabels(ctx: Context, table: string, parsed: ParsedQue
  * Reasons why a query that matched nothing may have matched nothing for the
  * wrong reason. Called only for an empty result.
  */
-export async function explainEmpty(ctx: Context, table: string, guard: Guard): Promise<string[]> {
+export async function explainEmpty(ctx: Context, guard: Guard): Promise<string[]> {
   const notes: string[] = []
   for (const { field, operator, value } of guard.parsed.conditions) {
     const column = guard.resolved.get(field)
@@ -541,9 +541,9 @@ export async function explainEmpty(ctx: Context, table: string, guard: Guard): P
             `that can be why nothing matched. To match by name use ${field}.<field>=… or ${field}LIKE….`,
         )
       }
-    } else if (column.choice && !field.includes('.') && given.length) {
-      // A field of a database view takes its choices from the table it comes from.
-      const choices = await (column.sourceField ? ctx.dict.choices(column.definedOn, column.sourceField) : ctx.dict.choices(table, field)).catch(() => [])
+    } else if (column.choice && given.length) {
+      const owner = guard.owners.get(field)
+      const choices = owner ? await ctx.dict.choices(owner.table, owner.field).catch(() => []) : []
       const stored = new Set(choices.map((choice) => choice.value.toLowerCase()))
       const odd = given.find((item) => !stored.has(item.toLowerCase()))
       if (choices.length && odd) {

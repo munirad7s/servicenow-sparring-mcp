@@ -216,18 +216,37 @@ test('the check of choice labels also runs for a database view and with a partly
   assert.match((await call('sn_query', { table: 'incident', query: 'state=Resolved^caller_id.emailLIKEexample' })).data.message, /label of "6"/)
   assert.equal(sentTo('incident').length, 0)
 
-  // A choice field reached by a dot-walk is not checked, and the answer says so.
-  const walked = await connect([
+})
+
+test('a choice field reached by a dot-walk is checked against the list of the table the walk ends on', async () => {
+  const problem: Route[] = [
     { table: 'sys_db_object', query: 'name=problem', rows: [tableRow('problem', 'Problem', 'task')] },
     { table: 'sys_dictionary', query: 'nameINproblem,task', rows: [column('problem', 'first_incident', 'reference', 'incident')] },
     { table: 'sys_dictionary', query: 'nameINincident,task', rows: [column('task', 'state', 'integer', '', { choice: '3' }), column('task', 'contact_type', 'string', '', { choice: '1' })] },
-    ...dictionaryRoutes,
-    { table: 'problem', rows: [] },
-  ])
-  const data = await walked.answer('sn_query', { table: 'problem', query: 'first_incident.contact_type=Phone' })
-  assert.match(data.warnings.join(' '), /"first_incident.contact_type" is a choice field, and its values could not be checked/)
-  // On a number field a label is refused also where the choices were not looked up: a word is not a number.
-  assert.match((await walked.call('sn_query', { table: 'problem', query: 'first_incident.state=Resolved' })).data.message, /holds a number, and "Resolved" is not one/)
+  ]
+  const contactTypes = { table: 'sys_choice', query: 'element=contact_type', rows: [{ name: 'task', value: 'phone', label: 'By phone', language: 'en' }, { name: 'task', value: 'email', label: 'By mail', language: 'en' }] }
+  const walked = await connect([...problem, contactTypes, ...dictionaryRoutes, { table: 'problem', rows: [] }])
+
+  const refused = await walked.call('sn_query', { table: 'problem', query: 'first_incident.contact_type=By phone' })
+  assert.equal(refused.data.error, 'validation')
+  assert.match(refused.data.message, /"first_incident.contact_type" stores the value of a choice, not its label: "By phone" is the label of "phone"/)
+  assert.equal(walked.sentTo('problem').length, 0)
+  // The list asked for is the one of the table the reference points to, not of the queried table.
+  assert.match(walked.sentTo('sys_choice').at(-1)!.query, /^nameINincident,task\^element=contact_type/)
+
+  // A stored value passes without a warning, and an unknown one is explained when nothing matches.
+  assert.deepEqual((await walked.answer('sn_query', { table: 'problem', query: 'first_incident.contact_typeINphone,email^first_incident.state=6' })).warnings, [])
+  const odd = await walked.answer('sn_query', { table: 'problem', query: 'first_incident.contact_type=fax' })
+  assert.match(odd.warnings.join(' '), /"fax" is not among the choice values of "first_incident.contact_type".*phone \(By phone\), email \(By mail\)/)
+  // The list of incident, where the walk ends, and not the one of task, where "state" is defined.
+  assert.match((await walked.call('sn_query', { table: 'problem', query: 'first_incident.state=Resolved' })).data.message, /"Resolved" is the label of "6"/)
+
+  // Where the list cannot be read, the answer says that the values were not checked.
+  const hidden = await connect([...problem, { table: 'sys_choice', status: 403 }, ...dictionaryRoutes, { table: 'problem', rows: [] }])
+  const unchecked = await hidden.answer('sn_query', { table: 'problem', query: 'first_incident.contact_type=By phone' })
+  assert.match(unchecked.warnings.join(' '), /"first_incident.contact_type" is a choice field, and its values could not be checked/)
+  // On a number field a label is refused also where the choices could not be looked up: a word is not a number.
+  assert.match((await hidden.call('sn_query', { table: 'problem', query: 'first_incident.state=Resolved' })).data.message, /holds a number, and "Resolved" is not one/)
 })
 
 test('the label of a choice is recognised in any language the instance has one in', async () => {

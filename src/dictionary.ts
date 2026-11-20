@@ -50,6 +50,11 @@ export interface FieldCheck {
   unknown: UnknownField[]
   /** The dictionary entry of each path that was verified, keyed by the path as written. */
   resolved: Map<string, Column>
+  /**
+   * Where each verified path takes its values from: the table the path ends on, and the name of the field there.
+   * The queried table for a plain field, the referenced table for a dot-walk, the joined table for a field of a view.
+   */
+  owners: Map<string, { table: string; field: string }>
   /** Tables the paths read from besides the queried one: targets of dot-walks, child tables, tables a view joins. */
   reached: Set<string>
 }
@@ -193,7 +198,7 @@ export class Dictionary {
    * field. "ref_<child>.<field>" reaches a field of a child table.
    */
   async checkFields(table: string, paths: string[]): Promise<FieldCheck> {
-    const check: FieldCheck = { status: 'checked', unknown: [], resolved: new Map(), reached: new Set() }
+    const check: FieldCheck = { status: 'checked', unknown: [], resolved: new Map(), owners: new Map(), reached: new Set() }
     const unavailable = (reason: string) => {
       check.status = 'unavailable'
       check.reason ??= reason
@@ -240,6 +245,7 @@ export class Dictionary {
 
           if (last) {
             check.resolved.set(path, column)
+            check.owners.set(path, column.sourceField ? { table: column.definedOn, field: column.sourceField } : { table: current, field: segment })
           } else if (column.type !== 'reference' || !column.reference) {
             const why = column.reference ? `a list of references (${column.type})` : `of type ${column.type || 'unknown'}`
             check.unknown.push({ field: path, table: current, segment, reason: `"${segment}" is ${why}, not a single reference, so it cannot be dot-walked`, suggestions: [] })
