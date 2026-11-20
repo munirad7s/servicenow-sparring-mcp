@@ -161,8 +161,10 @@ provider, the data leaves your network. Five things limit what can go that way:
   searched. The comparison of two payloads that an instance stores beside them (`payload_diff`) is not passed on
   at all: read the payload. The same is done with every text of every answer, whichever function gives it: a script that holds
   `"api_key": "…"`, or a list or an object behind such a key (`"tokens": ["…"]`), comes back with that value
-  taken out, and the answer says so. The one text that is passed on as it is, is the `query` of an answer: that
-  is what was sent, in the words of the call. It goes by the name of an XML element, or of a JSON key in quotes.
+  taken out, and the answer says so. A text of the instance is read before it is shortened, where a message
+  quotes it or a long value is cut, and a cell that comes as an object where an instance sends text is passed
+  on as the text it is written as, so that a key and its value are read together. The one text that is passed
+  on as it is, is the `query` of an answer: that is what was sent, in the words of the call. It goes by the name of an XML element, or of a JSON key in quotes.
   An element is recognised where it holds text and closes: one that holds further elements is not taken out,
   and neither is `true` or `false`, which is a switch and no secret. A secret
   under a name that suggests nothing is not recognised, nor one written another way: a key whose letters are
@@ -356,7 +358,9 @@ many. The npm scripts do not write it.
   out once, and 413, 414 and 431 are about the size of the one request. One request that runs out of time does not: where the answer does not depend on it, the answer says
   what could not be read.
 - With tables closed, the server looks at the table of tables once in thirty seconds: how many tables there
-  are, and which was changed last. That is one request, answered with under a hundred bytes (measured: about
+  are, and which was changed last. Every answer about the tables of the instance stands behind that look: what
+  a table is and extends, which names are tables, which tables are closed or below a table, and which are parts
+  of a rotated one. That is one request, answered with under a hundred bytes (measured: about
   120 milliseconds). Where either differs, everything it remembers about tables is read anew. A table created below
   a closed one holds rows of it from its first row on, and without this look it was read through its parents
   until the lists were ten minutes old. Thirty seconds remain. The definition of a database view and the fields
