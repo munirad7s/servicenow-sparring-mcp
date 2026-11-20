@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Page, Row, ServiceNowClient } from '../client.js'
 import { noConnection, quoteInstanceText, ServiceNowError, unlessNoConnection, validation } from '../errors.js'
 import { ORIGIN_CAVEATS } from '../limitations.js'
-import { assertSysId, isGeneratedSysId, isTableName } from '../query.js'
+import { assertSysId, isGeneratedSysId, isTableName, withStableOrder } from '../query.js'
 import { fail, labelOf, ok, rawOf, rowSchema, source, sourceShape, tidy, withheldWarning } from '../result.js'
 import { traced } from '../trace.js'
 import { errorKind, isClosedRecord, isSystemAccount, READ_ONLY, withPeopleOnly, type Context } from './shared.js'
@@ -465,9 +465,10 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         // -------------------------------------------------------------- the evidence
 
         let skipsUnread = ''
-        const updatesQuery = `name=${name}^ORDERBYDESCsys_updated_on`
-        const versionsQuery = `name=${name}^ORDERBYstate^ORDERBYDESCsys_created_on`
-        const skipsQuery = `upgrade_detail.file_name=${name}^ORDERBYDESCsys_created_on`
+        // As they are sent, with the sys_id as the last sort key: the answer names them, and a caller runs them again.
+        const updatesQuery = withStableOrder(`name=${name}^ORDERBYDESCsys_updated_on`)
+        const versionsQuery = withStableOrder(`name=${name}^ORDERBYstate^ORDERBYDESCsys_created_on`)
+        const skipsQuery = withStableOrder(`upgrade_detail.file_name=${name}^ORDERBYDESCsys_created_on`)
         const [updates, versions, skips] = name
           ? await Promise.all([
               read('sys_update_xml', updatesQuery, ['name', 'action', 'type', 'update_set', 'replace_on_upgrade', 'sys_created_by', 'sys_created_on', 'sys_updated_by', 'sys_updated_on'], 20),

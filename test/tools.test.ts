@@ -3075,7 +3075,7 @@ test('sn_origin: a change nobody captured shows when an upgrade refused to overw
   assert.equal(data.capturedBy, 'nobody')
   assert.match(data.warnings.join(' '), /did not overwrite it \("Skipped Manual Merge"\)/)
   assert.deepEqual(data.evidence.upgradeSkips.rows[0], { disposition: 'Skipped Manual Merge', review: 'Not Reviewed', target: 'Example rule', upgrade: 'glide-australia-02-11-2026__patch1.zip', createdOn: '2026-09-25 17:00:00' })
-  assert.equal(data.evidence.upgradeSkips.query, `upgrade_detail.file_name=${NAME}^ORDERBYDESCsys_created_on`)
+  assert.equal(data.evidence.upgradeSkips.query, `upgrade_detail.file_name=${NAME}^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`)
 
   // A file the upgrade could not apply is a failure, and a reverted one is the vendor's again: neither is a local change.
   for (const row of [skip('Skipped Error'), skip('Skipped', 'Reviewed and Reverted')]) {
@@ -3101,10 +3101,10 @@ test('sn_origin: the evidence can be run again', async () => {
   const { evidence } = await answer('sn_origin', { sysId: ID })
   assert.deepEqual(
     { table: evidence.customerUpdates.table, query: evidence.customerUpdates.query, total: evidence.customerUpdates.total, first: evidence.customerUpdates.firstCapturedOn },
-    { table: 'sys_update_xml', query: `name=${NAME}^ORDERBYDESCsys_updated_on`, total: 1, first: '2026-03-01 10:00:00' },
+    { table: 'sys_update_xml', query: `name=${NAME}^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id`, total: 1, first: '2026-03-01 10:00:00' },
   )
   assert.equal(evidence.versions.table, 'sys_update_version')
-  assert.equal(evidence.versions.query, `name=${NAME}^ORDERBYstate^ORDERBYDESCsys_created_on`)
+  assert.equal(evidence.versions.query, `name=${NAME}^ORDERBYstate^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`)
 })
 
 test('sn_origin: with more update rows than one page, the first capture is asked for', async () => {

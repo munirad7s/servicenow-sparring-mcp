@@ -17,7 +17,9 @@
  *    withholds, a long text it cuts, a text it took a secret out of. With display
  *    values it also keeps a time as it is stored, in UTC.
  * 4. Counts per value, against the Aggregate API, read by pages as an agent would.
- * 5. Database views. A view can list the fields it takes from a table it joins,
+ * 5. Sorted reads by pages, of tables and of database views: every row has to
+ *    come once.
+ * 6. Database views. A view can list the fields it takes from a table it joins,
  *    and the instance drops a condition on any other field of that table, and on
  *    some it lists. For views with such a list, each field sn_schema lists is
  *    asked directly whether a condition on it is applied ("empty and filled at
@@ -117,6 +119,7 @@ const differences: string[] = []
 let tables = 0
 let absent = 0
 let fields = 0
+let cutAnswers = 0
 for (const table of [...new Set([...KNOWN, ...random])]) {
   // The chain, one step at a time, by the sys_id of the parent.
   const chain: string[] = []
@@ -167,7 +170,10 @@ for (const table of [...new Set([...KNOWN, ...random])]) {
   tables++
   if (JSON.stringify(answer.data.table.extends) !== JSON.stringify(chain.slice(1))) differences.push(`${table}: parent tables ${JSON.stringify(answer.data.table.extends)}, read directly ${JSON.stringify(chain.slice(1))}`)
   const got = new Map<string, Data>((answer.data.columns as Data[]).map((column) => [column.name, column]))
-  for (const name of expected.keys()) if (!got.has(name)) differences.push(`${table}.${name}: missing from sn_schema`)
+  // An answer that is too large is cut, and says so: the fields behind the cut are not missing.
+  const cut = Number(answer.data.returned) < Number(answer.data.fieldCount)
+  if (cut) cutAnswers++
+  for (const name of expected.keys()) if (!got.has(name) && !cut) differences.push(`${table}.${name}: missing from sn_schema`)
   for (const name of got.keys()) if (!expected.has(name)) differences.push(`${table}.${name}: in sn_schema only`)
   for (const [name, want] of expected) {
     const have = got.get(name)
@@ -184,10 +190,11 @@ for (const table of [...new Set([...KNOWN, ...random])]) {
       ['definedOn', have.definedOn, want.definedOn],
       ['label', have.label, want.label],
     ]
-    for (const [key, mine, theirs] of pairs) if (mine !== theirs) differences.push(`${table}.${name}: ${key} is ${JSON.stringify(mine)}, read directly ${JSON.stringify(theirs)}`)
+    // What differs is named, not shown: a label is text of the instance.
+    for (const [key, mine, theirs] of pairs) if (mine !== theirs) differences.push(`${table}.${name}: ${key} differs from what the dictionary says when read directly`)
   }
 }
-console.log(`\nFields: ${tables} tables${absent ? ` (${absent} of the list do not exist here)` : ''}, ${fields} fields, ${differences.length} difference(s)`)
+console.log(`\nFields: ${tables} tables${absent ? ` (${absent} of the list do not exist here)` : ''}${cutAnswers ? ` (${cutAnswers} answers were cut for their size: only the fields in them were compared)` : ''}, ${fields} fields, ${differences.length} difference(s)`)
 for (const line of differences.slice(0, 40)) console.log(`  ${line}`)
 if (differences.length > 40) console.log(`  and ${differences.length - 40} more`)
 
@@ -195,12 +202,26 @@ if (differences.length > 40) console.log(`  and ${differences.length - 40} more`
 
 // Values of the instance, so that the conditions meet rows. They are sent, never printed.
 const sample = async (table: string, query: string, field: string) => (await get(table, { sysparm_query: query, sysparm_fields: field, sysparm_limit: 1 })).rows?.[0]?.[field] ?? ''
-const caller = await sample('incident', 'caller_idISNOTEMPTY', 'caller_id')
-const group = await sample('incident', 'assignment_groupISNOTEMPTY', 'assignment_group')
-const number = await sample('incident', 'ORDERBYnumber', 'number')
-const ci = await sample('incident', 'cmdb_ciISNOTEMPTY', 'cmdb_ci')
-const day = (await sample('incident', 'ORDERBYDESCopened_at', 'opened_at')).slice(0, 10) || '2026-01-01'
+const SAMPLES: Record<string, string> = {
+  caller: await sample('incident', 'caller_idISNOTEMPTY', 'caller_id'),
+  group: await sample('incident', 'assignment_groupISNOTEMPTY', 'assignment_group'),
+  number: await sample('incident', 'ORDERBYnumber', 'number'),
+  ci: await sample('incident', 'cmdb_ciISNOTEMPTY', 'cmdb_ci'),
+  day: (await sample('incident', 'ORDERBYDESCopened_at', 'opened_at')).slice(0, 10),
+}
+// In the lists below a value of the instance is written as <caller>, <group>, <number>, <ci> or <day>. A query is
+// printed that way, never with the value in it. One whose value the instance does not have is left out.
+const [caller, group, number, ci, day] = ['<caller>', '<group>', '<number>', '<ci>', '<day>']
 const NONE = '0'.repeat(32)
+/** The query as it is sent, or null where the instance has no value for a placeholder in it. */
+function filled(template: string): string | null {
+  let missing = false
+  const query = template.replace(/<(caller|group|number|ci|day)>/g, (_, name: string) => {
+    if (!SAMPLES[name]) missing = true
+    return SAMPLES[name]
+  })
+  return missing ? null : query
+}
 
 /** Queries the server is to pass on unchanged. */
 const PASSED: Array<[string, string[]]> = [
@@ -272,37 +293,51 @@ for (const [table, queries] of PASSED) {
     count(`left out: the table cannot be read here (${queries.length} queries)`)
     continue
   }
-  for (const query of queries) {
-    // The one thing the server may add to a query it passes on is the last sort key. The answer has to name it.
-    const sent = withStableOrder(query)
-    const [theirs, mine] = [await get(table, { sysparm_query: sent, sysparm_fields: 'sys_id', sysparm_limit: 5 }), await call('sn_query', { table, query, fields: ['sys_id'], limit: 5 })]
+  for (const template of queries) {
+    const query = filled(template)
+    if (query === null) {
+      count('left out: the instance has no value to put into the query')
+      continue
+    }
+    // Asked as it is written: the total has to be the one the instance gives for exactly this query.
+    const [theirs, mine] = [await get(table, { sysparm_query: query, sysparm_fields: 'sys_id', sysparm_limit: 5 }), await call('sn_query', { table, query, fields: ['sys_id'], limit: 5 })]
     const ids = (rows: Array<Data> | null | undefined) => JSON.stringify((rows ?? []).map((row) => row.sys_id))
     const warnings = ((mine.data.warnings as string[] | undefined) ?? []).join(' ')
+    const named = String(mine.data.query ?? '')
     if (mine.isError) {
       // A field this instance lacks is no finding about the server.
       if (/^Unknown field/.test(String(mine.data.message))) count('left out: a field this instance does not have')
-      else wrong.push(`refused, and should be passed on: ${table}  ${masked(query)}  (${String(mine.data.message).slice(0, 120)})`)
+      else wrong.push(`refused as "${mine.data.error}", and should be passed on: ${table}  ${template}`)
     } else if (theirs.status !== 200) {
-      wrong.push(`passed on, and the instance refuses it when asked directly (HTTP ${theirs.status}): ${table}  ${masked(query)}`)
+      wrong.push(`passed on, and the instance refuses it when asked directly (HTTP ${theirs.status}): ${table}  ${template}`)
     } else if (/hold a secret/.test(warnings)) {
       // The one intended difference: a comparison on the value of a property leaves out the properties that hold a
       // secret. The answer names the query with that condition, and its total can be smaller.
       count('another query on purpose, said in a warning: properties that hold a secret are left out')
     } else if (String(mine.data.total) !== String(theirs.total)) {
-      wrong.push(`other total: ${table}  ${masked(query)}  (sn_query ${mine.data.total}, directly ${theirs.total})`)
-    } else if (mine.data.query !== sent) {
-      wrong.push(`the answer names another query than the one given: ${table}  ${masked(query)}  (${masked(String(mine.data.query))})`)
-    } else if (ids(mine.data.records) !== ids(theirs.rows)) {
-      wrong.push(`same total, other rows: ${table}  ${masked(query)}`)
+      wrong.push(`other total: ${table}  ${template}  (sn_query ${mine.data.total}, directly ${theirs.total})`)
+    } else if (named === query) {
+      if (ids(mine.data.records) === ids(theirs.rows)) count('same total and same rows as the Table API')
+      else wrong.push(`same total, other rows: ${table}  ${template}`)
+    } else if (named === withStableOrder(query)) {
+      // The one thing the server adds to a query it passes on: the sys_id as the last key of a sorted query, which
+      // the answer names. Asked directly with that key, the instance has to give the same total as without it,
+      // and the rows the server gave. Without the key the first rows are not the same from one request to the next.
+      const keyed = await get(table, { sysparm_query: named, sysparm_fields: 'sys_id', sysparm_limit: 5 })
+      if (keyed.status !== 200 || String(keyed.total) !== String(theirs.total)) wrong.push(`the sort key changes what matches: ${table}  ${template}  (${theirs.total} without it, ${keyed.status === 200 ? keyed.total : `HTTP ${keyed.status}`} with it)`)
+      else if (ids(mine.data.records) !== ids(keyed.rows)) wrong.push(`same total, other rows: ${table}  ${template}`)
+      else count('same total as the Table API, and the same rows once the sort has its last key')
     } else {
-      count('same total and same rows as the Table API')
+      wrong.push(`the answer names another query than the one given: ${table}  ${template}`)
     }
   }
 }
-for (const [table, query] of REFUSED) {
+for (const [table, template] of REFUSED) {
+  const query = filled(template)
+  if (query === null) continue
   const mine = await call('sn_query', { table, query, fields: ['sys_id'], limit: 1 })
   if (mine.isError && mine.data.error === 'validation') count('refused, as intended')
-  else wrong.push(`${mine.isError ? `refused as "${mine.data.error}", not as a query that cannot be checked` : 'passed on, and should be refused'}: ${table}  ${masked(query)}`)
+  else wrong.push(`${mine.isError ? `refused as "${mine.data.error}", not as a query that cannot be checked` : 'passed on, and should be refused'}: ${table}  ${template}`)
 }
 
 console.log(`\nQueries: ${[...tally.values()].reduce((sum, value) => sum + value, 0) + wrong.length}`)
@@ -423,6 +458,67 @@ console.log(`  ${String(counted).padStart(5)}  the same groups and counts as the
 console.log(`  ${String(miscounted.length).padStart(5)}  difference(s)`)
 for (const line of miscounted) console.log(`         ${line}`)
 
+// ------------------------------------------------------------------------ pages
+
+// Sorted reads by pages, as an agent makes them. Measured before the server gave a sorted query a last key: a
+// thousand captured changes, newest first, were 989 different rows, and sorted by type 753.
+const SORTED: Array<[string, string]> = [
+  ['sys_update_xml', 'ORDERBYDESCsys_updated_on'],
+  ['sys_update_xml', 'ORDERBYtype'],
+  ['sys_update_version', 'ORDERBYstate^ORDERBYDESCsys_created_on'],
+  ['upgrade_history_task', 'ORDERBYDESCsys_created_on'],
+  ['sys_dictionary', 'name=task^ORDERBYinternal_type'],
+  ['sys_db_object', 'ORDERBYsuper_class'],
+]
+const twice: string[] = []
+let readByPages = 0
+let rowsByPages = 0
+const pagesOf = async (table: string, query: string, columns: string[], pages: number): Promise<{ keys: string[]; warned: boolean } | null> => {
+  const keys: string[] = []
+  let warned = false
+  for (let page = 0; page < pages; page++) {
+    const read = await call('sn_query', { table, query, fields: columns, limit: 100, offset: page * 100 })
+    if (read.isError) return null
+    warned ||= ((read.data.warnings as string[] | undefined) ?? []).some((warning) => /cannot all be told apart/.test(warning))
+    const rows = read.data.records as Data[]
+    keys.push(...rows.map((row) => columns.map((column) => (row[column] && typeof row[column] === 'object' ? row[column].value : row[column])).join('|')))
+    if (rows.length < 100) break
+  }
+  return { keys, warned }
+}
+for (const [table, query] of SORTED) {
+  const read = await pagesOf(table, query, ['sys_id'], 5)
+  if (!read) continue
+  readByPages++
+  rowsByPages += read.keys.length
+  if (new Set(read.keys).size !== read.keys.length) twice.push(`${table} with ${query}: ${read.keys.length - new Set(read.keys).size} of ${read.keys.length} rows came twice`)
+}
+// The same for database views, whose rows are told apart by the sys_ids of the tables they join.
+let viewsByPages = 0
+let warnedViews = 0
+for (const view of ((await get('sys_db_view', { sysparm_fields: 'name', sysparm_limit: 600 })).rows ?? []).map((row) => row.name)) {
+  if (viewsByPages >= 5) break
+  const head = await get(view, { sysparm_limit: 1 })
+  const total = Number((await get(view, { sysparm_fields: 'sys_id', sysparm_limit: 1 })).total ?? 0)
+  if (head.status !== 200 || !head.rows?.length || total < 250 || total > 20_000) continue
+  const ids = Object.keys(head.rows[0]).filter((key) => key.endsWith('_sys_id'))
+  const described = await call('sn_schema', { table: view })
+  const sortBy = described.isError ? undefined : (described.data.columns as Data[]).find((column) => !column.inactive && !String(column.name).endsWith('sys_id'))?.name
+  if (!ids.length || !sortBy) continue
+  const read = await pagesOf(view, `ORDERBY${sortBy}`, ids, 3)
+  if (!read) continue
+  viewsByPages++
+  rowsByPages += read.keys.length
+  // A view that does not carry the sys_id of one of its tables cannot be read by pages without a repeat: the
+  // answer then has to say so.
+  if (read.warned) warnedViews++
+  else if (new Set(read.keys).size !== read.keys.length) twice.push(`${view} sorted by ${sortBy}: ${read.keys.length - new Set(read.keys).size} of ${read.keys.length} rows came twice, and the answer did not warn`)
+}
+console.log(`\nSorted reads by pages: ${readByPages} of tables and ${viewsByPages} of database views, ${rowsByPages} rows`)
+if (warnedViews) console.log(`  ${String(warnedViews).padStart(5)}  view(s) whose answer says that its rows cannot all be told apart`)
+console.log(`  ${String(twice.length).padStart(5)}  difference(s)`)
+for (const line of twice) console.log(`         ${line}`)
+
 // ------------------------------------------------------------------------ views
 
 // Views that carry a field list first: those are the ones that drop conditions.
@@ -441,7 +537,7 @@ for (const view of withList) {
   for (const column of (described.data.columns as Data[]).filter((item) => !item.inactive).slice(0, 12)) {
     const asked = await get(view, { sysparm_query: `${column.name}ISEMPTY^${column.name}ISNOTEMPTY`, sysparm_fields: 'sys_id', sysparm_limit: 1 })
     const through = await call('sn_query', { table: view, query: `${column.name}ISNOTEMPTY`, fields: [column.name], limit: 1 })
-    if (asked.status !== 200) refusedByInstance++
+    if (asked.status !== 200 || asked.total === null) refusedByInstance++
     else if (Number(asked.total) === 0) {
       // Applied by the instance. A refusal for another reason, a field that holds a secret for one, is no finding.
       if (through.isError && /did not prove that it applies a condition/.test(String(through.data.message))) droppedFields.push(`${view}.${column.name}: the instance applies a condition on it, and the server refuses it for want of proof`)
@@ -453,12 +549,12 @@ for (const view of withList) {
 console.log(`\nDatabase views with a field list: ${viewsTried} tried`)
 console.log(`  ${String(applied).padStart(5)}  listed field(s) on which the instance applies a condition, and the server sends it`)
 if (refusedByServer) console.log(`  ${String(refusedByServer).padStart(5)}  listed field(s) on which the instance drops a condition, and the server refuses it`)
-if (refusedByInstance) console.log(`  ${String(refusedByInstance).padStart(5)}  listed field(s) the instance refuses a condition on, with an error`)
+if (refusedByInstance) console.log(`  ${String(refusedByInstance).padStart(5)}  listed field(s) the instance refuses a condition on, with an error, or answers without a total`)
 console.log(`  ${String(droppedFields.length).padStart(5)}  difference(s)`)
 for (const line of droppedFields.slice(0, 40)) console.log(`         ${line}`)
 
 console.log(`\n${sn.requestCount + direct} requests, all GET: ${sn.requestCount} by the server, ${direct} directly.`)
-process.exit(differences.length || wrong.length || altered.length || miscounted.length || droppedFields.length ? 1 : 0)
+process.exit(differences.length || wrong.length || altered.length || miscounted.length || twice.length || droppedFields.length ? 1 : 0)
 
 // ---------------------------------------------------------------- closed tables
 

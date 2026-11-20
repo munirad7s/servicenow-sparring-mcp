@@ -239,7 +239,7 @@ being captured.
   "evidence": {
     "customerUpdates": {
       "table": "sys_update_xml",
-      "query": "name=sys_script_0123456789abcdef0123456789abcdef^ORDERBYDESCsys_updated_on",
+      "query": "name=sys_script_0123456789abcdef0123456789abcdef^ORDERBYDESCsys_updated_on^ORDERBYDESCsys_id",
       "readable": true,
       "total": 1,
       "firstCapturedOn": "2026-03-01 10:00:00",
@@ -259,7 +259,7 @@ being captured.
     },
     "versions": {
       "table": "sys_update_version",
-      "query": "name=sys_script_0123456789abcdef0123456789abcdef^ORDERBYstate^ORDERBYDESCsys_created_on",
+      "query": "name=sys_script_0123456789abcdef0123456789abcdef^ORDERBYstate^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id",
       "readable": true,
       "total": 2,
       "bySource": { "sys_update_set": 1, "sys_upgrade_history": 1 },
@@ -268,7 +268,7 @@ being captured.
     },
     "upgradeSkips": {
       "table": "upgrade_history_task",
-      "query": "upgrade_detail.file_name=sys_script_0123456789abcdef0123456789abcdef^ORDERBYDESCsys_created_on",
+      "query": "upgrade_detail.file_name=sys_script_0123456789abcdef0123456789abcdef^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id",
       "readable": true,
       "total": 0,
       "rows": []
