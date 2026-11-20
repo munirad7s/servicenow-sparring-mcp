@@ -700,6 +700,24 @@ test('the name behind a reference is left out where the record can be a row of a
   assert.equal((await answer('sn_query', { table: 'incident', query: `u_contact=${ID}^u_ownerISNOTEMPTY`, fields: ['number'] })).returned, 1)
 })
 
+test('with a list of the only tables that may be read, a name is left out where the record can be of a table that is not on it', async () => {
+  // Users may be read, contacts may not: a contact is a row of the user table too, and a caller can be one.
+  const listed = { tables: { allow: ['incident', 'task', 'sys_*'], deny: [] } }
+  const usersAndContacts: Route = { table: 'sys_db_object', query: '^ORname=sys_user', rows: [tableRow('sys_user', 'User'), tableRow('customer_contact', 'Contact', 'sys_user')] }
+  const row = { number: 'INC1', caller_id: labelled(ID, 'Abel Tuter'), parent: labelled(ID, 'TASK0000001') }
+  const { answer, call, sentTo } = await connect(familyWorld([usersAndContacts, { table: 'incident', rows: [row] }, { table: 'sys_user', rows: [{ name: 'Abel Tuter' }] }]), listed)
+
+  const read = await answer('sn_query', { table: 'incident', fields: ['number', 'caller_id', 'parent'], displayValue: true })
+  // No table below task is missing from the list, so the name behind "parent" stays.
+  assert.deepEqual(read.records, [{ number: 'INC1', caller_id: ID, parent: { value: ID, display: 'TASK0000001' } }])
+  assert.match(read.warnings.join(' '), /were left out: caller_id\./)
+  assert.equal((await call('sn_query', { table: 'incident', query: 'caller_idSTARTSWITHAbel', fields: ['number'] })).data.error, 'blocked')
+
+  // The user table itself answers without the rows of the classes that are not on the list.
+  await answer('sn_query', { table: 'sys_user', fields: ['name'] })
+  assert.equal(sentTo('sys_user')[0].query, 'sys_class_nameINincident,task^ORsys_class_nameSTARTSWITHsys_^ORsys_class_nameISEMPTY')
+})
+
 test('a reference into a parent table does not give away the rows of its closed child tables', async () => {
   const noIncidents = { tables: { allow: [], deny: ['incident'] } }
   const below = closedTables(tableRow('incident', 'Incident', 'task'), tableRow('u_major_incident', 'Major incident', 'incident', 'task'))
