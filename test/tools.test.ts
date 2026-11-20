@@ -5892,8 +5892,11 @@ test('the id of the record a row belongs to is no secret, though its name ends l
   }
   // Inside a list or an object that is taken out whole, it goes with it.
   assert.equal(scrubSecrets(`{"credentials":{"document_key":"${ID}","user":"abel"}}`).text, '{"credentials":"[withheld]"}')
-  // An element of that name that ends in itself still loses what its attributes repeat.
+  // An element of that name that ends in itself still loses what its attributes repeat, and one with attributes
+  // is taken out as before: measured, none of the 3,345 had one, and an attribute can repeat anything.
   assert.equal(scrubSecrets(`<a><document_key display_value="Some record"/></a>`).text, '<a><document_key/></a>')
+  assert.equal(scrubSecrets(`<a><document_key display_value="Some record">${ID}</document_key></a>`).text, '<a><document_key>[withheld]</document_key></a>')
+  assert.equal(scrubSecrets(`<a>&lt;document_key note="x"&gt;${ID}&lt;/document_key&gt;</a>`).text, '<a>&lt;document_key&gt;[withheld]&lt;/document_key&gt;</a>')
 })
 
 test('every text of an answer is read for what looks like a secret, whichever tool it comes from', async () => {

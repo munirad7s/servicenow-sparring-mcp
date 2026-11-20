@@ -124,6 +124,15 @@ const MAX_REQUEST_LENGTH = 8_000
 const ABOUT_THE_REQUEST = new Set([413, 414, 431])
 /** A cell of a row is a text, or a value with its display value. Anything nested deeper is no row of a table. */
 const MAX_CELL_DEPTH = 4
+/**
+ * How many rows match, as the instance counted them. Asked not to count (sysparm_no_count), it still sends the
+ * header: measured, "1" for the one row asked for, also where that row is not shown to the account. That is no
+ * total, neither for the caller nor for the audit log.
+ */
+const totalOf = (headers: Headers, params: URLSearchParams): number | null => {
+  const header = params.get('sysparm_no_count') === 'true' ? null : headers.get('x-total-count')
+  return header !== null && /^\d+$/.test(header) ? Number(header) : null
+}
 const nestedTooDeep = (value: unknown, left: number): boolean => value !== null && typeof value === 'object' && (left === 0 || Object.values(value).some((inner) => nestedTooDeep(inner, left - 1)))
 const PAUSE_WHILE_UNREACHABLE_MS = 15_000
 
@@ -192,9 +201,6 @@ export class ServiceNowClient {
     if (opts.uncounted) params.set('sysparm_no_count', 'true')
 
     const { records, total } = await this.get('table', table, sent, fields?.length ? fields : null, params, (result, headers) => {
-      // Measured: asked not to count, an instance still sends the header: "1" for the one row asked for, also
-      // where that row is not shown to the account. That is no total, and it is not passed on as one.
-      const header = opts.uncounted ? null : headers.get('x-total-count')
       // Only the fields that were asked for: an instance sends no others, and what is not an instance is not
       // trusted to. Every check behind this is made for the fields of the request.
       const asked = fields?.length ? new Set(fields) : null
@@ -220,7 +226,7 @@ export class ServiceNowClient {
       const rows = result
         .filter((row): row is T => row !== null && typeof row === 'object')
         .map((row) => Object.fromEntries(Object.entries(row as object).flatMap(([key, value]) => (!asked || asked.has(key) ? [[key, cell(value)]] : []))) as T)
-      return { records: rows, total: header !== null && /^\d+$/.test(header) ? Number(header) : null }
+      return { records: rows, total: totalOf(headers, params) }
     })
     if (gate && display) await this.withoutClosedNames(gate, table, records as Row[])
     return { table, query: sent, limit, offset, records, total }
@@ -385,8 +391,7 @@ export class ServiceNowClient {
       this.assertAllowed(table)
       const answer = await this.inTurn(() => (this.accepted ? this.send(api, table, params, count) : this.alone(() => this.send(api, table, params, count))))
       const usable = read(answer.body.result, answer.headers)
-      const header = answer.headers.get('x-total-count')
-      log(200, answer.body.result.length, header !== null && /^\d+$/.test(header) ? Number(header) : null)
+      log(200, answer.body.result.length, totalOf(answer.headers, params))
       return usable
     } catch (error) {
       // A request that was not sent has no HTTP status of its own. And a status that says "fine" is not written for

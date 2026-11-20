@@ -68,8 +68,10 @@ row, or it matches nothing. Both look like an answer. Five rules keep the eviden
    that table (measured: 11,759 of 11,759 rows for a value nobody has), and on some that it lists. Its
    definition does not say which, so before a view is filtered, sorted or counted by a field, the instance is
    asked two things: for the rows where that field is empty and filled at once, which has to be none, and for
-   one row where it is either, which has to come back. The first shows an instance that drops the condition,
-   the second one that is set to answer what it cannot use with no rows. Without both the query is refused.
+   one row where it is either, which has to be there: it comes back, or, where this account is not shown it,
+   the count says that it exists. The first shows an instance that drops the condition, the second one that is
+   set to answer what it cannot use with no rows. Without both the query is refused, unless the view has no
+   row at all: then nothing can be proven, and nothing can come back either.
    How the instance is set is not read for this: a setting can be changed between the reading and the query.
    The same is asked where it cannot be read whether a name stands for a table or a view.
 2. **A condition the instance would drop or misread is refused.** A dot-walk through a list field, a date
@@ -175,8 +177,8 @@ provider, the data leaves your network. Five things limit what can go that way:
   Read over 24,811 texts of the test instance, the rule took something out of 158, and most of that was counts
   of tokens, templates of connection records and cursors of paged answers: `[withheld]` says that the name
   suggests a secret, not that there was one. One name is set aside: `document_key`, the record a row belongs
-  to, is passed on where it holds a sys_id. It stood in 825 of the 6,631 captured changes, with every value
-  of a workflow or a flow, and was nine tenths of all that the rule took out.
+  to, is passed on where it holds a sys_id. It stood in 825 of the 6,631 captured changes, in the values of
+  workflows and flows, and was nine tenths of all that the rule took out.
 - **Tables can be closed on your side.** `SERVICENOW_TABLE_DENY=sys_user,sys_user_*` keeps the rows of those tables
   away from the server. `SERVICENOW_TABLE_ALLOW` names the only tables the server may ask for; that list has to
   include the tables the server reads for its own checks (`npm run doctor` lists them, `sys_*` covers most). The
@@ -333,9 +335,12 @@ many. The npm scripts do not write it.
   where a value has to be looked up. Measured on the tables of one instance: five to seven. On a database view,
   one more to read which fields it takes, and two for each field it is filtered, sorted or counted by for the
   first time in ten minutes; three where the one row asked for is hidden from this account, and four, each time
-  anew, while the view has no row. The second of the two asks for one row and not for how many there are:
-  measured on eight views, the count took up to eleven seconds where the row alone came in a tenth of one. At most twenty fields of a view are
-  proven for the conditions and sorts of one call, and one more for the field it counts by. The other
+  anew, while the view has no row. A sorted read asks the same of the sys_id of every table the view joins,
+  which are its last sort keys. The second of the two asks for one row and not for how many there are:
+  measured on eight views, the count took up to eleven seconds where the row alone came in a tenth of one. At
+  most twenty fields of a view are proven for the conditions and sorts of one call, and one more for the field
+  it counts by; a plain field outside the list of the view is asked about where its name is checked, and the
+  sort keys where the order is made, and neither counts among the twenty. The other
   functions cost more: `sn_origin` 2 to 6 as measured on seven kinds of records, and a few more where a record
   has to be looked up in several places, `sn_upgrade_skips` about 10, `sn_dependencies` 25 to 35 (about 18 for
   one field), `sn_instance` about 50. Every answer carries its count in `requests`. At most eight requests are

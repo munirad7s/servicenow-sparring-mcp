@@ -280,6 +280,22 @@ test('a read that does not ask for the count has no total, whatever the header s
   assert.equal(calls[1].params.has('sysparm_no_count'), false)
 })
 
+test('a total that is no number is no total', async () => {
+  const answering = (total: string) => new ServiceNowClient(config, async () => new Response(JSON.stringify({ result: [{ n: '1' }] }), { status: 200, headers: { 'content-type': 'application/json', 'x-total-count': total } }))
+  assert.equal((await answering('many').query({ table: 'incident', fields: ['n'] })).total, null)
+  assert.equal((await answering('-1').query({ table: 'incident', fields: ['n'] })).total, null)
+  assert.equal((await answering('1e3').query({ table: 'incident', fields: ['n'] })).total, null)
+  assert.equal((await answering('12').query({ table: 'incident', fields: ['n'] })).total, 12)
+})
+
+test('the audit log writes no total for a read that did not count either', async () => {
+  const lines: AuditEntry[] = []
+  const { sn } = fakeInstance([{ table: 'incident', rows: [{ n: '1' }, { n: '2' }, { n: '3' }] }], {}, (entry) => lines.push(entry))
+  await sn.query({ table: 'incident', fields: ['n'], limit: 1, uncounted: true })
+  await sn.query({ table: 'incident', fields: ['n'], limit: 1 })
+  assert.deepEqual(lines.map((line) => ({ rows: line.rows, total: line.total })), [{ rows: 1, total: null }, { rows: 1, total: 3 }])
+})
+
 test('counts per group come from the Aggregate API', async () => {
   const { sn, calls } = fakeInstance([
     { table: 'sys_update_xml', api: 'stats', rows: [{ stats: { count: '7' }, groupby_fields: [{ field: 'type', value: 'Business Rule' }] }] },

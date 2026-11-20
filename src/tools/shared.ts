@@ -265,10 +265,10 @@ const localName = (tag: string) => tag.slice(tag.lastIndexOf(':') + 1).toLowerCa
 
 /**
  * A name the rule for secrets matches, where what it holds is the id of a record. "document_key" is what the
- * platform calls the record a row belongs to, beside "document" for its table: every value of a workflow or of a
- * flow carries it (sys_variable_value). Measured on 24,811 texts of 652 fields of one instance: of the 3,601
- * places taken out by name, 3,345 were this one element, in 825 of 6,631 captured changes, and each of them held
- * a sys_id. Under that name a sys_id is passed on. Anything else under it is taken out as before, and so is a
+ * platform calls the record a row belongs to, beside "document" for its table: the values of a workflow or of a
+ * flow carry it (sys_variable_value). Measured on 24,811 texts of 652 fields of one instance: of the 3,601
+ * places taken out by name, 3,345 were this one element, in 825 of 6,631 captured changes, each of them in such
+ * a value and each a sys_id. Under that name a sys_id is passed on. Anything else under it is taken out as before, and so is a
  * sys_id under any other name: a key can be written as 32 such characters.
  */
 const RECORD_ID_NAMES = new Set(['document_key'])
@@ -306,9 +306,11 @@ function scrubOnce(text: string): { text: string; withheld: number } {
   for (const markup of text.includes('&lt;') ? [PLAIN_MARKUP, ESCAPED_MARKUP] : [PLAIN_MARKUP]) {
     for (const element of simpleElements(text, looksSecret, markup)) {
       // "true" and "false" are switches such as "display_password", not secrets. A note is no secret, and
-      // neither is the id of the record a row belongs to.
+      // neither is the id of the record a row belongs to, in an element without attributes: measured, none of
+      // 3,345 had one, and an attribute can repeat anything.
       const plain = markup === PLAIN_MARKUP ? element.plain : unescaped(element.plain).trim()
-      if (isSwitch(plain) || element.plain === WITHHELD || isRecordId(element.tag, plain)) continue
+      const bare = text.startsWith(`${markup.lt}${element.tag}${markup.gt}`, element.start)
+      if (isSwitch(plain) || element.plain === WITHHELD || (bare && isRecordId(element.tag, plain))) continue
       // Without its attributes: a display value there would repeat the content.
       places.push({ start: element.start, end: element.end, put: `${markup.lt}${element.tag}${markup.gt}${WITHHELD}${markup.lt}/${element.tag}${markup.gt}` })
     }
@@ -1059,8 +1061,8 @@ const MAX_FIELDS_PROVEN = 20
  */
 export async function requireProofOnView(ctx: Context, view: string, paths: string[]): Promise<void> {
   const asked = new Set(paths)
-  // Each field is proven by up to two questions to the instance, one after the other. A query that filters a view
-  // by a hundred fields would spend minutes on that before it reads a row.
+  // Each field is proven by two questions to the instance as a rule, and by up to four, one after the other. A
+  // query that filters a view by a hundred fields would spend minutes on that before it reads a row.
   if (asked.size > MAX_FIELDS_PROVEN) {
     throw validation(
       `This call filters, sorts or counts "${view}", which is a database view or could be one, by ${asked.size} fields. The instance has to prove for each that it applies a condition on it, and at most ${MAX_FIELDS_PROVEN} are proven in one call. Ask with fewer. Nothing was read.`,
