@@ -54,6 +54,14 @@ export function noConnection(error: unknown): boolean {
   return error instanceof ServiceNowError && NO_CONNECTION.has(error.kind) && !ABOUT_ONE_ANSWER.has(error)
 }
 
+/** For a look-up that failed: a failure of the connection is passed on as it is, anything else becomes the value given. */
+export const unlessNoConnection =
+  <T>(fallback: T) =>
+  (error: unknown): T => {
+    if (noConnection(error)) throw error
+    return fallback
+  }
+
 /**
  * Text that came from the instance and ends up in a message: one line, bounded,
  * without control characters. It is quoted as data wherever it is shown.

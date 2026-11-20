@@ -57,7 +57,8 @@ const ERRORS: Record<number, { message: string; detail: string }> = {
  *
  * - a field named in sysparm_fields that a row does not have is left out;
  * - sysparm_display_value=all wraps every value as {value, display_value};
- * - a query that asks for a field to be empty and filled at once matches no row;
+ * - a query that asks for a field to be two things at once (empty and filled, one of two names that no table or
+ *   class has) matches no row;
  * - a table without a route answers "Invalid table", as a real instance does.
  */
 export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig> = {}, audit?: (entry: AuditEntry) => void) {
@@ -81,7 +82,7 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
     // A field that is empty and filled at once: no row is. An instance that applies the query answers with none,
     // whatever the table holds. A test that wants an instance which drops the condition says so with a route for
     // exactly this query.
-    const impossible = /^([a-z0-9_.]+)ISEMPTY\^\1ISNOTEMPTY$/.test(query)
+    const impossible = /^([a-z0-9_.]+)ISEMPTY\^\1ISNOTEMPTY$/.test(query) || /^([a-z0-9_.]+)(IN|STARTSWITH)zz__no_such_[a-z_]+\^\1\2zz__no_such_[a-z_]+$/.test(query)
     const route = impossible ? (routes.find((candidate) => candidate.exact === query && fits(candidate)) ?? (routes.some((candidate) => candidate.table === table) ? { table, rows: [] } : undefined)) : routes.find(fits)
 
     if (!route) return json({ error: { message: `Invalid table ${table}`, detail: null }, status: 'failure' }, 400)
@@ -117,6 +118,16 @@ export function fakeInstance(routes: Route[], overrides: Partial<InstanceConfig>
   }
 
   return { calls, sn: new ServiceNowClient({ ...config, ...overrides }, fetchImpl, { audit, sleep: async () => undefined }) }
+}
+
+/**
+ * true for a request the server sends to prove something before it relies on it, and not to read: a question that
+ * has to match nothing, or the one row it asks a table for to see that the table has rows at all.
+ */
+export function isProof(call: Call): boolean {
+  const impossible = /^([a-z0-9_.]+)ISEMPTY\^\1ISNOTEMPTY$/.test(call.query) || /^([a-z0-9_.]+)(IN|STARTSWITH)zz__no_such_[a-z_]+\^\1\2zz__no_such_[a-z_]+$/.test(call.query)
+  const anyRow = call.query === '' && call.params.get('sysparm_fields') === 'sys_id' && call.params.get('sysparm_limit') === '1' && call.api === 'table'
+  return impossible || anyRow
 }
 
 function isPair(value: unknown): value is { value: unknown; display_value: unknown } {

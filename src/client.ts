@@ -486,9 +486,13 @@ export class ServiceNowClient {
 
   /** Whether this machine may ask for a table. Also used for tables a query reaches without naming them in the URL. */
   allows(table: string): boolean {
-    const { allow, deny } = this.config.tables
-    const matches = (pattern: string) => (pattern.endsWith('*') ? table.startsWith(pattern.slice(0, -1)) : table === pattern)
-    return !deny.some(matches) && (!allow.length || allow.some(matches))
+    const { allow } = this.config.tables
+    return !this.denies(table) && (!allow.length || allow.some((pattern) => matches(pattern, table)))
+  }
+
+  /** Whether the deny list of this machine names a table, by name or by pattern. Says nothing about its child tables. */
+  denies(table: string): boolean {
+    return this.config.tables.deny.some((pattern) => matches(pattern, table))
   }
 
   /** The deny list of this machine: the plain table names on it, and the prefixes of its patterns ("sys_user_*"). */
@@ -525,6 +529,11 @@ export class ServiceNowClient {
     if (this.auth.kind === 'bearer') return `Bearer ${this.auth.token}`
     return 'Basic ' + Buffer.from(`${this.auth.username}:${this.auth.password}`).toString('base64')
   }
+}
+
+/** Whether an entry of a table list, a name or a pattern that ends in "*", names a table. */
+function matches(pattern: string, table: string): boolean {
+  return pattern.endsWith('*') ? table.startsWith(pattern.slice(0, -1)) : table === pattern
 }
 
 function sameAuth(a: Auth, b: Auth): boolean {

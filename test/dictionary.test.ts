@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { Dictionary } from '../src/dictionary.js'
 import { ServiceNowError } from '../src/errors.js'
-import { column, dictionaryRoutes, fakeInstance, showsParents, tableRow, type Route } from './fake.js'
+import { column, dictionaryRoutes, fakeInstance, isProof, showsParents, tableRow, type Route } from './fake.js'
 
 test('a table knows its parents and its kind', async () => {
   const { sn } = fakeInstance(dictionaryRoutes)
@@ -268,7 +268,7 @@ test('the tables a long deny list closes are asked for in several requests, each
   assert.deepEqual([...closed.keys()].sort(), [names[59], 'u_child_of_the_last'].sort())
   assert.deepEqual(closed.get('u_child_of_the_last'), ['u_child_of_the_last', names[59]])
 
-  const asked = calls.filter((call) => call.table === 'sys_db_object' && call.query !== showsParents.exact)
+  const asked = calls.filter((call) => call.table === 'sys_db_object' && call.query !== showsParents.exact && !isProof(call))
   assert.ok(asked.length > 1, `${asked.length} requests`)
   for (const call of asked) {
     assert.ok(call.query.length < 3_500, `a query of ${call.query.length} characters`)
@@ -301,7 +301,7 @@ test('the tables below a table are listed only where the answer can be trusted',
   // Each with its parents up to the table, so that a closed table in between can be seen.
   assert.deepEqual([...((await new Dictionary(fine.sn).childTables('task')) ?? [])], [['incident', ['incident', 'task']], ['u_major_incident', ['u_major_incident', 'incident', 'task']]])
   // Every level of parents is asked for, and the table itself as proof that the query was applied.
-  assert.match(fine.calls[1].query, /^super_class\.name=task\^ORsuper_class\.super_class\.name=task\^OR.*\^ORname=task$/)
+  assert.match(fine.calls.filter((call) => !isProof(call))[1].query, /^super_class\.name=task\^ORsuper_class\.super_class\.name=task\^OR.*\^ORname=task$/)
   assert.equal((await new Dictionary(below([task]).sn).childTables('task'))?.size, 0)
 
   // Not trusted: the table itself is missing from the answer, a row matches none of the conditions, rows are
@@ -356,7 +356,7 @@ test('the tables below a table are followed deeper than one request sees', async
   const below = await new Dictionary(sn).childTables('u_root')
   assert.deepEqual(below?.get('u_deep'), ['u_deep', ...mids, 'u_root'])
   assert.deepEqual(below?.get('u_deeper'), ['u_deeper', 'u_deep', ...mids, 'u_root'])
-  assert.equal(calls.filter((call) => call.query !== showsParents.exact).length, 2)
+  assert.equal(calls.filter((call) => call.query !== showsParents.exact && !isProof(call)).length, 2)
 })
 
 test('an account that is not shown what a table extends gets no list of child tables', async () => {
@@ -415,4 +415,118 @@ test('a view whose list of tables is partly hidden is not taken for a smaller vi
     ])
     await assert.rejects(new Dictionary(sn).table('incident_sla'), (error: unknown) => error instanceof ServiceNowError && error.kind === 'acl', name)
   }
+})
+
+test('a list of child tables is trusted only where the instance filters by every level of parents', async () => {
+  // Measured: a condition the instance cannot use is dropped, and behind another in a chain of ^OR it then matches
+  // nothing. The tables named would come back and none of their child tables. So each level is asked alone for a
+  // table that is two things at once, and an instance that drops the condition answers with a row.
+  const task = tableRow('task', 'Task')
+  const lists: Route[] = [{ table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [task, tableRow('sys_db_object', 'Table')] }, { table: 'sys_db_object', query: '^ORname=task', rows: [task] }]
+  const third = 'super_class.super_class.super_class.name'
+  const dropsNames: Route = { table: 'sys_db_object', exact: `${third}INzz__no_such_table_a^${third}INzz__no_such_table_b`, rows: [task], total: 10_806 }
+  const dropsPatterns: Route = { table: 'sys_db_object', exact: `${third}STARTSWITHzz__no_such_table_a^${third}STARTSWITHzz__no_such_table_b`, rows: [task], total: 10_806 }
+  const notTrusted = (error: unknown) => error instanceof ServiceNowError && error.kind === 'blocked' && /did not filter by it/.test(error.message)
+
+  const byName = fakeInstance([dropsNames, showsParents, ...lists], { tables: { allow: [], deny: ['task'] } })
+  await assert.rejects(new Dictionary(byName.sn).closedTables(), notTrusted)
+  assert.equal(await new Dictionary(fakeInstance([dropsNames, showsParents, ...lists]).sn).childTables('task'), null)
+  // Nothing was asked of the list itself.
+  assert.equal(byName.calls.filter((call) => call.query.endsWith('^ORname=sys_db_object')).length, 0)
+
+  // "Starts with" is asked only where the list has a pattern, and then for every level as well.
+  const plain = fakeInstance([dropsPatterns, showsParents, ...lists], { tables: { allow: [], deny: ['task'] } })
+  assert.deepEqual([...(await new Dictionary(plain.sn).closedTables()).keys()], ['task'])
+  assert.equal(plain.calls.filter(isProof).length, 8)
+  const pattern = fakeInstance([dropsPatterns, showsParents, ...lists], { tables: { allow: [], deny: ['task', 'sn_hr_*'] } })
+  await assert.rejects(new Dictionary(pattern.sn).closedTables(), notTrusted)
+  assert.equal(pattern.calls.filter(isProof).length, 16)
+
+  // Asked once: the proof is remembered with the list.
+  const dict = new Dictionary(plain.sn)
+  await dict.closedTables()
+  const before = plain.calls.length
+  await dict.childTables('task')
+  assert.equal(plain.calls.length - before, 1)
+})
+
+test('a row of the table of tables that cannot be placed makes the list untrusted', async () => {
+  // Without its name a closed table would be on the list under no name, and with a gap among its parents the
+  // place of a parent says nothing about how deep the table is.
+  const proof = tableRow('sys_db_object', 'Table')
+  const nameless = { ...tableRow('u_child', 'Child', 'task'), name: '' }
+  const gap = { ...tableRow('u_child', 'Child', 'task'), 'super_class.name': '', 'super_class.super_class.name': 'task' }
+  for (const [name, row] of [['no name', nameless], ['a gap among the parents', gap]] as const) {
+    const denying = fakeInstance([showsParents, { table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [tableRow('task', 'Task'), row, proof] }], { tables: { allow: [], deny: ['task'] } })
+    await assert.rejects(new Dictionary(denying.sn).closedTables(), (error: unknown) => error instanceof ServiceNowError && error.kind === 'blocked' && /no name, or a gap/.test(error.message), name)
+    const listing = fakeInstance([showsParents, { table: 'sys_db_object', query: '^ORname=task', rows: [tableRow('task', 'Task'), row] }])
+    assert.equal(await new Dictionary(listing.sn).childTables('task'), null, name)
+  }
+})
+
+test('many tables at the eighth level are asked for in requests that stay requests', async () => {
+  // Their names stand in the query once per level of parents. Measured: an instance takes an address of about
+  // 8,200 characters, and a comma takes three of them.
+  const mids = Array.from({ length: 7 }, (_, index) => `u_mid_${7 - index}`)
+  const deep = Array.from({ length: 40 }, (_, index) => tableRow(`u_a_table_with_a_long_name_${String(index).padStart(3, '0')}`, 'Deep', ...mids, 'u_root'))
+  const { sn, calls } = fakeInstance([showsParents, { table: 'sys_db_object', query: 'super_class.name=u_root^', rows: [tableRow('u_root', 'Root'), ...deep] }, { table: 'sys_db_object', query: '^ORname=u_root', rows: [tableRow('u_root', 'Root')] }])
+  const below = await new Dictionary(sn).childTables('u_root')
+  assert.equal(below?.size, 40)
+  const asked = calls.filter((call) => call.query.endsWith('^ORname=u_root'))
+  assert.ok(asked.length > 3, `${asked.length} requests`)
+  for (const call of asked) assert.ok(encodeURIComponent(call.query).length < 6_000, `a query of ${encodeURIComponent(call.query).length} characters in the address`)
+})
+
+test('a parent that cannot be read does not end the chain of a table', async () => {
+  // One request sees eight parents. Where the eighth does not come back when asked for, the chain so far would
+  // pass for the whole of it, and a table nine levels below a closed one for an open table.
+  const mids = Array.from({ length: 8 }, (_, index) => `u_mid_${8 - index}`)
+  const unread: Array<[string, Partial<Route>]> = [['no row', { rows: [] }], ['no row and no total', { rows: [], noTotal: true }]]
+  for (const [name, top] of unread) {
+    const { sn } = fakeInstance([
+      { table: 'sys_db_object', exact: 'name=u_leaf', rows: [tableRow('u_leaf', 'Leaf', ...mids)] },
+      { table: 'sys_db_object', exact: 'name=u_mid_1', ...top },
+    ])
+    await assert.rejects(new Dictionary(sn).table('u_leaf'), (error: unknown) => error instanceof ServiceNowError && error.kind === 'invalid_response' && /"u_mid_1", a parent of "u_leaf"/.test(error.message), name)
+  }
+  // Where it comes back, the chain goes on from it.
+  const { sn } = fakeInstance([
+    { table: 'sys_db_object', exact: 'name=u_leaf', rows: [tableRow('u_leaf', 'Leaf', ...mids)] },
+    { table: 'sys_db_object', exact: 'name=u_mid_1', rows: [tableRow('u_mid_1', 'Mid', 'u_root')] },
+  ])
+  assert.deepEqual((await new Dictionary(sn).table('u_leaf'))?.chain, ['u_leaf', ...mids, 'u_root'])
+})
+
+test('a database view that comes back without a table it joins is not a view of nothing', async () => {
+  // Such a view would pass every check that goes by the tables of a view, and still answer with rows.
+  const { sn } = fakeInstance([
+    { table: 'sys_db_object', rows: [] },
+    { table: 'sys_db_view', query: 'name=incident_sla', rows: [{ sys_id: 'a'.repeat(32), name: 'incident_sla', label: 'Incident SLA' }] },
+    { table: 'sys_db_view_table', rows: [] },
+  ])
+  await assert.rejects(new Dictionary(sn).table('incident_sla'), (error: unknown) => error instanceof ServiceNowError && error.kind === 'invalid_response' && /without a table it joins/.test(error.message))
+})
+
+test('a name that cannot be a table is a failed look-up, not an exception', async () => {
+  const dict = new Dictionary(fakeInstance(dictionaryRoutes).sn)
+  // The promise fails, so that a catch behind the call sees it.
+  assert.equal(await dict.table('My-App').catch(() => 'caught'), 'caught')
+  assert.equal(await dict.childTables('My-App').catch(() => 'caught'), 'caught')
+})
+
+test('which names are tables is asked for many names at once, and remembered', async () => {
+  const { sn, calls } = fakeInstance([{ table: 'sys_db_object', query: 'nameIN', rows: [{ name: 'sys_script' }, { name: 'sys_script_include' }] }])
+  const dict = new Dictionary(sn)
+  const names = ['sys_script_include', 'sys_script', 'sys', 'Not-A-Table', ...Array.from({ length: 60 }, (_, index) => `u_no_table_${index}`)]
+  assert.deepEqual([...(await dict.knownTables(names))].sort(), ['sys_script', 'sys_script_include'])
+  // 63 names that can be a table, forty to a request. The name that cannot be one is not asked for.
+  assert.equal(calls.length, 2)
+  assert.ok(calls.every((call) => !call.query.includes('Not-A-Table')))
+  // Remembered, also for a name that is no table.
+  assert.deepEqual([...(await dict.knownTables(['sys_script', 'sys', 'u_no_table_7']))], ['sys_script'])
+  assert.equal(calls.length, 2)
+
+  // Hidden rows: which of the names are tables cannot be told.
+  const hidden = new Dictionary(fakeInstance([{ table: 'sys_db_object', query: 'nameIN', rows: [{ name: 'sys_script' }, null] }]).sn)
+  await assert.rejects(hidden.knownTables(['sys_script', 'sys_user']), (error: unknown) => error instanceof ServiceNowError && error.kind === 'acl')
 })

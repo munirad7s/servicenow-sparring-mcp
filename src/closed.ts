@@ -1,7 +1,7 @@
 import type { Gate, ServiceNowClient } from './client.js'
 import type { Dictionary } from './dictionary.js'
-import { noConnection, ServiceNowError } from './errors.js'
-import { withCondition } from './query.js'
+import { noConnection, ServiceNowError, unlessNoConnection } from './errors.js'
+import { isTableName, withCondition } from './query.js'
 import { currentCall } from './trace.js'
 
 /**
@@ -27,20 +27,29 @@ export interface ClosedTables extends Gate {
 /** Comments, work notes and the like: their entries are rows of another table. */
 const JOURNALS = new Set(['journal', 'journal_input', 'journal_list'])
 
-/** A query this long does not fit into a URL any more. */
-const MAX_SENT_QUERY = 7_000
+/**
+ * As long as a query may be once it is written into the address of a request. Measured: an instance took an
+ * address of 8,218 characters and answered HTTP 414 to one of 8,223, and a caret or a comma takes three of them.
+ * The rest is left for the fields a request names.
+ */
+const MAX_SENT_QUERY = 6_000
+/** How long a proof that the instance applies a condition holds, and how many are kept. */
+const PROOF_TTL_MS = 10 * 60_000
+const MAX_PROOFS = 400
+/** Values no class has, for a question that has to match nothing. */
+const NO_SUCH_CLASS = ['zz__no_such_class_a', 'zz__no_such_class_b']
+
+/**
+ * A table that holds rows of another without being its child table. A rotated table is spread over parts named
+ * after it with four digits, and an archive rule moves rows into "ar_<table>". Measured on one instance: of 357
+ * parts, every one is named that way or is the table itself; "syslog0003" has no parent, is read like any table,
+ * and answered with 655,964 rows of syslog and of its child tables.
+ */
+const holdsRowsOf = (name: string): string | null => /^ar_(.+)$/.exec(name)?.[1] ?? /^(.+)\d{4}$/.exec(name)?.[1] ?? null
 
 export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTables {
   const blocked = (message: string, table: string) => new ServiceNowError(`${message} Nothing was sent.`, 'blocked', table)
   const childOf = (table: string, parent: string) => `"${table}" is a child table of ${parent}, which is closed on this machine: its rows are rows of that table`
-  /** For a look-up that failed: a lost connection is passed on as it is, anything else is the value given. */
-  const unless =
-    <T>(fallback: T) =>
-    (error: unknown): T => {
-      if (noConnection(error)) throw error
-      return fallback
-    }
-
   async function reason(table: string, seen = new Set<string>()): Promise<string | null> {
     if (!sn.restricted || seen.has(table)) return null
     seen.add(table)
@@ -64,8 +73,33 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     const parent = info.chain.slice(1).find((name) => !sn.allows(name))
     if (parent) return childOf(table, parent)
     for (const member of info.members ?? []) {
+      // A view that joins another view, or something the instance does not know as a table: whose rows it holds
+      // cannot be established one level down, so it is not read, and not described, while tables are closed.
+      const joined = await dict.table(member.table).catch(unlessNoConnection(null))
+      if (!joined || joined.kind === 'database_view') {
+        return `"${table}" is a database view that joins "${member.table}", which is ${joined ? 'a view itself' : 'not known as a table'}: with tables closed on this machine it cannot be established whose rows it holds`
+      }
       const why = await reason(member.table, seen)
       if (why) return `"${table}" is a database view, and ${why}`
+    }
+    // A part of a rotated table, or the archive of a table, holds the rows of that table and of its child tables.
+    for (const name of info.chain) {
+      const base = holdsRowsOf(name)
+      if (!base || !isTableName(base) || seen.has(base)) continue
+      let known
+      try {
+        known = await dict.table(base)
+      } catch (error) {
+        if (noConnection(error)) throw error
+        return `it could not be established whether "${name}" holds rows of "${base}"`
+      }
+      // No such table: the name only looks like a part or an archive.
+      if (!known || known.kind === 'database_view') continue
+      const why = await reason(base, seen)
+      if (why) return `"${name}" holds rows of ${base} (a part of a rotated table, or its archive), and ${why}`
+      if (await holdsClosedBelow(base)) {
+        return `"${name}" holds rows of ${base} (a part of a rotated table, or its archive), which has closed tables below it: ask "${base}" itself, where their rows are left out`
+      }
     }
     return null
   }
@@ -93,11 +127,16 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     return { unlisted: [...children.keys()].some((name) => !sn.allows(name)), byParent: byParent.sort() }
   }
 
-  async function mayHoldClosed(table: string): Promise<boolean> {
-    if (!sn.restricted) return false
-    if ((await reason(table)) !== null || (await deniedBelow(table)).length > 0) return true
+  /** Whether a table that is open has a closed table below it, or may have one. */
+  async function holdsClosedBelow(table: string): Promise<boolean> {
+    if ((await deniedBelow(table)).length > 0) return true
     const below = await allowedBelow(table)
     return below === null || below.unlisted || below.byParent.length > 0
+  }
+
+  async function mayHoldClosed(table: string): Promise<boolean> {
+    if (!sn.restricted) return false
+    return (await reason(table)) !== null || (await holdsClosedBelow(table))
   }
 
   /**
@@ -121,20 +160,49 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
    * Whether the instance applies a condition on a class field for this account. The rows of closed child tables
    * are left out by such a condition, and an instance that drops it answers with them, without a sign. It can drop
    * one: for a field it does not know, for a view that lists the fields it shows (measured: applied all the same
-   * on one instance), or for an account that may not filter by the field. So the instance is asked once per table
-   * and field for rows whose class is empty and filled at once, which has to match nothing.
+   * on one instance), or for an account that may not filter by the field.
+   *
+   * So the instance is asked, per table and field, for rows that are two things at once, which has to match
+   * nothing: a class that is empty and filled, and, where the condition uses them, a class that is one of two
+   * names and one that starts with two. "Is" and "starts with" are asked apart, because an instance can allow one
+   * and not the other (query_match, query_range). Each question stands alone in its query: measured, a part of a
+   * query whose conditions are dropped adds no rows, so several in one query would prove nothing.
+   *
+   * A table without rows answers every question with none, also the one it would have dropped. Such an answer
+   * is taken for this request, where it gives nothing away, and not remembered for the next.
    */
-  const applied = new Set<string>()
-  async function appliesCondition(table: string, field: string): Promise<boolean> {
-    if (applied.has(`${table}.${field}`)) return true
-    const page = await sn.query({ table, query: `${field}ISEMPTY^${field}ISNOTEMPTY`, fields: ['sys_id'], limit: 1, trusted: true }).catch(unless(null))
-    if (!page || page.total !== 0 || page.records.length) return false
-    applied.add(`${table}.${field}`)
-    return true
+  const proofs = new Map<string, { at: number; applied: Promise<boolean> }>()
+  async function prove(table: string, field: string, kinds: string[]): Promise<{ applied: boolean; lasting: boolean }> {
+    const [a, b] = NO_SUCH_CLASS
+    const questions = kinds.map((kind) => (kind === 'ISEMPTY' ? `${field}ISEMPTY^${field}ISNOTEMPTY` : `${field}${kind}${a}^${field}${kind}${b}`))
+    const ask = (query: string) => sn.query({ table, query, fields: ['sys_id'], limit: 1, trusted: true }).catch(unlessNoConnection(null))
+    const [any, ...answers] = await Promise.all([ask(''), ...questions.map(ask)])
+    const applied = answers.every((page) => page !== null && page.total === 0 && page.records.length === 0)
+    return { applied, lasting: Boolean(any && (any.records.length > 0 || (any.total ?? 0) > 0)) }
+  }
+  function appliesCondition(table: string, field: string, condition: string): Promise<boolean> {
+    // Names of tables are written in small letters and operators in capitals, so a name cannot pass for one.
+    const kinds = ['ISEMPTY', ...(condition.includes('IN') ? ['IN'] : []), ...(condition.includes('STARTSWITH') ? ['STARTSWITH'] : [])]
+    const key = `${table}.${field} ${kinds.join(' ')}`
+    const hit = proofs.get(key)
+    if (hit && Date.now() - hit.at < PROOF_TTL_MS) return hit.applied
+
+    const proof = prove(table, field, kinds)
+    const entry = { at: Date.now(), applied: proof.then((result) => result.applied) }
+    proofs.delete(key)
+    proofs.set(key, entry)
+    if (proofs.size > MAX_PROOFS) proofs.delete(proofs.keys().next().value as string)
+    const forget = () => {
+      if (proofs.get(key) === entry) proofs.delete(key)
+    }
+    proof.then((result) => {
+      if (!result.applied || !result.lasting) forget()
+    }, forget)
+    return entry.applied
   }
   /** The condition, after the instance has shown that it applies one on that field. */
   async function proven(table: string, field: string, condition: string | null, what: string): Promise<string | null> {
-    if (!condition || (await appliesCondition(table, field))) return condition
+    if (!condition || (await appliesCondition(table, field, condition))) return condition
     throw blocked(`${what}, and it could not be established that the instance applies a condition on "${field}" for this account: the rows of those tables could not be left out.`, table)
   }
 
@@ -166,16 +234,13 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
         }
       }
 
-      const info = await dict.table(table).catch(unless(null))
-      if (info?.kind === 'database_view') {
+      // What the table is was read a moment ago, to say whether it is closed. Where it cannot be read again, it
+      // is not known whether this is a view, and whose rows a condition would have to leave out.
+      const info = await dict.table(table).catch(unlessNoConnection(null))
+      if (!info) throw blocked(`Tables are closed on this machine, and it could not be established what "${table}" is.`, table)
+      if (info.kind === 'database_view') {
         // A view has no class of its own. Each table it joins brings its child tables along, under its prefix.
         for (const member of info.members ?? []) {
-          // A view that joins another view, or something the instance does not know as a table: whose rows it
-          // holds cannot be established one level down, so it is not read while tables are closed.
-          const joined = await dict.table(member.table).catch(unless(null))
-          if (!joined || joined.kind === 'database_view') {
-            throw blocked(`"${table}" is a database view that joins "${member.table}", which is ${joined ? 'a view itself' : 'not known as a table'}: with tables closed on this machine it cannot be established whose rows it holds.`, table)
-          }
           const field = `${member.prefix}_sys_class_name`
           const condition = await proven(table, field, await classCondition(member.table, field), `"${table}" is a database view that joins "${member.table}", which has closed tables below it`)
           if (condition) conditions.push(condition)
@@ -186,10 +251,13 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
       }
       if (!conditions.length) return query
 
-      const sent = conditions.reduce((whole, condition) => withCondition(whole, condition), query)
-      if (sent.length > MAX_SENT_QUERY) {
-        throw blocked(`"${table}" has more closed child tables below it than a query can leave out. Query one of its open child tables instead.`, table)
-      }
+      // All of them at once, and not before it is known that the result stays a request: a query of many parts
+      // takes the conditions once per part.
+      const added = conditions.join('^')
+      const tooLong = () => blocked(`"${table}" has more closed child tables below it than a query can leave out. Query one of its open child tables instead.`, table)
+      if (query.length + query.split('^NQ').length * (added.length + 1) > 4 * MAX_SENT_QUERY) throw tooLong()
+      const sent = withCondition(query, added)
+      if (encodeURIComponent(sent).length > MAX_SENT_QUERY) throw tooLong()
       const call = currentCall()
       if (call) call.closed.rowsLeftOut = true
       return sent

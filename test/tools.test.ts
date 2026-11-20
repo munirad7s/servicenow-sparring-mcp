@@ -7,7 +7,7 @@ import { buildServer, createContext } from '../src/server.js'
 import { accountRoles } from '../src/tools/instance.js'
 import { queryByContent } from '../src/tools/origin.js'
 import { capturedByName, isClosedRecord, LOOKS_SECRET, payloadTables, scrubSecrets } from '../src/tools/shared.js'
-import { closedTables, column, dictionaryRoutes, fakeInstance, labelled, tableRow, type Route } from './fake.js'
+import { closedTables, column, dictionaryRoutes, fakeInstance, isProof, labelled, tableRow, type Route } from './fake.js'
 
 type Data = Record<string, any>
 
@@ -32,9 +32,8 @@ async function connect(routes: Route[], overrides: Partial<InstanceConfig> = {})
   }
   // The question that has to match nothing, which the server asks before it relies on a condition on a class field,
   // is listed apart: a test that counts the requests to a table means the ones that read it.
-  const PROOF = /^([a-z0-9_.]+)ISEMPTY\^\1ISNOTEMPTY$/
-  const sentTo = (table: string, api = 'table') => calls.filter((entry) => entry.table === table && entry.api === api && !PROOF.test(entry.query))
-  const proofsFrom = (table: string) => calls.filter((entry) => entry.table === table && PROOF.test(entry.query)).map((entry) => entry.query)
+  const sentTo = (table: string, api = 'table') => calls.filter((entry) => entry.table === table && entry.api === api && !isProof(entry))
+  const proofsFrom = (table: string) => calls.filter((entry) => entry.table === table && isProof(entry)).map((entry) => entry.query)
   return { client, call, answer, calls, sentTo, proofsFrom }
 }
 
@@ -794,8 +793,10 @@ test('a database view that joins a parent table leaves out the rows of its close
     { table: 'sys_db_view_table', rows: [{ table: 'task', variable_prefix: 'tsk' }, { table: 'task_sla', variable_prefix: 'sla' }] },
     { table: 'task_with_sla', rows: [{ tsk_number: 'TASK1' }] },
   ]
-  // The question that has to match nothing: the class empty and filled at once.
+  // The questions that have to match nothing: the class empty and filled at once, and one of two names at once.
+  // Beside them one row is asked for, to see that the view has rows at all.
   const PROOF = 'tsk_sys_class_nameISEMPTY^tsk_sys_class_nameISNOTEMPTY'
+  const PROOFS = ['', PROOF, 'tsk_sys_class_nameINzz__no_such_class_a^tsk_sys_class_nameINzz__no_such_class_b']
   const below = closedTables(tableRow('incident', 'Incident', 'task'))
   const { answer, sentTo, proofsFrom } = await connect(familyWorld([below, ...view]), { tables: { allow: [], deny: ['incident'] } })
   const data = await answer('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
@@ -803,7 +804,7 @@ test('a database view that joins a parent table leaves out the rows of its close
   assert.match(data.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
   // Asked once per view, not with every query.
   await answer('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
-  assert.deepEqual(proofsFrom('task_with_sla'), [PROOF])
+  assert.deepEqual(proofsFrom('task_with_sla'), PROOFS)
 
   // A view can list the fields it shows. Where the instance drops a condition on the class, the question matches
   // rows, and then nothing is read: the rows of the closed table could not be left out.
@@ -831,13 +832,15 @@ test('rows of closed child tables are left out only after the instance showed th
   const below = closedTables(tableRow('incident', 'Incident', 'task'))
   const world = (extra: Route[] = []) => familyWorld([below, ...extra, { table: 'task', rows: [{ number: 'TASK1' }] }, { table: 'task_sla', rows: [{ stage: 'x' }] }])
   const closed = { tables: { allow: [], deny: ['incident'] } }
-  // Asked once per table and field: rows whose class is empty and filled at once. No row is.
+  // Asked once per table and field: rows whose class is empty and filled at once, and rows whose class is one
+  // of two names at once. No row is either. Beside them one row is asked for, to see that the table has rows.
+  const questions = (field: string) => ['', `${field}ISEMPTY^${field}ISNOTEMPTY`, `${field}INzz__no_such_class_a^${field}INzz__no_such_class_b`]
   const fine = await connect(world(), closed)
   await fine.answer('sn_query', { table: 'task', fields: ['number'] })
   await fine.answer('sn_query', { table: 'task', fields: ['number'] })
-  assert.deepEqual(fine.proofsFrom('task'), ['sys_class_nameISEMPTY^sys_class_nameISNOTEMPTY'])
+  assert.deepEqual(fine.proofsFrom('task'), questions('sys_class_name'))
   await fine.answer('sn_query', { table: 'task_sla', fields: ['task.number'] })
-  assert.deepEqual(fine.proofsFrom('task_sla'), ['task.sys_class_nameISEMPTY^task.sys_class_nameISNOTEMPTY'])
+  assert.deepEqual(fine.proofsFrom('task_sla'), questions('task.sys_class_name'))
   assert.equal(fine.sentTo('task_sla')[0].query, 'task.sys_class_nameNOT INincident^ORtask.sys_class_nameISEMPTY')
 
   // An instance that drops the condition for this account answers the question with a row, and one that gives no
@@ -858,6 +861,39 @@ test('rows of closed child tables are left out only after the instance showed th
     assert.match(refused.data.message, new RegExp(`could not be established that the instance applies a condition on "${field}" for this account`))
     assert.equal(dropping.sentTo(table).length, 0, table)
   }
+
+  // "Is empty" applied and "is one of" dropped: an instance can allow the one and not the other.
+  const half = await connect(world([{ table: 'task', exact: 'sys_class_nameINzz__no_such_class_a^sys_class_nameINzz__no_such_class_b', rows: [{ sys_id: '1' }] }]), closed)
+  assert.equal((await half.call('sn_query', { table: 'task', fields: ['number'] })).data.error, 'blocked')
+  assert.equal(half.sentTo('task').length, 0)
+
+  // A list with a pattern leaves rows out by "starts with", which is asked as well, and a refusal there counts.
+  const pattern = { tables: { allow: ['task', 'task_sla', 'sys_*', 'u_*'], deny: [] } }
+  const starts = 'sys_class_nameSTARTSWITHzz__no_such_class_a^sys_class_nameSTARTSWITHzz__no_such_class_b'
+  const allowing = (extra: Route[] = []) => familyWorld([...extra, { table: 'sys_db_object', query: '^ORname=task', rows: [tableRow('task', 'Task'), tableRow('incident', 'Incident', 'task')] }, { table: 'task', rows: [{ number: 'TASK1' }] }])
+  const listed = await connect(allowing(), pattern)
+  await listed.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.deepEqual(listed.proofsFrom('task'), [...questions('sys_class_name'), starts])
+  assert.equal(listed.sentTo('task')[0].query, 'sys_class_nameINtask,task_sla^ORsys_class_nameSTARTSWITHsys_^ORsys_class_nameSTARTSWITHu_^ORsys_class_nameISEMPTY')
+  const refusing = await connect(allowing([{ table: 'task', exact: starts, rows: [{ sys_id: '1' }] }]), pattern)
+  assert.equal((await refusing.call('sn_query', { table: 'task', fields: ['number'] })).data.error, 'blocked')
+  assert.equal(refusing.sentTo('task').length, 0)
+})
+
+test('a table without rows proves nothing about a condition, and its answer is not remembered', async () => {
+  // Every question that has to match nothing is answered with nothing by an empty table, also by an instance that
+  // would have dropped the condition. Rows that come later must not be read on the strength of that.
+  const below = closedTables(tableRow('incident', 'Incident', 'task'))
+  const closed = { tables: { allow: [], deny: ['incident'] } }
+  const empty = await connect(familyWorld([below, { table: 'task', rows: [] }]), closed)
+  await empty.answer('sn_query', { table: 'task', fields: ['number'] })
+  await empty.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(empty.proofsFrom('task').length, 6, 'asked again for the second query')
+  // With a row in the table the proof holds, and is asked for once.
+  const filled = await connect(familyWorld([below, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
+  await filled.answer('sn_query', { table: 'task', fields: ['number'] })
+  await filled.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(filled.proofsFrom('task').length, 3)
 })
 
 test('the name and the payload of a captured change are kept back where its record is in a closed table', async () => {
@@ -942,6 +978,78 @@ test('a table with more closed child tables than a query can name is not read', 
   assert.equal(data.error, 'blocked')
   assert.match(data.message, /"task" has more closed child tables below it than a query can leave out/)
   assert.equal(sentTo('task').length, 0)
+})
+
+test('a part of a rotated table, and the archive of a table, are closed with the table whose rows they hold', async () => {
+  // Measured: "syslog0003" has no parent, is read like any table, and holds rows of syslog and of its child tables.
+  // An archive table, "ar_<table>", has no parent either.
+  const one = (name: string, ...parents: string[]): Route => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name, ...parents)] })
+  const tables = [one('syslog'), one('syslog0003'), one('fm_log0003', 'syslog0003'), one('ar_syslog'), one('u_report2024'), one('incident0001'), one('ar_task')]
+  const rows = ['syslog', 'syslog0003', 'fm_log0003', 'ar_syslog', 'u_report2024', 'incident0001', 'ar_task'].map((table): Route => ({ table, rows: [{ sys_id: '1' }] }))
+  const dictionary = ['syslog', 'syslog0003', 'fm_log0003,syslog0003', 'ar_syslog', 'u_report2024', 'incident0001', 'ar_task'].map((names): Route => ({ table: 'sys_dictionary', query: `nameIN${names}^`, rows: [column(names.split(',')[0], 'sys_id', 'GUID')] }))
+
+  const closed = await connect([closedTables(tableRow('syslog', 'Log')), ...tables, ...dictionary, ...rows, ...dictionaryRoutes], { tables: { allow: [], deny: ['syslog'] } })
+  for (const table of ['syslog0003', 'fm_log0003', 'ar_syslog']) {
+    const { data } = await closed.call('sn_query', { table, fields: ['sys_id'] })
+    assert.equal(data.error, 'blocked', table)
+    assert.match(data.message, /holds rows of syslog \(a part of a rotated table, or its archive\), and "syslog" is closed on this machine/, table)
+    assert.equal(closed.sentTo(table).length, 0, table)
+    // Not described either.
+    assert.equal((await closed.call('sn_schema', { table })).data.error, 'blocked', table)
+  }
+  // A name that only looks like a part: no table "u_report" exists.
+  assert.equal((await closed.answer('sn_query', { table: 'u_report2024', fields: ['sys_id'] })).returned, 1)
+
+  // A table that is open and has a closed table below it: its parts would answer with the rows of that table, and
+  // only the table itself leaves them out.
+  const below = await connect([closedTables(tableRow('incident', 'Incident', 'task')), ...tables, one('task0001'), { table: 'task0001', rows: [{ sys_id: '1' }] }, ...dictionary, ...rows, ...dictionaryRoutes], { tables: { allow: [], deny: ['incident'] } })
+  for (const table of ['task0001', 'ar_task']) {
+    const { data } = await below.call('sn_query', { table, fields: ['sys_id'] })
+    assert.equal(data.error, 'blocked', table)
+    assert.match(data.message, /holds rows of task .*, which has closed tables below it: ask "task" itself/, table)
+  }
+  assert.equal((await below.call('sn_query', { table: 'incident0001', fields: ['sys_id'] })).data.error, 'blocked')
+  // The parts of a table that is open, with nothing closed below it, are read.
+  assert.equal((await below.answer('sn_query', { table: 'syslog0003', fields: ['sys_id'] })).returned, 1)
+  assert.equal((await below.answer('sn_query', { table: 'ar_syslog', fields: ['sys_id'] })).returned, 1)
+
+  // Without closed tables nothing of this is asked.
+  const open = await connect([...tables, ...dictionary, ...rows, ...dictionaryRoutes])
+  await open.answer('sn_query', { table: 'syslog0003', fields: ['sys_id'] })
+  assert.equal(open.calls.filter((call) => call.query === 'name=syslog').length, 0)
+})
+
+test('a database view that joins another view is not described either while tables are closed', async () => {
+  const views: Route[] = [
+    { table: 'sys_db_object', exact: 'name=outer_view', rows: [] },
+    { table: 'sys_db_object', exact: 'name=inner_view', rows: [] },
+    { table: 'sys_db_view', query: 'name=outer_view', rows: [{ sys_id: 'e'.repeat(32), name: 'outer_view', label: 'Outer' }] },
+    { table: 'sys_db_view', query: 'name=inner_view', rows: [{ sys_id: 'f'.repeat(32), name: 'inner_view', label: 'Inner' }] },
+    { table: 'sys_db_view_table', query: `view=${'e'.repeat(32)}`, rows: [{ table: 'inner_view', variable_prefix: 'in' }] },
+    { table: 'sys_db_view_table', query: `view=${'f'.repeat(32)}`, rows: [{ table: 'incident', variable_prefix: 'inc' }] },
+  ]
+  const closed = await connect([...views, ...dictionaryRoutes], { tables: { allow: [], deny: ['sys_user'] } })
+  for (const tool of ['sn_schema', 'sn_dependencies', 'sn_query']) {
+    const { data } = await closed.call(tool, { table: 'outer_view' })
+    assert.equal(data.error, 'blocked', tool)
+    assert.match(data.message, /"outer_view" is a database view that joins "inner_view", which is a view itself/, tool)
+  }
+  // The inner view joins tables only, and none of them is closed.
+  assert.equal((await closed.answer('sn_schema', { table: 'inner_view' })).table.name, 'inner_view')
+})
+
+test('a query of many parts is refused before the conditions for closed tables are written into each of them', async () => {
+  // Each part joined by ^NQ takes the conditions once. Five hundred parts and a long list of closed tables would
+  // be megabytes of text before the length was looked at.
+  const children = Array.from({ length: 60 }, (_, index) => tableRow(`u_closed_child_${String(index).padStart(3, '0')}`, 'Child', 'u_closed_parent', 'task'))
+  const routes: Route[] = [closedTables(tableRow('u_closed_parent', 'Parent', 'task'), ...children), ...dictionaryRoutes, { table: 'task', rows: [{ number: 'TASK1' }] }]
+  const { call, sentTo } = await connect(routes, { tables: { allow: [], deny: ['u_closed_parent'] } })
+  const started = Date.now()
+  const { data } = await call('sn_query', { table: 'task', query: Array.from({ length: 500 }, () => 'number=1').join('^NQ'), fields: ['number'] })
+  assert.equal(data.error, 'blocked')
+  assert.match(data.message, /more closed child tables below it than a query can leave out/)
+  assert.equal(sentTo('task').length, 0)
+  assert.ok(Date.now() - started < 2_000, `${Date.now() - started} ms`)
 })
 
 test('the text of comments and work notes is left out where the table of journal entries is closed', async () => {

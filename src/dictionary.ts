@@ -1,5 +1,5 @@
 import type { Page, QueryOptions, Row, ServiceNowClient } from './client.js'
-import { noConnection, ServiceNowError, unusableAnswer } from './errors.js'
+import { noConnection, ServiceNowError, unlessNoConnection, unusableAnswer } from './errors.js'
 import { assertTableName, isTableName } from './query.js'
 
 export interface Column {
@@ -88,6 +88,39 @@ const PARENT_DEPTH = 8
 const PARENT_FIELDS = Array.from({ length: PARENT_DEPTH }, (_, i) => `${'super_class.'.repeat(i + 1)}name`)
 const MAX_CHAIN = 32
 const MAX_ENTRIES = 400
+/** Names that are no table, for a question that has to match nothing. */
+const NO_SUCH_TABLE = ['zz__no_such_table_a', 'zz__no_such_table_b']
+/** As many names as are remembered to be a table or none. An entry is a name and a flag. */
+const MAX_KNOWN_NAMES = 5_000
+
+/**
+ * The parents of a row of sys_db_object as they were asked for, nearest first. null if the row cannot be used: it
+ * came without its name, or with a gap among its parents, so that the place of a parent in the list says nothing.
+ */
+function parentsOf(row: Record<string, unknown>): string[] | null {
+  if (typeof row.name !== 'string' || !row.name) return null
+  const parents: string[] = []
+  let ended = false
+  for (const field of PARENT_FIELDS) {
+    const parent = row[field]
+    const filled = typeof parent === 'string' && parent !== ''
+    if (filled && ended) return null
+    if (filled) parents.push(parent)
+    else ended = true
+  }
+  return parents
+}
+
+/** Names in groups of at most forty, none longer in a query than a request should carry. */
+function inGroups(names: string[], length = 1_500): string[][] {
+  const groups: string[][] = []
+  for (const name of names) {
+    const last = groups.at(-1)
+    if (!last || last.length >= 40 || last.join(',').length + name.length + 1 > length) groups.push([name])
+    else last.push(name)
+  }
+  return groups
+}
 
 const OVERRIDABLE = ['mandatory', 'read_only', 'default_value', 'reference_qual', 'attributes', 'dependent', 'calculation', 'display']
 
@@ -110,6 +143,7 @@ export class Dictionary {
   private readonly settings = new Map<string, Entry<boolean | null>>()
   private readonly closedSets = new Map<string, Entry<Map<string, string[]>>>()
   private readonly parentChecks = new Map<string, Entry<boolean>>()
+  private readonly knownNames = new Map<string, { table: boolean; at: number }>()
 
   /**
    * The client, for the lookups the gate of closed tables is built from: what a table is, what it extends, which
@@ -139,9 +173,39 @@ export class Dictionary {
     }
   }
 
-  table(name: string): Promise<TableInfo | null> {
+  /** What a name is on the instance: a table with its parents, a database view with the tables it joins, or null. */
+  async table(name: string): Promise<TableInfo | null> {
+    // In an async function, so that a name that cannot be a table is a failed look-up like any other, which the
+    // caller's catch sees, and not an exception thrown past it.
     assertTableName(name)
     return this.cached(this.tables, name, () => this.loadTable(name))
+  }
+
+  /**
+   * Which of these names are tables of the instance. One request per forty names, and the answer is remembered,
+   * also for a name that is none: an update name is cut in many places to find the table it begins with, and a
+   * page of them shares most of the cuts.
+   */
+  async knownTables(names: string[]): Promise<Set<string>> {
+    const wanted = [...new Set(names)].filter(isTableName)
+    const now = Date.now()
+    const fresh = (name: string) => {
+      const hit = this.knownNames.get(name)
+      return hit !== undefined && now - hit.at < this.ttlMs
+    }
+    for (const group of inGroups(wanted.filter((name) => !fresh(name)))) {
+      const { records, total, complete } = await this.sn.all<Record<string, string>>({ table: 'sys_db_object', query: `nameIN${group.join(',')}`, fields: ['name'] }, 1_000)
+      if (!complete || (total !== null && records.length < total)) {
+        throw new ServiceNowError('It could not be read completely which of these names are tables: rows of sys_db_object are hidden from this account.', 'acl', 'sys_db_object')
+      }
+      const found = new Set(records.map((row) => row.name))
+      for (const name of group) {
+        this.knownNames.delete(name)
+        this.knownNames.set(name, { table: found.has(name), at: now })
+      }
+      while (this.knownNames.size > MAX_KNOWN_NAMES) this.knownNames.delete(this.knownNames.keys().next().value as string)
+    }
+    return new Set(wanted.filter((name) => this.knownNames.get(name)?.table))
   }
 
   /**
@@ -151,6 +215,7 @@ export class Dictionary {
   forget(name: string): void {
     for (const cache of [this.tables, this.columnSets, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.childSets]) cache.delete(name)
     for (const key of [...this.choiceLists.keys()]) if (key.startsWith(`${name}.`)) this.choiceLists.delete(key)
+    this.knownNames.delete(name)
   }
 
   /** Own and inherited fields of a table, without dictionary overrides. null if the table is unknown. */
@@ -343,16 +408,31 @@ export class Dictionary {
   }
 
   /**
-   * Whether this account can be told which table a table extends. The lists of child tables are built from
-   * conditions on that field. An account that may not read it could be answered as if those conditions were not
-   * there: then a table named on a list would come back, and none of its child tables, and nothing in the answer
-   * would show it. So the instance has to hand out one table together with its parent before a list is trusted.
+   * Whether this account can be told which table a table extends, and whether the instance filters by it. The lists
+   * of child tables are built from conditions on the parents of a table, eight levels up.
+   *
+   * An account that may not read the parent of a table could be answered as if those conditions were not there. So
+   * the instance has to hand out one table together with its parent first.
+   *
+   * Reading is not filtering. Measured: a condition the instance cannot use is dropped, and where it stands behind
+   * another in a chain of ^OR it then matches nothing. The table named on a list would come back, none of its child
+   * tables, and nothing in the answer would show it. Several such questions in one query, joined by ^NQ, prove
+   * nothing either: a part whose conditions are dropped adds no rows. So each of the eight paths is asked alone for
+   * a table that is two things at once. Where the condition is applied no row matches, and where it is dropped
+   * every table comes back. "patterns" asks the same with STARTSWITH, which a list with patterns needs and which
+   * an instance can allow or refuse apart from "is".
    */
-  private parentsReadable(): Promise<boolean> {
-    return this.cached(this.parentChecks, 'super_class', async () => {
+  private parentsUsable(patterns: boolean): Promise<boolean> {
+    return this.cached(this.parentChecks, patterns ? 'patterns' : 'names', async () => {
       const page = await this.sn.query<Record<string, string>>({ table: 'sys_db_object', query: 'super_class.nameISNOTEMPTY', fields: ['name', 'super_class.name'], limit: 1 })
-      const parent = page.records[0]?.['super_class.name']
-      return typeof parent === 'string' && parent !== ''
+      const shown = page.records[0]
+      const filled = (value: unknown) => typeof value === 'string' && value !== ''
+      if (!shown || !filled(shown.name) || !filled(shown['super_class.name'])) return false
+
+      const [a, b] = NO_SUCH_TABLE
+      const questions = PARENT_FIELDS.flatMap((path) => [`${path}IN${a}^${path}IN${b}`, ...(patterns ? [`${path}STARTSWITH${a}^${path}STARTSWITH${b}`] : [])])
+      const answers = await Promise.all(questions.map((query) => this.sn.query<Record<string, string>>({ table: 'sys_db_object', query, fields: ['sys_id'], limit: 1 })))
+      return answers.every((answer) => answer.total === 0 && answer.records.length === 0)
     })
   }
 
@@ -378,11 +458,8 @@ export class Dictionary {
       const untrusted = (why: string) =>
         new ServiceNowError(`Tables are closed on this machine, and the list of their child tables could not be established (${why}). Nothing was sent.`, 'blocked', SENTINEL)
       const closed = new Map<string, string[]>()
-      const readable = await this.parentsReadable().catch((error) => {
-        if (noConnection(error)) throw error
-        return false
-      })
-      if (!readable) throw untrusted('the instance did not show this account which table a table extends (sys_db_object.super_class)')
+      const usable = await this.parentsUsable(wanted.length > 0).catch(unlessNoConnection(false))
+      if (!usable) throw untrusted('the instance did not show this account which table a table extends, or did not filter by it (sys_db_object.super_class)')
 
       /**
        * The tables that carry one of these names, or match one of these patterns, at their own name or at one of
@@ -410,7 +487,9 @@ export class Dictionary {
           if (!complete || (total !== null && records.length < total)) throw untrusted('sys_db_object could not be read completely')
           if (!records.some((row) => row.name === SENTINEL)) throw untrusted('the instance did not answer the query as written')
           for (const row of records) {
-            const chain = [row.name, ...PARENT_FIELDS.map((field) => row[field])].filter((name): name is string => typeof name === 'string' && name !== '')
+            const parents = parentsOf(row)
+            if (!parents) throw untrusted('sys_db_object answered with a row that has no name, or a gap among its parents')
+            const chain = [row.name, ...parents]
             const at = chain.findIndex(counts)
             if (at >= 0) {
               if (!closed.has(row.name)) closed.set(row.name, chain)
@@ -455,21 +534,18 @@ export class Dictionary {
    * null if the list cannot be trusted, for the reasons given at closedTables: the caller then has to assume that
    * a closed table is among them.
    */
-  childTables(table: string): Promise<Map<string, string[]> | null> {
+  async childTables(table: string): Promise<Map<string, string[]> | null> {
     assertTableName(table)
     return this.cached(this.childSets, table, async () => {
-      const readable = await this.parentsReadable().catch((error) => {
-        if (noConnection(error)) throw error
-        return false
-      })
-      if (!readable) return null
+      const usable = await this.parentsUsable(false).catch(unlessNoConnection(false))
+      if (!usable) return null
       const below = new Map<string, string[]>()
       let above = [table]
       for (let round = 0; above.length; round++) {
         if (round * PARENT_DEPTH >= MAX_CHAIN) return null
         const deepest = new Set<string>()
-        for (let from = 0; from < above.length; from += 40) {
-          const group = above.slice(from, from + 40)
+        // The names stand in the query once per level: few enough of them at a time that it stays a request.
+        for (const group of inGroups(above, 400)) {
           const under = (path: string) => (group.length === 1 ? `${path}=${group[0]}` : `${path}IN${group.join(',')}`)
           const query = `${PARENT_FIELDS.map(under).join('^OR')}^ORname=${table}`
           const read = await this.sn.all<Record<string, string>>({ table: 'sys_db_object', query, fields: ['name', ...PARENT_FIELDS] }, 3_000).catch((error) => {
@@ -481,10 +557,12 @@ export class Dictionary {
           if (!read.records.some((row) => row.name === table)) return null
           for (const row of read.records) {
             if (row.name === table) continue
-            const parents = PARENT_FIELDS.map((path) => row[path]).filter((name): name is string => typeof name === 'string' && name !== '')
+            const parents = parentsOf(row)
+            // A row without a name, or with a gap among its parents, cannot be placed.
+            if (!parents) return null
             const at = parents.findIndex((name) => group.includes(name))
             // A row that has none of the tables asked for among its parents matches none of the conditions.
-            if (typeof row.name !== 'string' || !row.name || at < 0) return null
+            if (at < 0) return null
             // Up to the table it was found under, and from there the way that table was found.
             below.set(row.name, [row.name, ...parents.slice(0, at + 1), ...(below.get(parents[at])?.slice(1) ?? [])])
             // Found at the eighth parent: what is below this one was out of sight.
@@ -525,7 +603,7 @@ export class Dictionary {
   emptyOnInvalidQuery(): Promise<boolean | null> {
     return this.cached(this.settings, 'emptyOnInvalidQuery', async () => {
       const name = 'glide.invalid_query.returns_no_rows'
-      const page = await this.gated.query<Record<string, string>>({ table: 'sys_properties', query: `name=${name}`, fields: ['name', 'value'], limit: 1 }).catch(() => null)
+      const page = await this.gated.query<Record<string, string>>({ table: 'sys_properties', query: `name=${name}`, fields: ['name', 'value'], limit: 1 }).catch(unlessNoConnection(null))
       if (!page || (page.records.length === 0 && (page.total ?? 0) > 0)) return null
       return page.records.find((row) => row.name === name)?.value === 'true'
     })
@@ -594,7 +672,9 @@ export class Dictionary {
           throw new ServiceNowError(`"${current}" has an entry in sys_db_object, but this account may not read it.`, 'acl', 'sys_db_object')
         }
         if (chain.length === 0) return this.loadView(name)
-        break
+        // The chain so far ended on this table because one request sees no further. What it extends is not known,
+        // and a chain cut short would pass for a complete one.
+        throw unusableAnswer(`"${current}", a parent of "${name}", did not come back from sys_db_object, so the parents above it could not be read.`, 'sys_db_object')
       }
 
       if (chain.length === 0) {
@@ -655,6 +735,10 @@ export class Dictionary {
     // A row that cannot be used means the list of joined tables is not complete.
     if (members.length < joined.records.length || (joined.total === null && joined.records.length === 50)) {
       throw unusableAnswer(`The tables of the database view "${name}" could not be read completely.`, 'sys_db_view_table')
+    }
+    // A view answers with the rows of the tables it joins. With none listed, whose rows it holds is not known.
+    if (!members.length) {
+      throw unusableAnswer(`The database view "${name}" came back without a table it joins, so it could not be told whose rows it holds.`, 'sys_db_view_table')
     }
     return { name, label: String(view.label ?? ''), chain: [name], kind: 'database_view', members }
   }
