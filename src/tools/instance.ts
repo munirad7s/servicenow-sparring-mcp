@@ -195,7 +195,8 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
               fields: ['name', 'value'],
               limit: 5,
             })
-            .then((page) => new Map(page.records.map((row) => [row.name, row.value])))
+            // As text, whatever the instance answered with: the answer of this tool promises text.
+            .then((page) => new Map(page.records.filter((row) => typeof row.name === 'string' && typeof row.value === 'string').map((row) => [row.name, row.value])))
             .catch(() => null),
           recentUpgrades(sn).catch(() => null),
           probe(sn, 'sys_store_app', 'active=true'),

@@ -158,8 +158,8 @@ Also measured:
 - A database view can list the fields it shows of a table (104 of 558 views do). A condition on the class of a
   joined table, `<prefix>_sys_class_name`, was applied on views whose list leaves that field out: a view of 44
   rows, 7 of them incidents, answered with 37 where incidents were left out. The server does not rely on it. Before
-  it leaves rows out of a view this way, it asks the view for rows whose class is empty and filled at once, which
-  has to match nothing.
+  it leaves rows out of a view this way, it asks the view for rows whose class is two things at once (empty and
+  filled, and one of two names), which has to match nothing.
 - A journal field comes back empty unless display values are asked for: the stored value of `work_notes` had
   length 0 where its display value had 1,020 characters. The entries are rows of `sys_journal_field`. The server
   says so when such a field is read without `displayValue`.
@@ -174,6 +174,35 @@ Also measured:
   checked" and says that the field is the reason, not the table.
 - Three carets in a row are read as a literal `^` followed by a separator: `active=false^^^priority=1` applies both
   conditions.
+- Two carets in front of a keyword stay a literal `^`. Of 82 incidents, 48 had the category "inquiry" and 13
+  "software": `category=inquiry^^NQcategory=software` matched none, in both APIs, and so did the same with `^^OR`,
+  `^^EQ` and `^^ORDERBY`. The server reads them the same way.
+- A condition on a field the instance does not know is dropped, and what that does depends on where it stands.
+  Alone, or joined with `^`, the query answers as if it were not there: `nosuchfield=xyz` returned all 10,806
+  tables. First in a chain of `^OR`, it takes the chain with it: `nosuchfield=xyz^ORname=sys_db_object` returned
+  all 10,806. Behind another condition in the chain, it matches nothing: `name=sys_db_object^ORnosuchfield=xyz`
+  returned 1. And a part of a query joined by `^NQ` whose conditions are all dropped adds no rows:
+  `nosuchISEMPTY^nosuchISNOTEMPTY^NQname=sys_db_object` returned 1. So a question that has to match nothing
+  proves that a condition is applied only where it stands alone in its query, and the server asks it that way.
+- A rotated table is stored in parts named after it with four digits. Of 357 parts on one instance, every one is
+  named that way or is the table itself. `syslog0003` extends nothing, is read through the Table API like any
+  table, and held 655,964 rows whose class is `syslog` or one of its child tables. The child tables have parts of
+  their own, which extend the parts of the parent. An archive table, `ar_<table>`, extends nothing either. The
+  server closes all of them with the table whose rows they hold.
+- An update name is compared without regard to case as well: `name=SYS_SCRIPT_<sys_id>` found the captured change
+  of `sys_script_<sys_id>`, and the same in `sys_update_version` and `sys_metadata`.
+- A linked application file (`sys_metadata_link`) is named after the record it links to: its `sys_name`, a field
+  it inherits from `sys_metadata`, is the display name of that record, and its payload is the whole record in a
+  CDATA section. Of 92 on one instance, 16 linked to records of one table and carried their names.
+- What a field shows beside its stored value depends on its kind. Of the 167 kinds of fields of one instance, 35
+  showed something else for at least one row: a reference, a list and an attachment field the name of a record;
+  a condition a sentence with the names behind its sys_ids; a choice, a class and a stage their label; dates,
+  times and durations another form; a currency its unit.
+- `NSAMEAS` leaves out the rows where either field is empty. Of 82 incidents, 48 had a caller and nobody who
+  resolved them and 28 had two different people there: `caller_idNSAMEASresolved_by` matched the 28.
+- An instance takes a request up to a length. One instance took an address of 8,218 characters and answered HTTP
+  414 to one of 8,223, whatever it consisted of. `^`, `,` and `=` are written with three characters there, so a
+  query of 2,701 carets was the longest of its kind. The server does not send a request longer than 8,000.
 
 ## Not measured
 

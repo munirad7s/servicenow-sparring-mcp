@@ -5,8 +5,95 @@ answer; such changes are listed under "Changed".
 
 ## Unreleased
 
+Found by three reviews of 0.3.4 and by measuring on a live instance what they claimed about the platform.
+
+### Security
+
+- **A closed table could be read through the parts it is stored in.** Measured: a rotated table is spread over
+  parts named after it with four digits. `syslog0003` extends nothing, is read like any table, and answered with
+  655,964 rows of `syslog` and of its child tables. An archive table, `ar_<table>`, extends nothing either. Both
+  are closed now with the table whose rows they hold, and where that table is open and has a closed table below
+  it, they are closed all the same.
+- **An update name in capitals got past the check.** Measured: the instance finds `sys_script_<sys_id>` under
+  `SYS_SCRIPT_<sys_id>`. `sn_origin` then answered with the readable name and the change history of a record of
+  a closed table. A name is judged in small letters now.
+- **The list of child tables could be short without a sign.** Measured: a condition the instance cannot use is
+  dropped, and where it stands behind another in a chain of `^OR` it then matches nothing. For an account that
+  may read what a table extends and may not filter by it, the tables named on a list would have come back and
+  none of their child tables. Each level of parents is now asked alone for a table that is two things at once,
+  which has to match nothing, before a list is trusted. Several such questions in one query prove nothing:
+  measured, a part of a query joined by `^NQ` whose conditions are dropped adds no rows.
+- The proof that the instance applies a condition on the class of a row asked only whether the class is empty and
+  filled at once. It now asks the same for "is one of" and, where a list has a pattern, for "starts with": an
+  instance can allow one kind of condition and not the other. A table without rows answered every such question
+  with nothing, and that answer was remembered for the rows that came later. It holds for one request now, and a
+  proof is kept for ten minutes, not for good.
+- **A linked application file gave away the record it links to.** Measured: such a file is named after that
+  record, through a field it inherits, and carries it as its payload. The check for names went by the table that
+  defines a field and missed it. Read from its own table, the name is now held against the table the row names;
+  read as rows of `sys_metadata`, where nothing says which table the record is of, linked files are left out
+  while tables are closed, and their captured changes count as those of a closed table.
+- **A payload hid the table of a record behind the way it was written:** a `>` inside an attribute in front of
+  the one that names the table, an element that was never ended, a second wrapper, a name in capitals or with a
+  prefix, a record inside a CDATA section without an action on it, markup written with entities. A payload that
+  names more than forty tables is withheld without looking at each.
+- **The secret scrubber missed a value** behind an attribute that holds `>`, in a value split over two CDATA
+  sections, behind an escaped `/` or `=` in JSON inside a JSON string, and in a system property whose record
+  carried a second element called "type". Checked on 1,292 real payloads of an instance, 2.3 MB: the old and the
+  new reading take out the same 358 values and name the same tables.
+- A parent chain that one request could not read to its end was taken for complete where the next request came
+  back empty: a table nine levels below a table that is not on the list of readable ones passed for open.
+- A database view that came back without a table it joins passed every check that goes by those tables. A view
+  that joins another view was refused by a query and still described by `sn_schema`.
+- A table the deny list names counts for the names of its records whether or not the instance still lists it:
+  the captured changes of a table that was dropped are still there.
+- What a field shows beside its stored value is passed on only for the kinds of fields measured to show nothing
+  of other records. Measured for each of the 167 kinds of fields of one instance: 35 show something other than
+  they store, among them a condition, which shows the names behind the sys_ids it holds, and an attachment
+  field, which shows the name of its file.
+- A field of a database view is judged by the table it comes from also where the dictionary of that table cannot
+  be read, and by its name where the definition of the view cannot be read either. Before, the value of a system
+  property, a payload or the name of a record of another table passed there unrecognised.
+- More tables whose rows carry names of records of other tables: what another instance sent for comparison, what
+  one scope may use of another, and the records people picked in reference fields.
+- With a list of the only tables that may be read, the server went on reading `sys_db_object` and
+  `sys_dictionary` where the list closed them through their parent. That closes everything now, as the README
+  said, and the message names the table that is missing from the list.
+- A text search is refused on a table below the table of system properties.
+
 ### Fixed
 
+- **A login rejected in the middle of a call** made `sn_plugins` say that a table is closed on this machine, and
+  `sn_dependencies` answer with every category unchecked. Both pass it on now, and so do the look-ups of
+  `sn_origin` that still swallowed it. A setting of the instance that could not be read because of a time limit
+  was remembered as "unknown" for ten minutes.
+- `sn_origin` said "not found" for a record that a table had left out with the rows of its closed child tables,
+  and "out of the box" where the instance gave no total for the entries of upgrades, so that a newer entry could
+  be hidden. Whether rows were left out is read from the query that was sent: a name that says which table its
+  record is of still gets "not found".
+- **A call refused because of a closed table left no line in the audit log** where it was refused before any
+  request was made, which is most of them. It has one now, with what was asked.
+- **One call could send 1,460 requests** by naming 730 tables that do not exist. A call ends after 500 now. The
+  same condition is looked up once however often it stands in a query, and a list that could not be read is
+  asked for once.
+- With a list of the only tables that may be read, the names of labels and dictionary entries were withheld
+  although their table was on the list: only the four longest beginnings of a name were looked up. A name whose
+  beginning cannot be a table ended the call with an error. The tables of a page of names are asked for
+  together now: measured, `sn_delta` with 200 rows stays at 32 requests.
+- A name that ends in a sys_id says which table its record is of. With business rules closed, the names of
+  script includes were withheld as well, because `sys_script_include_…` also begins with `sys_script`.
+- **A request longer than the instance takes is not sent.** Measured: an address of 8,218 characters was taken
+  and one of 8,223 answered with HTTP 414, and a caret, a comma or an equals sign takes three of them. The limits
+  counted the characters of the query, so a query of 3,000 characters could fail that way.
+- Three more inputs cost their length squared: many elements that share one end with blanks behind it, wrappers
+  that never end, and an update name of thousands of words.
+- Rows nested thousands of levels deep ended the call with an error of the runtime. They are an answer that
+  cannot be used now.
+- The audit writer holds at most ten thousand lines that wait to be written, and says how many it dropped.
+- `NSAMEAS` leaves out the rows where the second field is empty as well, and the answer says so. Measured: 48
+  incidents had a caller and nobody who resolved them, and the condition matched the 28 that had two people.
+- `sn_schema` judges whether a table is closed by what it extends and joins now, not by what was read up to ten
+  minutes ago.
 - **Nothing held the number of requests that are with the instance at a time.** The README said eight, and the
   functions kept to it where they knew what they were asking for. Measured with a list of the only tables that
   may be read: `sn_delta` with 200 rows had 13 requests with the instance at once, because it looks up the table
@@ -22,6 +109,12 @@ answer; such changes are listed under "Changed".
   the paging and the error texts: the first row of an answer is always shown, however large (reading on would
   otherwise never get past it); a refusal by the instance counts as a login that worked; the roles of the account
   are looked up only with a user name that can stand in a query; a user name without a password is named as that.
+
+### Changed
+
+- With tables closed on the machine, the first calls cost more requests, because more is proven before it is
+  relied on. Measured on a fresh server: 14 requests to list the 1,349 tables below a closed one, where it was 5,
+  and 15 for the first query on the parent of a closed table.
 
 ## 0.3.4 (2026-11-20)
 

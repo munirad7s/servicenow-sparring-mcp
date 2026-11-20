@@ -733,7 +733,7 @@ export class Dictionary {
 
     const members = joined.records
       .filter((row) => isTableName(row.table) && row.table !== name && /^[a-z0-9_]{1,40}$/.test(String(row.variable_prefix)))
-      .map((row) => ({ table: row.table, prefix: row.variable_prefix }))
+      .map((row) => ({ table: row.table, prefix: String(row.variable_prefix) }))
     // A row that cannot be used means the list of joined tables is not complete.
     if (members.length < joined.records.length || (joined.total === null && joined.records.length === 50)) {
       throw unusableAnswer(`The tables of the database view "${name}" could not be read completely.`, 'sys_db_view_table')

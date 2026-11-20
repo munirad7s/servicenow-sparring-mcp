@@ -117,10 +117,11 @@ Everything a tool returns goes to the MCP client and from there to the model it 
 decide what can be read. On the machine that runs the server, SERVICENOW_TABLE_ALLOW and SERVICENOW_TABLE_DENY can
 keep the rows of tables away from it. One set of rules decides for every request of every tool: a closed table is
 not read as itself, through a dot-walk, through a database view, as rows of a parent table, or as the name behind a
-reference. A child table of a closed table is closed as well, at any depth. A reference whose record can be a row
-of a closed table can be compared with a sys_id, but not with text and not sorted by, and a text search is refused
-on a table that has one. The name and the payload of a captured change are withheld where its record is in a closed
-table. Not covered: plain text fields that carry something from a closed table, such as the user name in
+reference. A child table of a closed table is closed as well, at any depth, and so are the parts a rotated table
+is stored in and the archive of a table. A reference whose record can be a row of a closed table can be compared
+with a sys_id, but not with text and not sorted by, and a text search is refused on a table that has one. The name
+and the payload of a captured change are withheld where its record is in a closed table. What a field shows beside
+its stored value is passed on only for kinds of fields that show nothing of other records. Not covered: plain text fields that carry something from a closed table, such as the user name in
 sys_created_by, and tables that record the content of others (sys_audit, sys_history_line, sys_journal_field). A
 table closed that way is reported as an error of kind \`blocked\`.
 

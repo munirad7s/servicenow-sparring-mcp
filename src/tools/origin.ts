@@ -143,7 +143,8 @@ function companyPrefix(sn: ServiceNowClient): Promise<string> {
         const row = page.records.find((item) => item.name === 'glide.appcreator.company.code')
         // A property that matches and did not come back is hidden from this account. That is not "not set".
         if (!row && page.total !== 0) throw new ServiceNowError('The company code is hidden from this account, or the instance gave no total.', 'acl', 'sys_properties')
-        return row?.value ?? ''
+        // As text, whatever the instance answered with.
+        return typeof row?.value === 'string' ? row.value : ''
       })
       .then((code) => (/^[a-z0-9]{1,40}$/i.test(code.trim()) ? `x_${code.trim().toLowerCase()}_` : ''))
     prefixCache.set(sn, known)

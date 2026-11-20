@@ -766,7 +766,9 @@ async function keepSecretsOutOfReach(
     if (payload) throw refuse(`"${payload.name}" holds whole records as text, secrets included`)
     // On sys_properties itself the properties that hold secrets are taken out of the query, below. Through a view
     // their type is not at hand.
-    if (table !== 'sys_properties' && (await propertyValueFields(ctx, table)).any) throw refuse('this view reads the values of system properties, and some of them are secrets')
+    if (table !== 'sys_properties' && ((await propertyValueFields(ctx, table)).any || all.some(isPropertyValue))) {
+      throw refuse('this table hands out the values of system properties, as a view of them or as a table below theirs, and some of them are secrets')
+    }
     // The name of a record behind a reference is found by the search as well, and some tables are named after
     // records of other tables.
     if (ctx.sn.restricted) {

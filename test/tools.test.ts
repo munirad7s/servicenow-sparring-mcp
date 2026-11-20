@@ -2230,6 +2230,24 @@ test('what a field shows is passed on only for kinds of fields that show nothing
   assert.deepEqual((await open.answer('sn_query', wanted)).records[0].u_filter, { value: `caller_id=${ID}`, display: 'Caller is Abel Tuter' })
 })
 
+test('a text search is refused on a table below the table of system properties', async () => {
+  // Such a table hands out the value of a property under its own name, and a search reads fields it does not
+  // name: the properties that hold a secret could not be left out of it.
+  const below: Route[] = [
+    { table: 'sys_db_object', exact: 'name=u_props', rows: [tableRow('u_props', 'More properties', 'sys_properties')] },
+    { table: 'sys_dictionary', query: 'nameINu_props,sys_properties', rows: [column('sys_properties', 'name'), column('sys_properties', 'value'), column('sys_properties', 'type'), column('u_props', 'u_note')] },
+    ...dictionaryRoutes,
+    { table: 'u_props', rows: [{ name: 'x', value: 'ciphertext', type: 'password2', u_note: 'n' }] },
+  ]
+  const { call, answer, sentTo } = await connect(below)
+  const { data } = await call('sn_query', { table: 'u_props', query: '123TEXTQUERY321=cipher' })
+  assert.equal(data.error, 'validation')
+  assert.match(data.message, /hands out the values of system properties/)
+  assert.equal(sentTo('u_props').length, 0)
+  // Read, the value comes without the type that would say whether it is a secret, so it is withheld whatever it holds.
+  assert.equal((await answer('sn_query', { table: 'u_props', fields: ['name', 'value'] })).records[0].value, '[withheld: this field holds a secret]')
+})
+
 test('the value of a system property is not handed out under another name', async () => {
   const properties: Route[] = [
     { table: 'sys_db_object', query: 'name=sys_properties', rows: [tableRow('sys_properties', 'System Property', 'sys_metadata')] },

@@ -143,26 +143,44 @@ provider, the data leaves your network. Five things limit what can go that way:
     and `sn_dependencies` do not describe it either.
   - A child table of a closed table is closed too, because its rows are rows of that table, and so is a child of
     that child, under whatever name. The server asks the instance which tables are below the closed ones,
-    however deep, and sends nothing where it cannot establish that list. With `SERVICENOW_TABLE_ALLOW` this
-    means: a table on the list is closed all the same if a table between it and the one you query is not on it.
+    however deep, and sends nothing where it cannot establish that list. It trusts the list only after the
+    instance has shown that it filters by what a table extends: each level of parents is asked for a table that
+    is two things at once, which has to match nothing. With `SERVICENOW_TABLE_ALLOW` this means: a table on the
+    list is closed all the same if a table between it and the one you query is not on it.
+  - A part of a rotated table, and the archive of a table, are closed with the table whose rows they hold.
+    Measured: `syslog0003` extends nothing, is read like any table, and answered with 655,964 rows of `syslog`
+    and of its child tables; an archive table, `ar_<table>`, extends nothing either. Where the table is open and
+    has a closed table below it, its parts and its archive are closed all the same: ask the table itself, which
+    leaves those rows out.
   - What the instance lists neither as a table nor as a database view counts as closed, and so does a database
-    view that joins another view: nothing says whose rows it holds.
+    view that joins another view, or that comes back without a table it joins: nothing says whose rows it holds.
   - A parent table answers without the rows of its closed child tables. The same holds where a query walks a
     reference into such a parent, or reads it through a database view. Those rows are left out by a condition on
     the class of a row, and an instance that drops that condition would answer with them. So it is first asked
-    for rows whose class is empty and filled at once: where that matches anything, nothing is read.
+    for rows whose class is two things at once: empty and filled, one of two names, and, where a list has a
+    pattern, beginning with two. Where one of these matches anything, nothing is read. A table without rows
+    proves nothing this way, so its answer holds for that one request and is not remembered.
   - The name behind a reference is left out where the record can be a row of a closed table: the reference points
     into one, or into a table that has one below it, or it cannot be told where it points. This goes for single
     references, lists and the labels of counted groups. Such a reference can be compared with a sys_id, but not
     with text and not sorted by, because both work on the names. A text search is refused on a table that has
     such a reference: measured, it finds a record by the name behind one.
+  - Other kinds of fields show names as well. Measured: a condition shows the names behind the sys_ids it holds,
+    and an attachment field the name of its file. What a field shows beside its stored value is passed on for
+    the kinds of fields that were measured to show nothing of other records (a label, a date in another form, a
+    number with its unit). For any other kind the stored value comes alone while tables are closed.
   - The readable name and the payload of a captured change are withheld where its record is in a closed table,
     and the names of other records are taken out of the payloads that are passed on. The same goes for deleted,
-    archived and linked records.
+    archived and linked records, for what another instance sent for comparison, for what one scope may use of
+    another, and for the records people picked in reference fields. An update name is judged in small letters,
+    as the instance compares it, and a table the deny list names counts whether or not the instance still has
+    it. A linked application file is a copy of a record of another table: read from its own table the row says
+    which, read as a row of `sys_metadata` it does not, so that table answers without those rows.
   - The text of comments and work notes is rows of `sys_journal_field`: it is left out where that table is closed.
   - The server's own look-ups follow the same rules. Four tables are read without them, because the rules are
     decided from them: `sys_db_object`, `sys_db_view`, `sys_db_view_table` and `sys_dictionary`. Do not close
-    those; a list that closes `sys_db_object` or `sys_dictionary` through a parent table closes everything.
+    those; a list that closes `sys_db_object` or `sys_dictionary` through a parent table closes everything. For
+    `SERVICENOW_TABLE_ALLOW` that means it has to name `sys_metadata`, which the two extend: `sys_*` does.
   - Where the server cannot establish which tables a request reads from, it does not send it.
 
   A closed table is reported as "could not be checked".
@@ -175,8 +193,9 @@ provider, the data leaves your network. Five things limit what can go that way:
   - **That a record of an open table points to a closed one.** The sys_id stays in the row and can be counted
     by; the name behind it is left out. The same goes for the update name of a captured change
     (`<table>_<sys_id>`): it says that a record was changed, not what the record holds.
-  - **Text that happens to carry something from it,** such as the user name in `sys_created_by` or the author in
-    the text of a journal entry.
+  - **Text that happens to carry something from it,** such as the user name in `sys_created_by`, the author in
+    the text of a journal entry, or a field of your own that stores the name of a record as text. The server
+    keeps names back on the tables it knows to hold them, which are the ones named above.
   - **Tables that record the content of others,** such as `sys_audit`, `sys_history_line`, `sys_journal_field`
     and `live_profile`. Close those as well if they matter.
 
@@ -191,11 +210,14 @@ appends one line per request:
 ```
 
 `sent` is the number of HTTP requests this took: 0 for a request that was refused or held back, 2 after a retry.
+A call that was refused because of a closed table has its line as well, with the status `blocked`, also where it
+was refused before any request was made: the log is there to show what was tried.
 The file holds no credentials and no record content. A query can contain values, so keep it as private as the
 instance; on Linux and macOS it is created readable by its owner only, on Windows it takes the access rules of
 its folder. The lines stand in the order the requests ended. If the file
-cannot be written, the server says so once on its error output and keeps answering. The npm scripts do not write
-it.
+cannot be written, the server says so once on its error output and keeps answering. If it takes lines more slowly
+than they come, ten thousand of them wait at most: further ones are dropped, and a line in their place says how
+many. The npm scripts do not write it.
 
 ## Requests, caching and pauses
 
@@ -203,8 +225,16 @@ it.
   to look for rules that filter, archive or rotate it. The other functions cost more: `sn_origin` 4 to 9,
   `sn_upgrade_skips` about 10, `sn_dependencies` 25 to 35 (about 18 for one field), `sn_instance` about 50. Every
   answer carries its count in `requests`. At most eight requests are with the instance at a time, whichever
-  function sends them. With tables closed on the machine, the first call on each table costs a few more: the
-  server has to establish what the table is a child or a parent of.
+  function sends them.
+- With tables closed on the machine, the first calls cost more: the server has to establish which tables are
+  closed, what a table is a child or a parent of, and that the instance applies the conditions it relies on.
+  Measured on a fresh server: 14 requests to list the 1,349 tables below a closed one, 15 for the first query on
+  the parent of a closed table, then 1 for the next and 2 for the first on another table. With a long list of the
+  only tables that may be read, a first `sn_instance` took 169.
+- One call sends at most 500 requests and ends with an error after that. A call needs that many only where it
+  names hundreds of things that each have to be looked up. A request whose address would be longer than 8,000
+  characters is not sent: measured, an instance took 8,218 and answered HTTP 414 to 8,223, and a caret, a comma
+  or an equals sign takes three of them.
 - What the dictionary says about a table is kept for ten minutes for the checks of `sn_query`. A field that is
   missing from an entry older than 30 seconds is looked up once more, so a field created during a session is
   found. `sn_schema` reads the dictionary anew for every call, for a database view also that of the tables it
@@ -465,12 +495,15 @@ What was tested, and what was not:
   unit tests only.
 - Tables closed on the machine were tried live with three lists (a deny list of one table, one of a table with
   child tables and a pattern, and an allow list): the rows, names and counts came out as described, and
-  `npm run smoke` repeats the first of them. Two more trials: with the table closed that stands eight levels above
-  the deepest tables of the instance, all 1,349 tables below it were found in five requests; and a database view
-  of 44 rows, 7 of them of a closed child table, answered with 37. That is a trial on one instance, not a proof:
-  the rules are in `src/closed.ts`, and the unit tests hold them. What an account sees that may not read what a
-  table extends was not tried, because the test account is an administrator: the server asks for proof that it can
-  and closes everything without it.
+  `npm run smoke` repeats the first of them, and a second with business rules closed: the names of 37 captured
+  changes to business rules were withheld and those of 21 to script includes passed on. More trials: with the
+  table closed that stands eight levels above the deepest tables of the instance, all 1,349 tables below it were
+  found in 14 requests; a database view of 44 rows, 7 of them of a closed child table, answered with 37; with
+  `syslog` closed, its parts and its archive were refused; with one table closed that application files link
+  to, 17 of 92 linked files came back without name and payload. That is a trial on one instance, not a proof:
+  the rules are in `src/closed.ts`, and the unit tests hold them. What an account sees that may not read or
+  filter by what a table extends was not tried, because the test account is an administrator: the server asks
+  for proof of both and closes everything without it. Those proofs were only ever seen to pass.
 - On another release, run `npm run doctor` and `npm run smoke` first.
 - Signing in with a token is covered by unit tests only.
 - CI runs the unit tests on Linux, Windows and macOS.
