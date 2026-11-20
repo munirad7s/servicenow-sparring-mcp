@@ -252,6 +252,8 @@ function scrubOnce(text: string): { text: string; withheld: number } {
     for (const element of simpleElements(source, wanted, markup)) {
       // "true" and "false" are switches such as "display_password", not secrets.
       if (!always && isSwitch(markup === PLAIN_MARKUP ? element.plain : unescaped(element.plain).trim())) continue
+      // Taken out on an earlier reading: what stands there is the note, and it is left as it is.
+      if (element.plain === WITHHELD) continue
       withheld++
       // Without its attributes: a display value there would repeat the content.
       out += `${source.slice(last, element.start)}${markup.lt}${element.tag}${markup.gt}${WITHHELD}${markup.lt}/${element.tag}${markup.gt}`
@@ -262,7 +264,11 @@ function scrubOnce(text: string): { text: string; withheld: number } {
   /** The same for elements written with entities: "&lt;password&gt;x&lt;/password&gt;", also with a CDATA section written that way. */
   const withoutEscaped = (source: string, wanted: (tag: string) => boolean, always: boolean): string => (source.includes('&lt;') ? without(source, wanted, always, ESCAPED_MARKUP) : source)
   const looksSecret = (tag: string) => LOOKS_SECRET.test(tag)
-  let out = withoutEscaped(without(text, looksSecret, false), looksSecret, false)
+  // A key whose value is a list or an object: all of it is the secret. "tokens": ["a", "b"] is the usual form.
+  // Taken out first, as a whole: what stands inside it is gone with it and is neither read nor counted again,
+  // and no later pass takes away the brackets this one goes by.
+  let out = withoutContainers(text, () => withheld++)
+  out = withoutEscaped(without(out, looksSecret, false), looksSecret, false)
   // An element that ends in itself holds no text, but an attribute of it can repeat one: a display value.
   out = out.replace(new RegExp(String.raw`<(${ELEMENT})(${ATTRIBUTES})\s*\/>`, 'g'), (whole, tag: string, attributes: string) => {
     if (!attributes.trim() || !looksSecret(tag)) return whole
@@ -344,13 +350,14 @@ function scrubOnce(text: string): { text: string; withheld: number } {
     const gap = quote === '"' ? String.raw`\s*` : String.raw`(?:\s|\\[nrt])*`
     out = out.replace(new RegExp(String.raw`(${quote}([A-Za-z_][\w.-]*)${quote}${gap}:${gap})(?:${value}|-?\d[\d.]*)`, 'g'), (whole, lead: string, key: string) => {
       if (!LOOKS_SECRET.test(key) || /:(?:\s|\\[nrt])*\\?"(true|false)\\?"$/.test(whole)) return whole
-      withheld++
       const mark = quote === '"' ? '"' : String.raw`\"`
-      return `${lead}${mark}${WITHHELD}${mark}`
+      const without = `${lead}${mark}${WITHHELD}${mark}`
+      // Taken out before, by this pass on an earlier reading or as a list: nothing is taken out twice.
+      if (whole === without) return whole
+      withheld++
+      return without
     })
   }
-  // A key whose value is a list or an object: all of it is the secret. "tokens": ["a", "b"] is the usual form.
-  out = withoutContainers(out, () => withheld++)
   return { text: out, withheld }
 }
 
@@ -384,7 +391,8 @@ function withoutContainers(text: string, found: () => void): string {
  * with two backslashes.
  */
 function endOfContainer(text: string, from: number, escaped: boolean): number {
-  let depth = 0
+  // The brackets that are open, each with the one that closes it: "]" closes no object.
+  const open: string[] = []
   // The quote that opened the text the scan is inside of. A script writes texts with apostrophes as well.
   let within: string | null = null
   const quote = (sign: string) => {
@@ -402,9 +410,10 @@ function endOfContainer(text: string, from: number, escaped: boolean): number {
     } else if ((sign === '"' && !escaped) || sign === "'") {
       quote(sign)
     } else if (within === null && (sign === '[' || sign === '{')) {
-      depth++
-    } else if (within === null && (sign === ']' || sign === '}')) {
-      if (--depth === 0) return at
+      open.push(sign === '[' ? ']' : '}')
+    } else if (within === null && sign === open.at(-1)) {
+      open.pop()
+      if (!open.length) return at
     }
   }
   return -1
@@ -614,13 +623,16 @@ const RECORD_NAMES = new Map<string, Record<string, NameKey>>([
  * For a field that holds the name of a record of another table: the path of the field that says which record, and
  * what that field holds. "owner" is the table a dot-walked path ends on, where that is known.
  */
-export function recordNameKey(table: string, path: string, column?: Column, owner?: string, chain?: string[]): (NameKey & { path: string }) | null {
+/** The table a walked field is read from, with what it extends: for recordNameKey. */
+export const ownerChain = (owner: { table: string; chain?: string[] } | undefined): string[] | undefined => (owner ? (owner.chain ?? [owner.table]) : undefined)
+
+export function recordNameKey(table: string, path: string, column?: Column, owner?: string[], chain?: string[]): (NameKey & { path: string }) | null {
   const field = column ? (column.sourceField ?? column.name) : (path.split('.').at(-1) ?? path)
   // The table the field is read on with its parents, and the table that defines it: a child table inherits
   // fields and what holds for its parents, and a view takes its fields from the tables it joins, which have
   // parents of their own.
   const plain = path === field && !column?.sourceField
-  const tables = [...(column ? [column.definedOn, ...(column.sourceDefinedOn ? [column.sourceDefinedOn] : []), ...(column.sourceChain ?? [])] : []), ...(plain ? (chain ?? [table]) : owner ? [owner] : [])]
+  const tables = [...(column ? [column.definedOn, ...(column.sourceDefinedOn ? [column.sourceDefinedOn] : []), ...(column.sourceChain ?? [])] : []), ...(plain ? (chain ?? [table]) : (owner ?? []))]
   // Reached through a reference without a dictionary entry at hand: the names used for an update name decide.
   // By its own entries only: a field can be named like something every object has.
   const entry = (fields: Record<string, NameKey> | undefined) => (fields && Object.hasOwn(fields, field) ? fields[field] : undefined)
@@ -1179,7 +1191,7 @@ async function keepSecretsOutOfReach(
   const compared = new Set([...parsed.otherFields, ...parsed.conditions.filter((condition) => !asksIfFilled(condition)).map(({ field }) => field)])
   if (ctx.sn.restricted) {
     const chain = (await shapeOf(ctx, table)).info?.chain
-    const named = [...compared].find((field) => recordNameKey(table, field, resolved.get(field), owners.get(field)?.table, chain))
+    const named = [...compared].find((field) => recordNameKey(table, field, resolved.get(field), ownerChain(owners.get(field)), chain))
     if (named) {
       throw new ServiceNowError(
         `"${named}" holds the readable names of records of other tables, and tables are closed on this machine. It can be read, without the names of records in closed tables, ` +

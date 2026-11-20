@@ -10,7 +10,7 @@ import { registerInstanceTools } from './tools/instance.js'
 import { registerOriginTool } from './tools/origin.js'
 import { registerQueryTool } from './tools/query.js'
 import { registerSchemaTool } from './tools/schema.js'
-import type { Context } from './tools/shared.js'
+import { scrubSecrets, type Context } from './tools/shared.js'
 import { registerUpgradeTool } from './tools/upgrade.js'
 import { NAME, VERSION } from './version.js'
 
@@ -24,6 +24,7 @@ export function createContext(sn: ServiceNowClient): Context {
   const dict = new Dictionary(sn)
   const closed = closedTables(sn, dict)
   sn.gate = closed
+  sn.cleanText = (text) => scrubSecrets(text).text
   return { sn, dict, closed }
 }
 

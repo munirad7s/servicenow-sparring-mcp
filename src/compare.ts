@@ -392,9 +392,11 @@ const STORED_TIME = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?$/
  * true where the server answers a read with an error and the instance, asked directly, answers it. A refusal on
  * purpose is none of that: the server says "validation" or "blocked" where it will not send what was asked.
  */
-async function failsAlone(error: Data, directly: () => Promise<{ status: number }>): Promise<boolean> {
+async function failsAlone(error: Data, directly: () => Promise<{ status: number; rows: unknown[] | null }>): Promise<boolean> {
   if (error.error === 'validation' || error.error === 'blocked') return false
-  return (await directly()).status === 200
+  // Answered means a list came back: HTTP 200 with a page in place of data is no answer either.
+  const answer = await directly()
+  return answer.status === 200 && Array.isArray(answer.rows)
 }
 const cells = new Map<string, number>()
 const altered: string[] = []
@@ -520,11 +522,12 @@ const pagesOf = async (table: string, query: string, columns: string[], pages: n
   return { keys, warned }
 }
 let pagesLeftOut = 0
+const answers = (read: { status: number; rows: unknown[] | null }) => read.status === 200 && Array.isArray(read.rows)
 for (const [table, query] of SORTED) {
   const read = await pagesOf(table, query, ['sys_id'], 5)
   if (!read) {
     // Not readable here, for the server and for a direct read alike, is no finding. Readable directly, it is one.
-    if ((await get(table, { sysparm_query: query, sysparm_fields: 'sys_id', sysparm_limit: 1 })).status === 200) twice.push(`${table} with ${query}: the server did not answer a page that the instance answers when asked directly`)
+    if (answers(await get(table, { sysparm_query: query, sysparm_fields: 'sys_id', sysparm_limit: 1 }))) twice.push(`${table} with ${query}: the server did not answer a page that the instance answers when asked directly`)
     else pagesLeftOut++
     continue
   }
@@ -548,7 +551,7 @@ for (const view of ((await get('sys_db_view', { sysparm_fields: 'name', sysparm_
   if (!read) {
     // The view answers when asked directly, as the lines above saw: a sorted read of it that the server does not
     // answer is passed over only where the instance does not answer it either.
-    if ((await get(view, { sysparm_query: `ORDERBY${sortBy}`, sysparm_fields: ids.join(','), sysparm_limit: 1 })).status === 200) twice.push(`${view} sorted by ${sortBy}: the server did not answer a page that the instance answers when asked directly`)
+    if (answers(await get(view, { sysparm_query: `ORDERBY${sortBy}`, sysparm_fields: ids.join(','), sysparm_limit: 1 }))) twice.push(`${view} sorted by ${sortBy}: the server did not answer a page that the instance answers when asked directly`)
     else pagesLeftOut++
     continue
   }
@@ -571,6 +574,8 @@ for (const line of twice) console.log(`         ${line}`)
 const withList = [...new Set(((await get('sys_db_view_table_field', { sysparm_fields: 'view_table.view.name', sysparm_limit: 3_000 })).rows ?? []).map((row) => row['view_table.view.name']).filter(Boolean))]
 const droppedFields: string[] = []
 const undescribed: string[] = []
+// Set to "true", this property makes the instance answer a query it cannot use with no rows.
+const noRowsForUnusable = ((await get('sys_properties', { sysparm_query: 'name=glide.invalid_query.returns_no_rows', sysparm_fields: 'name,value', sysparm_limit: 1 })).rows ?? []).some((row) => row.name === 'glide.invalid_query.returns_no_rows' && row.value === 'true')
 let viewsTried = 0
 let applied = 0
 let refusedByInstance = 0
@@ -589,7 +594,12 @@ for (const view of withList) {
     const asked = await get(view, { sysparm_query: `${column.name}ISEMPTY^${column.name}ISNOTEMPTY`, sysparm_fields: 'sys_id', sysparm_limit: 1 })
     const through = await call('sn_query', { table: view, query: `${column.name}ISNOTEMPTY`, fields: [column.name], limit: 1 })
     if (asked.status !== 200 || asked.total === null) refusedByInstance++
-    else if (Number(asked.total) === 0) {
+    else if (Number(asked.total) === 0 && noRowsForUnusable && Number((await get(view, { sysparm_query: `${column.name}ISEMPTY^OR${column.name}ISNOTEMPTY`, sysparm_fields: 'sys_id', sysparm_limit: 1 })).total ?? 0) === 0) {
+      // This instance answers a query it cannot use with no rows, so "none" proves nothing by itself: every row is
+      // empty or filled, and this field brought none for that either. The server has to refuse it.
+      if (through.isError) refusedByServer++
+      else droppedFields.push(`${view}.${column.name}: the instance does not show that it applies a condition on it, and the server sends one`)
+    } else if (Number(asked.total) === 0) {
       // Applied by the instance. A refusal for another reason, a field that holds a secret for one, is no finding.
       if (through.isError && /did not prove that it applies a condition/.test(String(through.data.message))) droppedFields.push(`${view}.${column.name}: the instance applies a condition on it, and the server refuses it for want of proof`)
       else applied++
@@ -603,11 +613,11 @@ if (refusedByServer) console.log(`  ${String(refusedByServer).padStart(5)}  list
 if (refusedByInstance) console.log(`  ${String(refusedByInstance).padStart(5)}  listed field(s) the instance refuses a condition on, with an error, or answers without a total`)
 console.log(`  ${String(droppedFields.length).padStart(5)}  difference(s)`)
 for (const line of droppedFields.slice(0, 40)) console.log(`         ${line}`)
-if (undescribed.length) console.log(`  ${String(undescribed.length).padStart(5)}  view(s) with rows that sn_schema did not describe: not tried, and no finding`)
+if (undescribed.length) console.log(`  ${String(undescribed.length).padStart(5)}  view(s) with rows that sn_schema did not describe: not tried, so this run ends with 1`)
 for (const line of undescribed.slice(0, 10)) console.log(`         ${line}`)
 
 console.log(`\n${sn.requestCount + direct} requests, all GET: ${sn.requestCount} by the server, ${direct} directly.`)
-process.exit(differences.length || wrong.length || altered.length || miscounted.length || twice.length || droppedFields.length ? 1 : 0)
+process.exit(differences.length || wrong.length || altered.length || miscounted.length || twice.length || droppedFields.length || undescribed.length ? 1 : 0)
 
 // ---------------------------------------------------------------- closed tables
 

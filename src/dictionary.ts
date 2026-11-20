@@ -117,7 +117,7 @@ export interface FieldCheck {
    * Where each verified path takes its values from: the table the path ends on, and the name of the field there.
    * The queried table for a plain field, the referenced table for a dot-walk, the joined table for a field of a view.
    */
-  owners: Map<string, { table: string; field: string }>
+  owners: Map<string, { table: string; field: string; chain?: string[] }>
   /** Tables the paths read from besides the queried one: targets of dot-walks, child tables, tables a view joins. */
   reached: Set<string>
   /** Each reference a path walks through, as written up to that point, and the table it lands on. */
@@ -352,7 +352,8 @@ export class Dictionary {
           // Not readable is a state like any other: the lists cannot be read either then, and are not asked for
           // with every request. Readable again, it differs and they are read anew.
           .catch(unlessNoConnection('not read'))
-        if (this.tablesSeen && this.tablesSeen.stamp !== stamp) this.forgetTables()
+        // Also the first time: what was remembered before the first look was read at an unknown time.
+        if (this.tablesSeen?.stamp !== stamp) this.forgetTables()
         this.tablesSeen = { at: Date.now(), stamp }
       } finally {
         this.looking = null
@@ -524,7 +525,9 @@ export class Dictionary {
 
           if (last) {
             check.resolved.set(path, column)
-            check.owners.set(path, column.sourceField ? { table: column.definedOn, field: column.sourceField } : { table: current, field: segment })
+            // With what that table extends: a rule for a table holds for the tables below it. The field of a view
+            // carries the same about the table it is taken from (sourceChain).
+            check.owners.set(path, column.sourceField ? { table: column.definedOn, field: column.sourceField } : { table: current, field: segment, chain: (await this.table(current).catch(unlessNoConnection(null)))?.chain })
           } else if (column.type !== 'reference' || !column.reference) {
             const why = column.reference ? `a list of references (${column.type})` : `of type ${column.type || 'unknown'}`
             // Measured on lists with one entry: =, IN, LIKE and CONTAINS with the sys_id all find the row. LIKE also finds it among others.
@@ -628,6 +631,14 @@ export class Dictionary {
     const wanted = prefixes.filter(Boolean)
     if (!names.length && !wanted.length) return Promise.resolve(new Map())
 
+    // Whoever asks for this list gets one that is no older than the last look at the table of tables: not only
+    // the rules that decide about a request, also a tool that judges a name before it reads anything.
+    return this.tablesUnchanged().then(() => this.closedSetsRead())
+  }
+
+  private closedSetsRead(): Promise<Map<string, string[]>> {
+    const { names, prefixes } = this.sn.denied
+    const wanted = prefixes.filter(Boolean)
     return this.cached(this.closedSets, 'deny', async () => {
       const SENTINEL = 'sys_db_object'
       const untrusted = (why: string) =>
@@ -709,7 +720,9 @@ export class Dictionary {
    * named after the table with four digits, 8 with one digit, and 30 name the table itself. null where the list
    * cannot be read completely: the caller then has to go by the name of a table.
    */
-  rotatedParts(): Promise<{ parts: Map<string, string>; rotated: Set<string> } | null> {
+  async rotatedParts(): Promise<{ parts: Map<string, string>; rotated: Set<string> } | null> {
+    // A part is a table: a new one shows in the table of tables.
+    await this.tablesUnchanged()
     return this.cached(this.partLists, 'parts', async () => {
       const read = await this.sn.all<Record<string, string>>({ table: 'sys_table_rotation_schedule', fields: ['table_name', 'name.name'] }, 5_000).catch(unlessNoConnection(null))
       if (!read || !read.complete || (read.total !== null && read.records.length < read.total)) return null
@@ -783,7 +796,11 @@ export class Dictionary {
       if (!entries.complete || (entries.total !== null && entries.records.length < entries.total)) return
       const overrides = await this.gated.all<Record<string, string>>({ table: 'sys_dictionary_override', query: `nameIN${names}^display_override=true`, fields: ['name'] }, 5_000)
       if (!overrides.complete || overrides.total === null || overrides.records.length < overrides.total) return
-      for (const row of overrides.records) moved.add(String(row.name))
+      for (const row of overrides.records) {
+        // An override that does not say which table it is on moves the display field of an unknown one of them.
+        if (!group.includes(row.name)) return
+        moved.add(row.name)
+      }
       for (const row of entries.records) {
         // A row that does not say which table it is of, or what kind of field it is, cannot be used.
         if (!group.includes(row.name) || !row.internal_type) return
@@ -808,6 +825,7 @@ export class Dictionary {
    */
   async childTables(table: string): Promise<Map<string, string[]> | null> {
     assertTableName(table)
+    await this.tablesUnchanged()
     return this.cached(this.childSets, table, async () => {
       const usable = await this.parentsUsable(false).catch(unlessNoConnection(false))
       if (!usable) return null

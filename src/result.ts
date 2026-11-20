@@ -194,10 +194,17 @@ export function clip<T>(records: T[], warnings: string[]): T[] {
   // row is always shown, so its texts are cut to what fits, each from what it was.
   if (records.length && sizeOf([shown[0]]) > MAX_ANSWER_CHARS) {
     const texts = Math.max(countTexts(records[0]), 1)
-    const narrow = Math.min(cap, Math.max(40, Math.floor((MAX_ANSWER_CHARS * 0.8) / texts)))
+    // Not below eighty characters: a note of the server that stands in place of a value is shorter than that,
+    // and is not cut in two. A row of many hundred texts stays larger than the budget then, and the warning says so.
+    const narrow = Math.min(cap, Math.max(80, Math.floor((MAX_ANSWER_CHARS * 0.8) / texts)))
     let cut = 0
     shown = [mapStrings(records[0], cutTo(narrow, () => cut++)), ...shown.slice(1)]
-    warnings.push(`The first row is larger than one answer carries by itself: ${cut} of its values were cut to about ${narrow} characters. Ask for fewer fields.`)
+    const still = sizeOf([shown[0]])
+    warnings.push(
+      `The first row is larger than one answer carries by itself: ${cut} of its values were cut to about ${narrow} characters. ` +
+        (still > MAX_ANSWER_CHARS ? `It is still about ${Math.round(still / 1000)},000 characters long. ` : '') +
+        'Ask for fewer fields.',
+    )
   }
 
   let size = 0
@@ -252,7 +259,8 @@ export function ok(payload: Record<string, unknown>): ToolResult {
       return cleaned
     }
     if (Array.isArray(value)) return value.map((item) => read(item))
-    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [name, read(item, name)]))
+    // A key can be a text of the instance as well: the source of a version, the value a count is made by.
+    if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([name, item]) => [read(name) as string, read(item, name)]))
     return value
   }
   const answer = read(payload) as Record<string, unknown>

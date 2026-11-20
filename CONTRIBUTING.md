@@ -10,7 +10,8 @@ Thank you for helping. A few rules keep this project what it is.
    What cannot be checked is refused. A value read from the instance is checked like any other before it goes into
    the next query.
 3. **Say what is not known.** A tool that cannot read a source reports "not checked" or "unknown". It never returns
-   an empty list in its place. New tools list their own gaps in `src/limitations.ts`.
+   an empty list in its place without saying so: a list that is empty because its source could not be read
+   comes with a total of null and a warning. New tools list their own gaps in `src/limitations.ts`.
 4. **Measure before you claim.** A statement about ServiceNow behaviour in code, tests or docs was checked on an
    instance or in the documentation. Say which. `docs/encoded-queries.md` shows the form.
 5. **No private data.** No instance names, host names, user names or record content in code, tests, docs or
@@ -40,8 +41,9 @@ depend on it: it leaves unknown fields out of a row, and it answers "Invalid tab
 
 A rule that keeps something back (a secret, a row of a closed table, a verdict that is not established) needs a
 test that fails without it. To see whether it has one, take the rule out or turn it round, one line at a time,
-and run the tests. Since 0.3.4 that was done for 567 lines, and 76 of the changes went unnoticed at first. Of 17
-changes that a reviewer of 0.4.1 expected no test to notice, 8 were not noticed.
+and run the tests. Since 0.3.4 that was done for 597 lines, and 92 of the changes went unnoticed at first. Of 17
+changes that a reviewer of 0.4.1 expected no test to notice, 8 were not noticed; of 15 that a reviewer of 0.4.2
+named, none was.
 
 If you change how a tool reads the instance, run `npm run smoke` and `npm run compare` against a real instance and
 say in the pull request which release it was. `npm run compare` asks the instance a second time, past the server,

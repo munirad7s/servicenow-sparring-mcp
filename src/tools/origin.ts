@@ -147,7 +147,7 @@ const seconds = (stamp: string) => (stamp ? Date.parse(`${stamp.replace(' ', 'T'
 /** Leaves out what is empty, so that the evidence stays short. */
 const compact = <T extends Row>(row: T): T => Object.fromEntries(Object.entries(row).filter(([, value]) => value !== '' && value !== null && value !== undefined)) as T
 
-const prefixCache = new WeakMap<ServiceNowClient, Promise<string>>()
+const prefixCache = new WeakMap<ServiceNowClient, { at: number; prefix: Promise<string> }>()
 
 /**
  * The prefix the applications of this company carry in their scope: "x_<code>_".
@@ -156,9 +156,11 @@ const prefixCache = new WeakMap<ServiceNowClient, Promise<string>>()
  * them apart. Empty if the property is not set; fails if it cannot be read.
  */
 function companyPrefix(sn: ServiceNowClient): Promise<string> {
-  let known = prefixCache.get(sn)
+  const kept = prefixCache.get(sn)
+  // Kept for ten minutes, like what is read of the dictionary: a code that is set later is seen without a restart.
+  let known = kept && Date.now() - kept.at < 10 * 60_000 ? kept.prefix : undefined
   if (!known) {
-    known = sn
+    const asked = (known = sn
       .query<Record<string, string>>({ table: 'sys_properties', query: 'name=glide.appcreator.company.code', fields: PROPERTY_FIELDS, limit: 1 })
       .then((page) => {
         const row = page.records.find((item) => item.name === 'glide.appcreator.company.code')
@@ -167,10 +169,12 @@ function companyPrefix(sn: ServiceNowClient): Promise<string> {
         // As text, whatever the instance answered with, and not where its type says it holds a secret.
         return plainValue(row) ?? ''
       })
-      .then((code) => (/^[a-z0-9]{1,40}$/i.test(code.trim()) ? `x_${code.trim().toLowerCase()}_` : ''))
-    prefixCache.set(sn, known)
+      .then((code) => (/^[a-z0-9]{1,40}$/i.test(code.trim()) ? `x_${code.trim().toLowerCase()}_` : '')))
+    prefixCache.set(sn, { at: Date.now(), prefix: asked })
     // A failure is not an answer: the next call asks again.
-    known.catch(() => prefixCache.delete(sn))
+    asked.catch(() => {
+      if (prefixCache.get(sn)?.prefix === asked) prefixCache.delete(sn)
+    })
   }
   return known
 }
@@ -404,8 +408,11 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
         if (!file && !hidden && sysId && !name) {
           if (isGeneratedSysId(sysId)) {
             const trace = await read('sys_update_xml', `nameENDSWITH_${sysId}^ORDERBYDESCsys_updated_on`, ['name'], 1)
+            // A name that came back is taken only where it ends in the sys_id that was asked for: an instance that
+            // drops the condition answers with the newest row of the table, which is another record.
+            const endsInIt = (found: string) => UPDATE_NAME.test(found) && found.toLowerCase().endsWith(`_${sysId.toLowerCase()}`)
             const tracedName = trace?.records[0] ? rawOf(tidy(trace.records[0]).name) : ''
-            if (UPDATE_NAME.test(tracedName)) name = tracedName
+            if (endsInIt(tracedName)) name = tracedName
             // Not readable, or rows exist that this account cannot see: then "no trace" is not established.
             if (!trace || (!trace.records.length && trace.total !== 0)) untraceable = true
             // A captured change exists, and its name did not come back in a form that can be used.
@@ -425,7 +432,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
               // stands without it, and the warning of the read says what was not looked for.
               if (!kept && table === 'upgrade_history_task') continue
               const keptName = kept?.records[0] ? rawOf(tidy(kept.records[0])[field]) : ''
-              if (UPDATE_NAME.test(keptName)) name = keptName
+              if (endsInIt(keptName)) name = keptName
               if (!kept || (!kept.records.length && kept.total !== 0) || (kept.records.length && !name)) untraceable = true
             }
           } else {

@@ -65,6 +65,15 @@ test('a first row of many texts that are each short enough is cut to what an ans
   // And from what it was: the note counts what is missing of the whole value.
   assert.match(String(again[0].payload), /^y{592} … \[cut here: 299408 more characters\]$/)
   assert.ok(JSON.stringify(again).length < 70_000)
+  // A note of the server in place of a value is never cut in two, however many fields the row has. Such a row
+  // stays larger than the budget, and the warning says by how much.
+  const note = '[withheld: the record is in a table closed on this machine]'
+  const wide: Record<string, string> = { ...Object.fromEntries(Array.from({ length: 700 }, (_, index) => [`u_f${index}`, 'z'.repeat(120)])), u_name: note }
+  const told: string[] = []
+  const kept = clip([wide], told)
+  assert.equal(kept[0].u_name, note)
+  assert.match(String(kept[0].u_f0), /^z{80} … \[cut here: 40 more characters\]$/)
+  assert.match(told.join(' '), /700 of its values were cut to about 80 characters\. It is still about \d+,000 characters long\./)
   // A row that fits is left alone.
   const small = { a: 'x'.repeat(1_000) }
   assert.deepEqual(clip([small], []), [small])

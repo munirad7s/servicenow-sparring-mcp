@@ -747,3 +747,22 @@ test('a count that is no number ends the call it comes in', async () => {
   assert.equal((ended as ServiceNowError).kind, 'invalid_response')
   assert.match((ended as Error).message, /count that is not a number/)
 })
+
+test('an error of an instance is an object with a message, and a row is an object of fields', async () => {
+  // Measured: with 400, 401, 403 and 404 an instance sends {"error":{"message","detail"}}. JSON with an "error"
+  // of another shape is the word of something else, and no refusal of the instance.
+  for (const body of [{ error: 'policy_denied' }, { error: { code: 17 } }, { error: true }]) {
+    let sent = 0
+    const gateway = new ServiceNowClient(config, async () => (sent++, json(body, 403)))
+    const denied = await failure(() => gateway.query({ table: 'incident' }))
+    assert.equal(denied.kind, 'invalid_response', JSON.stringify(body))
+    assert.match((await failure(() => gateway.query({ table: 'incident' }))).message, /Not sent again/)
+    assert.equal(sent, 1)
+  }
+  // A list in place of a row is no row, whatever it holds: it is not passed on under a key of its own.
+  const lists = new ServiceNowClient(config, async () => json({ result: [[{ password: 'TOPSECRET' }]] }))
+  const odd = await failure(() => lists.query({ table: 'incident', fields: ['number'] }))
+  assert.equal(odd.kind, 'invalid_response')
+  assert.match(odd.message, /rows that are lists/)
+  assert.equal(await kindOf(() => lists.query({ table: 'incident' })), 'invalid_response')
+})

@@ -136,6 +136,11 @@ export class ServiceNowClient {
 
   /** Set by the server. Asked for every request while tables are closed on this machine. */
   gate: Gate | null = null
+  /**
+   * Takes out of a text of the instance what must not be passed on, before the text is shortened for a message:
+   * cut first, a secret that is recognised by where it ends would no longer be. Set by the server.
+   */
+  cleanText: (text: string) => string = (text) => text
 
   private auth: Auth
   /** Becomes true once the instance has accepted the credentials. Until then requests go one at a time. */
@@ -189,9 +194,11 @@ export class ServiceNowClient {
       // Only the fields that were asked for: an instance sends no others, and what is not an instance is not
       // trusted to. Every check behind this is made for the fields of the request.
       const asked = fields?.length ? new Set(fields) : null
+      // A row is an object of fields. A list in its place is no row of a table, whatever it holds.
+      if (result.some((row) => Array.isArray(row))) throw unusableAnswer(`${this.host} answered with rows that are lists, not records.`, table)
       const rows = result
         .filter((row): row is T => row !== null && typeof row === 'object')
-        .map((row) => (asked && !Array.isArray(row) ? (Object.fromEntries(Object.entries(row as object).filter(([key]) => asked.has(key))) as T) : row))
+        .map((row) => (asked ? (Object.fromEntries(Object.entries(row as object).filter(([key]) => asked.has(key))) as T) : row))
       // What reads the rows afterwards goes as deep as they go. A row nested thousands of levels would end the call
       // with an error of the runtime, and not with a sentence about the answer.
       if (rows.some((row) => nestedTooDeep(row, MAX_CELL_DEPTH))) {
@@ -511,7 +518,9 @@ export class ServiceNowClient {
     const isObject = body !== null && typeof body === 'object'
     // A refusal in the words of an instance: JSON with an error in it. A page in front of the instance, a proxy
     // that denies or a gateway that fails, answers with a status too, and is no instance.
-    const saysSo = isObject && Boolean(body?.error)
+    // Measured: with 400, 401, 403 and 404 alike, the error of an instance is an object with a message in it.
+    const refusal = isObject ? body?.error : undefined
+    const saysSo = refusal !== null && typeof refusal === 'object' && typeof refusal.message === 'string'
 
     if (response.status === 401) {
       // Try again once with other credentials: those another request picked up in the meantime, or those now in the env file.
@@ -538,8 +547,9 @@ export class ServiceNowClient {
     if (!response.ok || saysSo) {
       // A refusal by the instance itself means it is reachable and took the login. A 5xx or 429 can come from in front of it.
       if (saysSo && response.status < 500 && response.status !== 429) this.accepted = this.answered = true
-      const message = quoteInstanceText(isObject ? body?.error?.message : '')
-      const detail = quoteInstanceText(isObject ? body?.error?.detail : '')
+      const quoted = (part: unknown) => quoteInstanceText(typeof part === 'string' ? this.cleanText(part) : '')
+      const message = quoted(saysSo ? refusal?.message : '')
+      const detail = quoted(saysSo ? refusal?.detail : '')
       const said = message ? `: "${message}"${detail ? ` ("${detail}")` : ''}` : ''
       // A refusal below 500 that is not in the words of an instance is the page of something in front of it: that
       // says nothing about what this account may read.

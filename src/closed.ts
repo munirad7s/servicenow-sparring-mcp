@@ -171,7 +171,9 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     // that is the name of a rotated table with digits behind it counts as a part of it, on the list or not. Read
     // from the names of the rotated tables, not cut off the name: the name of a rotated table can end in a digit.
     const likeAPart = (name: string) => [...(listed?.rotated ?? [])].filter((base) => name.length > base.length && name.startsWith(base) && /^\d+$/.test(name.slice(base.length)))
-    const basesOf = (name: string) => tableNames([archiveOf(name), ...(listed ? [listed.parts.get(name), ...likeAPart(name)] : partOfByName(name))], name)
+    // What the list says about a table goes before what its name looks like: "u_log2001" is listed as a part of
+    // "u_log", and is no part of a rotated "u_log2" then.
+    const basesOf = (name: string) => tableNames([archiveOf(name), ...(listed ? (listed.parts.has(name) ? [listed.parts.get(name)] : likeAPart(name)) : partOfByName(name))], name)
     for (const [name, base] of info.chain.flatMap((name) => basesOf(name).map((base) => [name, base]))) {
       // A table the deny list names counts whether or not the instance still has it: its archive can outlive it.
       if (sn.denies(base)) return `"${name}" holds rows of ${base} (a part of a rotated table, or its archive), and "${base}" is closed on this machine`

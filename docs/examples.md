@@ -1,7 +1,8 @@
 # What the answers look like
 
 These answers come from the stand-in instance of the test suite, so the names and numbers are invented. The shape
-is what an agent receives; long parts are shortened with "…". `requests` is the count of a call on a table the
+is what an agent receives; long parts are shortened with "…", and fields that add nothing to the point of an
+example are left out of it. A successful answer comes as text and as structured content, an error as text only. `requests` is the count of a call on a table the
 server has looked at before: the first call on a table costs more, five to seven requests as measured, for its
 field names and for the rules that filter, archive or rotate it. A refusal says that the request was not sent.
 That is the read that was asked for: the look-ups that led to the refusal (what the table is, which fields it

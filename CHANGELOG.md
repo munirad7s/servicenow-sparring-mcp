@@ -3,6 +3,74 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## Unreleased
+
+Three reviews of 0.4.2, the day it came out: whether its fixes hold, which changes of one line no test would
+notice, and the documents against the code once more. The first rated 13 of 15 fixes as holding for the case they
+were written for and not for another. The second named fifteen changes, and all fifteen went unnoticed when they
+were run. Each has its test now.
+
+### Security
+
+- **A list of closed tables could be older than the look that is meant to keep it fresh.** The look at the table
+  of tables stood in front of the rules for a request, not in front of the lists themselves. `sn_origin` judges
+  an update name before it asks those rules: called first, it read the list of closed tables without a look,
+  and the first look afterwards found nothing to compare with and kept the list. A table created below a closed
+  one in between was read through its parents until the list was ten minutes old. The look stands in front of
+  every list of tables now, and the first one starts from nothing.
+- **A rule for the name of a record did not hold behind a reference into a table below the one it is written
+  for.** 0.4.2 made such a rule hold for a table below and for a view over one, read directly. Through a
+  reference the rule was looked up by the table the reference points to and by the table that defines the
+  field, and not by the tables between them. They are all asked now. As before: no instance measured has a
+  table below one of these.
+- **Asked about two tables at once, an override that came back without its table moved nothing.** Where a
+  dictionary override moves what a table shows as its name, the name behind a reference into that table is left
+  out. Asked about one table, an override that matches is enough. Asked about several, it was placed by the
+  table it names, and one that named none was dropped: the name stayed. Such an override now leaves the
+  question open for all of them, and each is asked by itself.
+- **A key of an answer is a text as well.** `sn_origin` counts versions per source and uses the source as a key.
+  Every text of an answer is read for what looks like a secret; the keys were not. They are now.
+- **The words of an instance in an error were shortened before they were read.** A message keeps 300 characters
+  of them. An element that closes behind that was no longer recognised, and what stood in it stayed. They are
+  read first and shortened afterwards.
+- **`sn_origin` could judge another record.** Asked by a sys_id, it looks for a name that ends in it. A name that
+  came back was taken as it was: an instance that drops the condition answers with the newest row of the table,
+  which is another record. A name is taken only where it ends in the sys_id that was asked for.
+
+### Fixed
+
+- What counts as a refusal by the instance is its own form: an error with a message in it, as measured with 400,
+  401, 403 and 404. `{"error":"denied"}` from a gateway counted as one in 0.4.2.
+- A row is an object of fields. An answer whose rows are lists is no answer of an instance and is refused; in
+  0.4.2 such a list was passed on under a key of its own, past the fields that were asked for.
+- What the list of rotated tables says about a table goes before what its name looks like. A part listed for one
+  rotated table was also taken for a part of another whose name it begins with, and closed with that one.
+- A list or an object behind a key that looks like a secret is taken out before the elements inside it are read,
+  each bracket is closed by its own kind, and nothing is counted twice: neither a value inside such a list, nor
+  what an earlier reading took out.
+- A first row that is larger than an answer has its values cut to no less than eighty characters, so that a note
+  of the server in place of a value is never cut in two, and the answer says where the row is still larger.
+- The company code that tells a company's own applications from installed ones was read once and kept until the
+  server was restarted. It is kept for ten minutes, like what is read of the dictionary.
+- `npm run compare`: a direct read counts as answered only where a list came back; a view with rows that
+  `sn_schema` does not describe makes it end with 1; and on an instance that answers a query it cannot use with
+  no rows, an empty answer to "empty and filled at once" is no longer taken as proof that a view applies a
+  condition.
+
+### Documents
+
+Corrected, each against the code: which refusals are read by their status alone (401, 429, 413, 414, 431); that
+a call which has run for 90 seconds sends no further request, and still answers where it needs none; that at
+most twenty fields of a view are proven for the conditions and sorts of a call, and one more for the field it
+counts by; that the `query` of an answer is passed on as it was sent; which elements the reading for secrets
+recognises; that the value of a property below `sys_properties` is withheld only where the table is known as
+one; what is read of the dictionary and of choices at most; that a payload which names no table is withheld as
+soon as any table is closed; how `sn_origin` decides "created here" and "unknown"; and that only the login is
+read again from the env file. Measured for them: a text operator on a date compares the stored text (`LIKE2026-06`
+found the 111 rows of June, as a range does); 0.4.2 and 0.4.1 give the same answer for 514 of 519 records, and
+the other five are records that 0.4.1 called not found although versions of them are recorded; on a connection
+that adds 0.8 seconds to every request, the costliest first call took 65 seconds.
+
 ## 0.4.2 (2026-11-20)
 
 Five reviews of 0.4.1, each from one corner: whether its fixes hold, whether the rules for closed tables hold,

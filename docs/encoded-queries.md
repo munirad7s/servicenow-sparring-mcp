@@ -1,7 +1,7 @@
 # What ServiceNow does with an encoded query
 
-The Table API does not reject a condition it cannot use. It either drops the condition and answers with every row,
-or it applies something else and answers with no row. Both look like an answer. For a tool that is asked "is this
+The Table API mostly does not reject a condition it cannot use. It either drops the condition and answers with
+every row, or it applies something else and answers with no row; on some database views it refuses with 403. Both look like an answer. For a tool that is asked "is this
 true on the instance?", both are wrong evidence.
 
 This page lists what was measured, and what the server does about it. Each form was sent as `sysparm_query` to
@@ -108,7 +108,7 @@ These were not sent to the instance for measurement. They are refused because of
 |---|---|---|
 | A condition on a field of a password or encrypted type | `user_passwordSTARTSWITH$s$a` | refuses; `ISEMPTY` and `ISNOTEMPTY` are allowed |
 | A sort by such a field, or a comparison of another field with it | `ORDERBYuser_password` | refuses |
-| A condition on, or a sort by, the value of system properties | `valueLIKEhttp` on `sys_properties` | sends it with `typeNOT INpassword,password2` added to every part of the query, and says so |
+| A condition on, or a sort by, the value of system properties | `valueLIKEhttp` on `sys_properties` | sends it with `typeNOT INpassword,password2` added to every part of the query that has a condition, and says so |
 | The same through a database view or a reference | `prop_valueLIKEhttp` | refuses |
 
 The instance applies each of these as written. The number of matches would tell whether a guess was right, and
@@ -283,6 +283,13 @@ Also measured:
 - In the payloads of 6,631 captured changes, the name behind a reference is written with plain double quotes in
   6,611 and with a quote written as an entity in none; markup inside markup is written with `&lt;` in 182 and
   with a numbered entity in none.
+- A text operator on a date field compares the stored text, `YYYY-MM-DD HH:MM:SS`. Of 6,631 captured changes,
+  111 were created in June 2026 by a range, and `sys_created_onLIKE2026-06`, `STARTSWITH2026-06` and
+  `CONTAINS2026-06` each found those 111, `NOT LIKE2026-06` the other 6,520. A word (`LIKEyesterday`) and another
+  order (`LIKE06-2026`) found none: that zero is a true answer. The server passes such a condition on.
+- Asked for the same 519 records, 0.4.1 and 0.4.2 gave the same answer from `sn_origin` for 514. The other five
+  were asked for by the sys_id at the end of the name of a version: no record answers and no captured change is
+  left, and the versions are. 5 of 74 such sys_ids, so it is no rare case on an instance that has been cleaned.
 - The table of tables had 10,806 rows. Asked for the one changed last and for how many there are, it answered in
   about 120 milliseconds with 97 bytes. Asked for a name that ends in a given sys_id, the versions (49,263
   rows) answered in 0.2 seconds, and the entries of upgrades through their reference in 0.1.

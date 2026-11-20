@@ -19,7 +19,7 @@ export const ORIGIN_CAVEATS = [
   'The verdict rests on what the instance recorded: the package of the record, its customer update rows, and its versions.',
   'A record can differ from the vendor version without any captured change: a property set by a script, a role changed by an installer. Only an upgrade notices, by comparing content. Where the last upgrade skipped the record, the answer says so; where no upgrade has looked at it yet, such a change is invisible here.',
   'Update rows and versions can be cleaned up or lost in a clone. A customized record can then look untouched.',
-  '"customized" means the platform holds a customer update for a delivered record. Many such updates are made by system accounts during installations and upgrades; see capturedBy.',
+  '"customized" means the record counts as delivered and changed here: by a customer update, by a current version that came from an update set, or because an upgrade refused to overwrite it although no change was captured. Many such changes are made by system accounts during installations and upgrades; see capturedBy.',
   '"installed_application" covers applications from the ServiceNow Store and from other vendors. An installed application whose scope begins with this company\'s own prefix (x_<company code>_) is reported as "company_application": the company develops it elsewhere. That rule follows the naming of scoped applications and was not measured.',
   'On an instance with domain separation a record can be replaced for one domain by another record that overrides it. The verdict is about the record that was asked for, not about its overrides.',
   'A record that was reverted to the vendor version can keep its customer update row. The platform then still treats it as customized.',
@@ -42,7 +42,7 @@ export const DEPENDENCIES_NOT_COVERED = [
 
 export const FIELD_DEPENDENCIES_NOT_COVERED = [
   'conditions and scripts that mention the field: business rule conditions, UI policy conditions, flows, script includes',
-  'client scripts that run when a form loads or is submitted (onLoad, onSubmit): only those that run when this field changes are listed, and any client script can make the field mandatory or hide it',
+  'client scripts that run when a form loads or is submitted (onLoad, onSubmit): only those that name this field as theirs are listed, and any client script can make the field mandatory or hide it',
   'access controls with a wildcard (table.*, *.field), which apply to the field as well',
   'reports, filters, notifications and templates that use the field',
   'reference qualifiers and calculated values of other fields that read it',
@@ -60,18 +60,18 @@ export const UPGRADE_NOTES = [
 export const QUERY_LIMITS = [
   'Encoded queries are parsed with a strict grammar. What cannot be checked is refused: related-list queries (RLQUERY), tag conditions, catalog variables, the shorthand operators *, % and !*, and regular expressions. GROUPBY inside a query is refused, because the Table API ignores it: use the groupBy input.',
   'DYNAMIC conditions are refused, because they run a script stored on the instance. "javascript:" values are refused for the same reason.',
-  'Date conditions need fixed values, written YYYY-MM-DD or YYYY-MM-DD HH:MM:SS in UTC. Single digits for month and day, a time without seconds and a T between date and time are taken as well: measured, the instance reads them the same. Any other form is refused: the instance would not reject it, and ">" would then match every row. RELATIVEGT and its siblings work with the units year, quarter, month, dayofweek, hour and minute.',
+  'A date that is compared (=, <, >, IN, BETWEEN, ON) needs a fixed value, written YYYY-MM-DD or YYYY-MM-DD HH:MM:SS in UTC. Single digits for month and day, a time without seconds and a T between date and time are taken as well: measured, the instance reads them the same. Any other form is refused: the instance would not reject it, and ">" would then match every row. LIKE, STARTSWITH and their kind compare the stored text of a date, so "LIKE2026-06" finds June, and a word finds nothing. RELATIVEGT and its siblings work with the units year, quarter, month, dayofweek, hour and minute.',
   'A true/false field takes true or false, or 1 and 0, a number field a number. Other values are refused: the instance reads "yes" as false, and matches nothing for a word on a number field.',
   'These checks go by the type of a field. Where the dictionary of a table cannot be read, the field names are checked against a row of the table instead, and the form of a value is not checked: "fieldCheck" says which way the names were verified.',
   'A condition needs a value. Only "=" and "!=" may come without one: they then mean "is empty" and "is not empty". Without a value ServiceNow drops LIKE, NOT LIKE, STARTSWITH, ENDSWITH, CONTAINS and NOT IN and answers unfiltered, and IN matches nothing.',
   '"!=", "NOT IN" and "NOT LIKE" leave out the rows where the field is empty, and "NSAMEAS" those where either of its two fields is. The answer says so when one of them is used; add ^OR<field>ISEMPTY to count those rows too.',
   'Comments, work notes and other journal fields are stored as rows of sys_journal_field. A condition on such a field is refused, because the instance does not apply it as written; the field itself comes back empty unless displayValue is true.',
-  'A choice field is compared with its stored value. A query that uses a label, in any language the instance has one in, is refused and the stored value is named. The check goes by the active choices of the nearest table that has a list of its own: the label of a choice that was set inactive is not known to it. For a field reached through a reference the choice list of the referenced table decides; a child table of it can have its own list, which is not looked at. Where the choices could not be read, the answer says so.',
+  'A choice field is compared with its stored value. A query that compares it with a label by =, !=, IN or NOT IN, in any language the instance has one in, is refused and the stored value is named, unless that text is the stored value of another choice. The check goes by the active choices of the nearest table that has a list of its own: the label of a choice that was set inactive is not known to it. For a field reached through a reference the choice list of the referenced table decides; a child table of it can have its own list, which is not looked at. Where the choices could not be read, the answer says so.',
   'Fields that hold secrets (types password, password2, glide_encrypted, and system properties of a password type) come back as "[withheld: this field holds a secret]". Where the type of a field cannot be read, its name decides, and the answer says that types were missing.',
   'A field that holds a secret can be asked whether it is filled (ISEMPTY, ISNOTEMPTY). It cannot be compared or sorted by: the number of matches would give its value away piece by piece. A query that compares or sorts by the value of system properties leaves out the properties of a password type and those without a type, and says so; through a database view or a reference such a query is refused, and so is a count per property value.',
   'A database view does not filter by every field it shows. Measured: a view that lists the fields it takes from a joined table drops a condition on any other field of that table, and on some it lists, and answers unfiltered. Before a view is filtered, sorted or counted by a field, the server asks the instance for the rows where that field is empty and filled at once: only an answer with none proves that a condition is applied, and without it the query is refused. sn_schema lists the fields a view takes.',
-  'One answer carries about 60,000 characters of rows. Longer values are cut and marked; more rows are reached with nextOffset. The first row is always shown: where it is larger than that by itself, its values are cut further. sn_schema cuts its list of fields the same way and says so; sn_plugins and sn_dependencies bound their answers by the number of entries.',
-  'A text that an answer carries is read for what looks like a secret by its name: the content of an XML element, or the value, list or object behind a JSON key in quotes, whose name suggests one. That part comes as "[withheld]". A secret under a name that suggests nothing is not recognised. And a condition on an ordinary text field still tells whether the text contains a given piece: only fields of a secret type, the values of system properties and fields that carry whole records are closed to comparisons.',
+  'One answer carries about 60,000 characters of rows. Longer values are cut and marked; more rows are reached with nextOffset. The first row is always shown: where it is larger than that by itself, its values are cut further, to no less than eighty characters each, and the answer says so where the row is still larger. sn_schema cuts its list of fields the same way and says so; sn_plugins and sn_dependencies bound their answers by the number of entries.',
+  'A text that an answer carries is read for what looks like a secret by its name: the content of an XML element that holds text, or the value, list or object behind a JSON key in quotes, whose name suggests one. That part comes as "[withheld]". The "query" of an answer is passed on as it was sent. A secret under a name that suggests nothing is not recognised. And a condition on an ordinary text field still tells whether the text contains a given piece: only fields of a secret type, the values of system properties and fields that carry whole records are closed to comparisons.',
   'A sorted query is sent with the sys_id as a sort key, added at the end where the query does not sort by it already, and the answer names it that way. Measured: without it, rows that are equal in what the query sorts by change places between pages, so that a list read by pages brings some rows twice and misses others (989 different rows in a thousand captured changes read newest first). A query without ORDERBY is sent as it is: read by pages it brought no row twice when measured, but the instance does not promise an order, so give one for a list that has to be complete.',
 ]
 
@@ -85,7 +85,8 @@ How to use it:
   the "table" and "query" of the answer. Never make up a query to cite.
 - "total" is what matched on the server before row-level access rules; "returned" is what is in the answer. To
   count, read "total". Fewer rows than "total" means there are more pages ("truncated", "nextOffset"), or that rows
-  are hidden from this account: a warning then says so, and you pass it on.
+  are hidden from this account: a warning then says so, and you pass it on. With groupBy, "returned" counts groups:
+  hold it against "totalGroups", while "total" still counts the rows.
 - An error of kind "acl" or "blocked", a source marked not readable, or a part marked not_checked means "could not
   be checked". It never means "nothing found".
 - Every answer that is no error has "warnings". Pass them on with the result they belong to. An error has a kind,
@@ -129,11 +130,12 @@ with a sys_id, but not with text and not sorted by, and a text search is refused
 and the payload of a captured change are withheld where its record is in a closed table, and so is the name of a
 deleted or archived record, also behind a reference to the entry that keeps it. A reference into a table that shows
 a record of a closed table as its own name comes without that name. What a field shows beside
-its stored value is passed on only for kinds of fields that show nothing of other records. A rejected login, an
-answer that is not the answer of an instance, the limit of 500 requests for one call or of 90 seconds, ends the
-call with that error. What is closed is what an answer carries. The server itself reads the tables that say what a
-table is (sys_db_object, sys_db_view, sys_db_view_table, sys_dictionary, sys_table_rotation_schedule) without
-these rules, because the rules are decided from them, and to prove that the instance leaves closed rows out of a
+its stored value is passed on only for kinds of fields that show nothing of other records. A rejected login or an
+answer that is not the answer of an instance ends the call with that error. A call that has sent 500 requests, or
+has run for 90 seconds (three times the limit for one request where that is set higher), sends no further request
+and ends with an error where it needs one. What is closed is what an answer carries. The server itself reads the
+tables that say what a table is (sys_db_object, sys_db_view, sys_db_view_table, sys_dictionary,
+sys_table_rotation_schedule, sys_table_rotation) without these rules, because the rules are decided from them, and to prove that the instance leaves closed rows out of a
 table above them it asks that table for a sys_id and the class of one row, which are not passed on. Which tables
 are below a closed one is looked at again once in thirty seconds; what a view joins and where a reference points
 is kept for ten minutes. Not covered: plain text fields that carry something from a closed table, such as the user name in

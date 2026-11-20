@@ -188,6 +188,9 @@ export function isProof(call: Call): boolean {
   return impossible || oneRow || (oneId && (either || call.query === ''))
 }
 
+/** true for the look at the table of tables: how many there are and which was changed last, asked before a list of tables is used. */
+export const isLookAtTables = (call: Call): boolean => call.table === 'sys_db_object' && call.query.startsWith('ORDERBYDESCsys_updated_on')
+
 /**
  * Questions that no row can answer: a field that is empty and filled at once, one of two names that nothing has,
  * a class and not that class.

@@ -3,7 +3,7 @@ import { test } from 'node:test'
 import { Dictionary } from '../src/dictionary.js'
 import { ServiceNowError } from '../src/errors.js'
 import { createContext } from '../src/server.js'
-import { column, dictionaryRoutes, fakeInstance, isProof, showsParents, tableRow, type Route } from './fake.js'
+import { column, dictionaryRoutes, fakeInstance, isLookAtTables, isProof, showsParents, tableRow, type Route } from './fake.js'
 
 test('a table knows its parents and its kind', async () => {
   const { sn } = fakeInstance(dictionaryRoutes)
@@ -269,7 +269,7 @@ test('the tables a long deny list closes are asked for in several requests, each
   assert.deepEqual([...closed.keys()].sort(), [names[59], 'u_child_of_the_last'].sort())
   assert.deepEqual(closed.get('u_child_of_the_last'), ['u_child_of_the_last', names[59]])
 
-  const asked = calls.filter((call) => call.table === 'sys_db_object' && call.query !== showsParents.exact && !isProof(call))
+  const asked = calls.filter((call) => call.table === 'sys_db_object' && call.query !== showsParents.exact && !isProof(call) && !isLookAtTables(call))
   assert.ok(asked.length > 1, `${asked.length} requests`)
   for (const call of asked) {
     assert.ok(call.query.length < 3_500, `a query of ${call.query.length} characters`)
@@ -302,7 +302,7 @@ test('the tables below a table are listed only where the answer can be trusted',
   // Each with its parents up to the table, so that a closed table in between can be seen.
   assert.deepEqual([...((await new Dictionary(fine.sn).childTables('task')) ?? [])], [['incident', ['incident', 'task']], ['u_major_incident', ['u_major_incident', 'incident', 'task']]])
   // Every level of parents is asked for, and the table itself as proof that the query was applied.
-  assert.match(fine.calls.filter((call) => !isProof(call))[1].query, /^super_class\.nameINtask\^ORsuper_class\.super_class\.nameINtask\^OR.*\^ORname=task\^ORDERBYsys_id$/)
+  assert.match(fine.calls.filter((call) => !isProof(call) && !isLookAtTables(call))[1].query, /^super_class\.nameINtask\^ORsuper_class\.super_class\.nameINtask\^OR.*\^ORname=task\^ORDERBYsys_id$/)
   assert.equal((await new Dictionary(below([task]).sn).childTables('task'))?.size, 0)
 
   // Not trusted: the table itself is missing from the answer, a row matches none of the conditions, rows are
@@ -357,7 +357,7 @@ test('the tables below a table are followed deeper than one request sees', async
   const below = await new Dictionary(sn).childTables('u_root')
   assert.deepEqual(below?.get('u_deep'), ['u_deep', ...mids, 'u_root'])
   assert.deepEqual(below?.get('u_deeper'), ['u_deeper', 'u_deep', ...mids, 'u_root'])
-  assert.equal(calls.filter((call) => call.query !== showsParents.exact && !isProof(call)).length, 2)
+  assert.equal(calls.filter((call) => call.query !== showsParents.exact && !isProof(call) && !isLookAtTables(call)).length, 2)
 })
 
 test('an account that is not shown what a table extends gets no list of child tables', async () => {
@@ -630,4 +630,23 @@ test('names that look like an unknown field are searched for only where somebody
   assert.deepEqual(page.records, [{ number: { value: 'INC1', display_value: 'INC1' }, u_unknown: 'abc' }])
   assert.ok(asked.mock.callCount() > 0)
   assert.deepEqual([...new Set(asked.mock.calls.map((call) => call.arguments[2]))], [false])
+})
+
+test('what was read about tables before the first look at the table of tables is not relied on after it', async () => {
+  // A table can be read about before any list of closed tables is asked for. The first look cannot tell whether
+  // that was before or after a change, so it starts from nothing.
+  const routes: Route[] = [
+    { table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 10:00:00' }], total: 100 },
+    { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] },
+  ]
+  const { sn } = fakeInstance(routes)
+  const dictionary = new Dictionary(sn)
+  assert.deepEqual((await dictionary.table('u_open'))?.chain, ['u_open'])
+  routes.unshift({ table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open', 'u_private')] })
+  await dictionary.tablesUnchanged()
+  assert.deepEqual((await dictionary.table('u_open'))?.chain, ['u_open', 'u_private'])
+  // A second look that finds nothing changed leaves what is remembered.
+  routes.unshift({ table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] })
+  await dictionary.tablesUnchanged()
+  assert.deepEqual((await dictionary.table('u_open'))?.chain, ['u_open', 'u_private'])
 })

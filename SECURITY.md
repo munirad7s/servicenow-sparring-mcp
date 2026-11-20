@@ -48,7 +48,9 @@ request; they are not a sandbox.
 ## Credentials
 
 Credentials are read from environment variables or the env file you name. They are sent only to the configured
-instance, in the `Authorization` header. They are never written to an answer, an error message or the audit log.
+instance, in the `Authorization` header. The server writes them to no answer, no error message and no line of
+the audit log, and it passes on no raw error of the connection. It does not search what an instance answers for
+them: an instance that sent them back in its own words would be quoted.
 Fields that hold secrets on the instance (password types, encrypted fields, system properties of a password type)
 are replaced by a note before an answer leaves the server. That needs the type of the field, which comes from the
 dictionary. Where the type cannot be read, a field is withheld if its name suggests a secret, and the answer says

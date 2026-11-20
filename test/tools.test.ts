@@ -1371,6 +1371,11 @@ test('a part that is not on the list yet is told by the names of the rotated tab
   assert.equal((await first.call('sn_query', { table: 'u_queue20001', fields: ['sys_id'] })).data.error, 'blocked')
   assert.equal((await first.call('sn_query', { table: 'u_log0000', fields: ['sys_id'] })).data.error, 'blocked')
   assert.equal((await first.answer('sn_query', { table: 'u_queue3', fields: ['sys_id'] })).returned, 1)
+  // What the list says about a table goes before what its name looks like: "u_queue20001" on the list as a part
+  // of the open "u_queue" is no part of the closed "u_queue2".
+  const listed = await connect(world([{ table_name: 'u_queue2', 'name.name': 'u_queue2' }, { table_name: 'u_queue', 'name.name': 'u_queue' }, { table_name: 'u_queue20001', 'name.name': 'u_queue' }]), closed)
+  assert.equal((await listed.answer('sn_query', { table: 'u_queue20001', fields: ['sys_id'] })).returned, 1)
+  assert.equal((await listed.call('sn_query', { table: 'u_queue20002', fields: ['sys_id'] })).data.error, 'blocked')
   // Only digits behind the name make a part: a table that begins with the name of a rotated one is a table of its own.
   assert.equal((await first.answer('sn_query', { table: 'u_log_notes', fields: ['sys_id'] })).returned, 1)
 })
@@ -2209,6 +2214,12 @@ test('what a table shows as its name is read from every entry that can say so', 
   const together = [{ u_ref: ID, u_other: { value: ID, display: 'A title' } }]
   assert.deepEqual((await referenceDisplayCase('u_people', [shows('u_people', 'u_users', 'glide_list', 'sys_user')], { beside: true })).records, together)
   assert.deepEqual((await referenceDisplayCase('u_owned', [shows('u_owned', 'u_owner', 'reference', 'sys_user')], { beside: true })).records, together)
+  // An override that moves the display field and comes back without the table it is on: asked about two tables
+  // together, it cannot be placed, so what either shows is not told. Asked about one, it is known to be its own.
+  const unplaced: Route = { table: 'sys_dictionary_override', exact: 'nameINu_titled,u_plain^display_override=true^ORDERBYsys_id', rows: [{ sys_id: 'o', display_override: 'true' }] }
+  const moved = await referenceDisplayCase('u_titled', [shows('u_titled', 'u_title', 'string', '')], { beside: true, extra: [unplaced, { table: 'sys_dictionary_override', rows: [{ sys_id: 'o', name: 'u_titled', display_override: 'true' }] }] })
+  assert.deepEqual(moved.records, [{ u_ref: ID, u_other: ID }])
+  assert.match(moved.warnings.join(' '), /what a row of that table shows as its name/)
   // Nothing marked: the platform takes a field by its name, and each of those names can be a reference.
   for (const field of ['name', 'u_name', 'number', 'u_number']) {
     assert.deepEqual((await referenceDisplayCase('u_fallback', [column('u_fallback', field, 'reference', 'sys_user')])).records, hidden, field)
@@ -5771,6 +5782,18 @@ test('a list or an object behind a key that looks like a secret is taken out who
   assert.equal(clean(String.raw`{"body":"{\"secrets\":[\"TOP\\\"]SECRET\",\"x\"],\"name\":\"x\"}"}`).text, String.raw`{"body":"{\"secrets\":\"[withheld]\",\"name\":\"x\"}"}`)
   // What never closes holds the rest of the text.
   assert.equal(clean('{"name":"x","tokens":["TOPSECRET","OTHER"').text, '{"name":"x","tokens":"[withheld]"')
+  // The list is taken out before anything inside it is read: an element that only seems to open in it and close
+  // behind it takes nothing with it, and what is inside is counted once.
+  assert.deepEqual(clean('{"tokens":["<password>"],"label":"</password>","keep":"VISIBLE"}'), { text: '{"tokens":"[withheld]","label":"</password>","keep":"VISIBLE"}', withheld: 1 })
+  assert.deepEqual(clean('{"credentials":{"password":"x","pin":"<secret>y</secret>"}}'), { text: '{"credentials":"[withheld]"}', withheld: 1 })
+  // Each bracket is closed by its own kind: "}" inside a list of texts closes nothing, and neither does one outside a text.
+  assert.equal(clean('{"tokens":["a}b"],"n":1}').text, '{"tokens":"[withheld]","n":1}')
+  assert.equal(clean('{"tokens":[1,2},3],"n":1}').text, '{"tokens":"[withheld]","n":1}')
+  // A second reading takes nothing out and counts nothing.
+  for (const text of ['{"api_key":"A","t":"x"}', '<r><password>hunter2</password></r>', '{"tokens":["a"]}', '&lt;password&gt;x&lt;/password&gt;', '<sys_properties><name>a</name><type>password2</type><value>abc</value></sys_properties>']) {
+    const once = clean(text)
+    assert.deepEqual([once.withheld, clean(once.text)], [1, { text: once.text, withheld: 0 }], text)
+  }
   // A key that suggests nothing keeps its list, and a second reading changes nothing.
   assert.deepEqual(clean('{"names":["a","b"],"token_list":{"a":1}}'), { text: '{"names":["a","b"],"token_list":"[withheld]"}', withheld: 1 })
   assert.equal(clean(clean('{"tokens":["TOPSECRET"]}').text).text, '{"tokens":"[withheld]"}')
@@ -5974,4 +5997,471 @@ test('sn_origin: other records of a kind say how its records are named only wher
   const partly = await connect([{ table: 'sys_metadata', query: 'sys_update_nameISNOTEMPTY', rows: [peer, null] }, ...unnamed])
   assert.equal((await partly.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
   assert.equal(partly.sentTo('sys_update_xml').length, 0)
+})
+
+// What a second review of the fixes of 0.4.2 found in them.
+
+test('a key of an answer is a text like any other, and the words of an instance are read before they are shortened', async () => {
+  // The source of a version becomes a key of the count per source.
+  const { answer } = await connect(origin('sys_plugins', [change()], [version('current', '{"token":"TOPSECRET"}', '2026-03-01 10:00:00', 'abel')]))
+  const data = await answer('sn_origin', { sysId: ID })
+  assert.doesNotMatch(JSON.stringify(data), /TOPSECRET/)
+  assert.deepEqual(data.evidence.versions.bySource, { '{"token":"[withheld]"}': 1 })
+
+  // An element that closes behind the 300 characters a message keeps of the words of an instance.
+  const long = `<password>${'S3CRET'.repeat(70)}</password>`
+  const refusing = await connect([...dictionaryRoutes, { table: 'incident', status: 400, body: JSON.stringify({ error: { message: `Bad value ${long}`, detail: long }, status: 'failure' }) }])
+  const refused = await refusing.call('sn_query', { table: 'incident', fields: ['number'] })
+  assert.equal(refused.data.error, 'bad_request')
+  assert.doesNotMatch(JSON.stringify(refused.data), /S3CRET/)
+  assert.match(refused.data.message, /<password>\[withheld\]<\/password>/)
+})
+
+test('a list of closed tables is never older than the last look at the table of tables', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp = (total: number, changed: string): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: changed }], total })
+  const routes: Route[] = [
+    stamp(100, '2026-11-20 09:00:00'),
+    closedTables(tableRow('incident', 'Incident', 'task')),
+    { table: 'sys_dictionary', query: 'nameINtask', rows: [column('task', 'number'), column('task', 'sys_class_name', 'sys_class_name')] },
+    ...dictionaryRoutes,
+    { table: 'task', rows: [{ number: 'TASK1' }] },
+  ]
+  const { answer, call, sentTo } = await connect(routes, { tables: { allow: [], deny: ['incident'] } })
+  // The first call judges a name and reads the list of closed tables without asking the rules for a table.
+  assert.equal((await call('sn_origin', { updateName: `incident_${ID}` })).data.error, 'blocked')
+  assert.equal(sentTo('sys_db_object').filter((sent) => sent.query.startsWith('ORDERBYDESCsys_updated_on')).length, 1)
+  // A table is created below incident. Half a minute later the list is read anew, also after such a first call.
+  routes.unshift(stamp(101, '2026-11-20 10:00:05'), closedTables(tableRow('incident', 'Incident', 'task'), tableRow('u_major_incident', 'Major incident', 'incident', 'task')))
+  t.mock.timers.tick(31_000)
+  await answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(sentTo('task').at(-1)!.query, 'sys_class_nameNOT INincident,u_major_incident^ORsys_class_nameISEMPTY')
+})
+
+test('a rule for the name of a record holds behind a reference into a table below the one it is written for', async () => {
+  const { answer, call } = await connect(
+    [
+      closedTables(tableRow('sys_user', 'User')),
+      { table: 'sys_db_object', exact: 'name=u_holder', rows: [tableRow('u_holder', 'Holder')] },
+      { table: 'sys_db_object', exact: 'name=u_deleted_file', rows: [tableRow('u_deleted_file', 'Deleted file of ours', 'sys_metadata_delete', 'sys_metadata')] },
+      { table: 'sys_db_object', exact: 'name=sys_metadata_delete', rows: [tableRow('sys_metadata_delete', 'Deleted file', 'sys_metadata')] },
+      { table: 'sys_db_object', exact: 'name=sys_metadata', rows: [tableRow('sys_metadata', 'Application file')] },
+      { table: 'sys_dictionary', query: 'nameINu_holder', rows: [column('u_holder', 'u_ref', 'reference', 'u_deleted_file')] },
+      { table: 'sys_dictionary', query: 'nameINu_deleted_file,sys_metadata_delete,sys_metadata', rows: [column('sys_metadata', 'sys_name'), column('sys_metadata', 'sys_update_name')] },
+      ...dictionaryRoutes,
+      { table: 'u_holder', rows: [{ 'u_ref.sys_name': 'Abel Tuter', 'u_ref.sys_update_name': `sys_user_${ID}` }] },
+      stats('u_holder', { 'Abel Tuter': 1 }),
+    ],
+    { tables: { allow: [], deny: ['sys_user'] } },
+  )
+  assert.deepEqual((await answer('sn_query', { table: 'u_holder', fields: ['u_ref.sys_name'] })).records, [{ 'u_ref.sys_name': '[withheld: the record is in a table closed on this machine]' }])
+  // Not counted by, and not compared with text: both would give the names away.
+  assert.equal((await call('sn_query', { table: 'u_holder', groupBy: 'u_ref.sys_name' })).isError, true)
+  assert.equal((await call('sn_query', { table: 'u_holder', query: 'u_ref.sys_nameSTARTSWITHA', fields: ['sys_id'] })).isError, true)
+})
+
+test('sn_origin does not judge another record where the instance answers past the sys_id it was asked for', async () => {
+  // No record answers, and the question for a captured change that ends in the sys_id is answered with the newest
+  // change of another record: an instance that drops a condition answers that way.
+  const other = `sys_script_${'f'.repeat(32)}`
+  const dropped = await connect([{ table: 'sys_update_xml', query: 'nameENDSWITH_', rows: [{ ...change(), name: other }] }, ...origin(null, [], [])])
+  const data = await dropped.answer('sn_origin', { sysId: ID })
+  assert.equal(data.verdict, 'unknown')
+  assert.doesNotMatch(JSON.stringify(data), new RegExp(other))
+  assert.equal(dropped.sentTo('sys_update_xml').filter((sent) => sent.query.startsWith(`name=${other}`)).length, 0)
+  // The same for a version, where no captured change is left.
+  const version2 = await connect([{ table: 'sys_update_version', query: 'nameENDSWITH_', rows: [{ ...version('current', 'sys_update_set', '2026-03-01 10:00:00', 'abel'), name: other }] }, ...origin(null, [], [])])
+  assert.equal((await version2.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
+  assert.equal(version2.sentTo('sys_update_version').filter((sent) => sent.query.startsWith(`name=${other}`)).length, 0)
+})
+
+// Fifteen changes of one line each that a second review predicted no test would notice. Run, none was noticed.
+
+test('table refresh invalidates the allow-list child-table cache', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp: Route = {
+    table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/,
+    rows: [{ sys_id: 'stamp', sys_updated_on: '2026-11-20 10:00:00' }], total: 100,
+  }
+  const routes: Route[] = [
+    stamp,
+    { table: 'sys_db_object', query: '^ORname=task', rows: [tableRow('task', 'Task')] },
+    ...dictionaryRoutes,
+    { table: 'task', rows: [{ number: 'TASK1' }] },
+  ]
+  const app = await connect(routes, { tables: { allow: ['sys_*', 'task'], deny: [] } })
+  await app.answer('sn_query', { table: 'task', fields: ['number'] })
+
+  stamp.total = 101
+  routes.unshift(
+    {
+      table: 'sys_db_object', query: '^ORname=task',
+      rows: [tableRow('task', 'Task'), tableRow('u_private', 'Private', 'task')],
+    },
+    { table: 'task', query: 'sys_class_nameINtask', rows: [{ number: 'TASK1' }] },
+    { table: 'task', rows: [{ number: 'TASK1' }, { number: 'PRIVATE' }] },
+  )
+  t.mock.timers.tick(31_000)
+
+  const data = await app.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.deepEqual(data.records, [{ number: 'TASK1' }])
+  assert.match(app.sentTo('task').at(-1)!.query, /sys_class_nameINtask/)
+})
+
+test('table refresh invalidates the queried table ancestry', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp: Route = {
+    table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/,
+    rows: [{ sys_id: 'stamp', sys_updated_on: '2026-11-20 10:00:00' }], total: 100,
+  }
+  const routes: Route[] = [
+    stamp,
+    { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] },
+    { table: 'sys_db_object', query: '^ORname=u_open', rows: [tableRow('u_open', 'Open')] },
+    { table: 'sys_dictionary', query: 'nameINu_open', rows: [column('u_open', 'number')] },
+    ...dictionaryRoutes,
+    { table: 'u_open', rows: [{ number: 'OPEN' }] },
+  ]
+  const app = await connect(routes, { tables: { allow: ['sys_*', 'u_open'], deny: [] } })
+  await app.answer('sn_query', { table: 'u_open', fields: ['number'] })
+  const before = app.sentTo('u_open').length
+
+  stamp.total = 101
+  routes.unshift(
+    {
+      table: 'sys_db_object', exact: 'name=u_open',
+      rows: [tableRow('u_open', 'Open', 'u_private')],
+    },
+    { table: 'u_open', rows: [{ number: 'PRIVATE' }] },
+  )
+  t.mock.timers.tick(31_000)
+
+  assert.equal((await app.call('sn_query', { table: 'u_open', fields: ['number'] })).data.error, 'blocked')
+  assert.equal(app.sentTo('u_open').length, before)
+})
+
+test('table refresh invalidates the rotation-part mapping', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp: Route = {
+    table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/,
+    rows: [{ sys_id: 'stamp', sys_updated_on: '2026-11-20 10:00:00' }], total: 100,
+  }
+  const schedule: Route = {
+    table: 'sys_table_rotation_schedule',
+    rows: [{ table_name: 'u_slot', 'name.name': 'u_public' }],
+  }
+  const routes: Route[] = [
+    stamp, schedule,
+    { table: 'sys_table_rotation', rows: [] },
+    closedTables(tableRow('u_private', 'Private')),
+    { table: 'sys_db_object', exact: 'name=u_slot', rows: [tableRow('u_slot', 'Slot')] },
+    { table: 'sys_db_object', exact: 'name=u_public', rows: [tableRow('u_public', 'Public')] },
+    { table: 'sys_dictionary', query: 'nameINu_slot', rows: [column('u_slot', 'number')] },
+    ...dictionaryRoutes,
+    { table: 'u_slot', rows: [{ number: 'PUBLIC' }] },
+  ]
+  const app = await connect(routes, { tables: { allow: [], deny: ['u_private'] } })
+  await app.answer('sn_query', { table: 'u_slot', fields: ['number'] })
+  const before = app.sentTo('u_slot').length
+
+  schedule.rows = [{ table_name: 'u_slot', 'name.name': 'u_private' }]
+  stamp.total = 101
+  routes.unshift({ table: 'u_slot', rows: [{ number: 'PRIVATE' }] })
+  t.mock.timers.tick(31_000)
+
+  assert.equal((await app.call('sn_query', { table: 'u_slot', fields: ['number'] })).data.error, 'blocked')
+  assert.equal(app.sentTo('u_slot').length, before)
+})
+
+test('a missing later parent field does not end the ancestry', async () => {
+  const broken: Data = tableRow('u_child', 'Child', 'u_parent', 'u_private')
+  delete broken['super_class.super_class.name']
+
+  const app = await connect([
+    { table: 'sys_db_object', exact: 'name=u_child', rows: [broken] },
+    {
+      table: 'sys_db_object', exact: 'name=u_parent',
+      rows: [tableRow('u_parent', 'Parent', 'u_private')],
+    },
+    {
+      table: 'sys_db_object', query: '^ORname=u_child',
+      rows: [tableRow('u_child', 'Child', 'u_parent', 'u_private')],
+    },
+    {
+      table: 'sys_dictionary', query: 'nameINu_child,u_parent',
+      rows: [column('u_parent', 'number')],
+    },
+    ...dictionaryRoutes,
+    { table: 'u_child', rows: [{ number: 'PRIVATE' }] },
+  ], { tables: { allow: ['sys_*', 'u_child', 'u_parent'], deny: [] } })
+
+  const result = await app.call('sn_query', { table: 'u_child', fields: ['number'] })
+  assert.equal(result.data.error, 'blocked')
+  assert.equal(app.sentTo('u_child').length, 0)
+})
+
+test('table refresh invalidates inherited field types', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp: Route = {
+    table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/,
+    rows: [{ sys_id: 'stamp', sys_updated_on: '2026-11-20 10:00:00' }], total: 100,
+  }
+  const routes: Route[] = [
+    stamp,
+    closedTables(tableRow('sys_user', 'User')),
+    {
+      table: 'sys_db_object', exact: 'name=u_box',
+      rows: [tableRow('u_box', 'Box', 'u_plain')],
+    },
+    {
+      table: 'sys_dictionary', query: 'nameINu_box,u_plain',
+      rows: [column('u_plain', 'u_material')],
+    },
+    ...dictionaryRoutes,
+    { table: 'u_box', rows: [{ u_material: 'plain' }] },
+  ]
+  const app = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
+  await app.answer('sn_query', { table: 'u_box', fields: ['u_material'] })
+
+  stamp.total = 101
+  routes.unshift(
+    {
+      table: 'sys_db_object', exact: 'name=u_box',
+      rows: [tableRow('u_box', 'Box', 'u_secure')],
+    },
+    {
+      table: 'sys_dictionary', query: 'nameINu_box,u_secure',
+      rows: [column('u_secure', 'u_material', 'password2')],
+    },
+    { table: 'u_box', rows: [{ u_material: 'OPAQUE_CIPHERTEXT' }] },
+  )
+  t.mock.timers.tick(31_000)
+
+  const data = await app.answer('sn_query', { table: 'u_box', fields: ['u_material'] })
+  assert.equal(data.records[0].u_material, '[withheld: this field holds a secret]')
+})
+
+test('fixed-name property reads also withhold the password type', async () => {
+  const app = await connect([
+    {
+      table: 'sys_properties',
+      rows: [{ name: 'glide.war', value: 'OPAQUE_CIPHERTEXT', type: 'password' }],
+    },
+    ...sourceTables.map((table) => ({ table, rows: [{ sys_id: '1' }] })),
+  ])
+
+  const data = await app.answer('sn_instance')
+  assert.equal(data.release.build, null)
+  assert.doesNotMatch(JSON.stringify(data), /OPAQUE_CIPHERTEXT/)
+})
+
+test('a secret container key may begin with an underscore', async () => {
+  const app = await connect([
+    { table: 'sys_update_xml', query: 'sys_created_byINsystem', rows: [], total: 0 },
+    {
+      table: 'sys_update_xml',
+      rows: [{
+        name: 'sys_script_1', type: 'Business Rule',
+        target_name: '{"_tokens":["OPAQUE_SECRET"]}',
+        action: 'INSERT_OR_UPDATE', sys_updated_on: '2026-02-01 00:00:00',
+      }],
+    },
+    stats('sys_update_xml', { 'Business Rule': 1 }, undefined, 'type'),
+  ])
+
+  const data = await app.answer('sn_delta')
+  assert.equal(data.updates[0].target_name, '{"_tokens":"[withheld]"}')
+  assert.doesNotMatch(JSON.stringify(data), /OPAQUE_SECRET/)
+})
+
+test('a view finds a name rule between its member and the field definition', async () => {
+  const app = await connect([
+    closedTables(tableRow('sys_user', 'User')),
+    { table: 'sys_db_object', exact: 'name=v_deleted_file', rows: [] },
+    {
+      table: 'sys_db_view', query: 'name=v_deleted_file',
+      rows: [{ sys_id: 'a'.repeat(32), name: 'v_deleted_file', label: 'Deleted files' }],
+    },
+    {
+      table: 'sys_db_view_table',
+      rows: [{ sys_id: 'b'.repeat(32), table: 'u_deleted_file', variable_prefix: 'd' }],
+    },
+    {
+      table: 'sys_db_object', exact: 'name=u_deleted_file',
+      rows: [tableRow('u_deleted_file', 'Deleted file', 'sys_metadata_delete', 'sys_metadata')],
+    },
+    {
+      table: 'sys_dictionary', query: 'nameINu_deleted_file,sys_metadata_delete,sys_metadata',
+      rows: [column('sys_metadata', 'sys_name'), column('sys_metadata', 'sys_update_name')],
+    },
+    ...dictionaryRoutes,
+    {
+      table: 'v_deleted_file',
+      rows: [{ d_sys_name: 'Abel Tuter', d_sys_update_name: `sys_user_${ID}` }],
+    },
+  ], { tables: { allow: [], deny: ['sys_user'] } })
+
+  const data = await app.answer('sn_query', { table: 'v_deleted_file', fields: ['d_sys_name'] })
+  assert.deepEqual(data.records, [{
+    d_sys_name: '[withheld: the record is in a table closed on this machine]',
+  }])
+  // Read without a list of fields, a row names its fields itself: the rule is found from the field alone then.
+  const whole = await app.answer('sn_query', { table: 'v_deleted_file' })
+  assert.equal(whole.records[0].d_sys_name, '[withheld: the record is in a table closed on this machine]')
+})
+
+test('table refresh invalidates negative table-name lookups', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp: Route = {
+    table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/,
+    rows: [{ sys_id: 'stamp', sys_updated_on: '2026-11-20 10:00:00' }], total: 100,
+  }
+  const routes: Route[] = [
+    stamp, knownTables('u_open'),
+    { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] },
+    { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Updates')] },
+    { table: 'sys_db_object', query: '^ORname=sys_update_xml', rows: [tableRow('sys_update_xml', 'Updates')] },
+    {
+      table: 'sys_dictionary', query: 'nameINsys_update_xml',
+      rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'target_name')],
+    },
+    ...dictionaryRoutes,
+    { table: 'sys_update_xml', rows: [{ name: 'u_open_private_custom', target_name: 'Public name' }] },
+  ]
+  const app = await connect(routes, { tables: { allow: ['sys_*', 'u_open'], deny: [] } })
+  await app.answer('sn_query', { table: 'sys_update_xml', fields: ['target_name'] })
+
+  stamp.total = 101
+  routes.unshift(
+    knownTables('u_open', 'u_open_private'),
+    { table: 'sys_db_object', exact: 'name=u_open_private', rows: [tableRow('u_open_private', 'Private')] },
+    { table: 'sys_update_xml', rows: [{ name: 'u_open_private_custom', target_name: 'Private payroll' }] },
+  )
+  t.mock.timers.tick(31_000)
+
+  const data = await app.answer('sn_query', { table: 'sys_update_xml', fields: ['target_name'] })
+  assert.equal(data.records[0].target_name, '[withheld: the record is in a table closed on this machine]')
+})
+
+test('table refresh invalidates inherited display-reference knowledge', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp: Route = {
+    table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/,
+    rows: [{ sys_id: 'stamp', sys_updated_on: '2026-11-20 10:00:00' }], total: 100,
+  }
+  const routes: Route[] = [
+    stamp, closedTables(tableRow('sys_user', 'User')),
+    { table: 'sys_db_object', exact: 'name=u_holder', rows: [tableRow('u_holder', 'Holder')] },
+    { table: 'sys_db_object', exact: 'name=u_named', rows: [tableRow('u_named', 'Named')] },
+    {
+      table: 'sys_dictionary', query: 'nameINu_holder',
+      rows: [column('u_holder', 'u_ref', 'reference', 'u_named')],
+    },
+    {
+      table: 'sys_dictionary', query: 'nameINu_named',
+      rows: [column('u_named', 'u_title', 'string', '', { display: 'true' })],
+    },
+    ...dictionaryRoutes,
+    { table: 'u_holder', rows: [{ u_ref: labelled(ID, 'Ordinary title') }] },
+  ]
+  const app = await connect(routes, { tables: { allow: [], deny: ['sys_user'] } })
+  await app.answer('sn_query', { table: 'u_holder', fields: ['u_ref'], displayValue: true })
+
+  stamp.total = 101
+  routes.unshift(
+    {
+      table: 'sys_db_object', exact: 'name=u_named',
+      rows: [tableRow('u_named', 'Named', 'u_owned')],
+    },
+    {
+      table: 'sys_dictionary', query: 'nameINu_named,u_owned',
+      rows: [column('u_owned', 'u_user', 'reference', 'sys_user', { display: 'true' })],
+    },
+    { table: 'u_holder', rows: [{ u_ref: labelled(ID, 'Abel Tuter') }] },
+  )
+  t.mock.timers.tick(31_000)
+
+  const data = await app.answer('sn_query', { table: 'u_holder', fields: ['u_ref'], displayValue: true })
+  assert.deepEqual(data.records, [{ u_ref: ID }])
+})
+
+test('batch display discovery rejects an entry without its type', async () => {
+  const data = await referenceDisplayCase('u_untyped', [
+    column('u_untyped', 'u_owner', '', 'sys_user', { display: 'true' }),
+  ], { beside: true })
+
+  assert.deepEqual(data.records, [{
+    u_ref: ID,
+    u_other: { value: ID, display: 'A title' },
+  }])
+})
+
+test('a raw group label is ignored when the gate prevented asking for it', async () => {
+  const app = await connect([
+    closedTables(tableRow('sys_user', 'User')),
+    {
+      table: 'incident', api: 'stats',
+      body: JSON.stringify({
+        result: [{
+          stats: { count: '3' },
+          groupby_fields: [{ field: 'assigned_to', value: ID, display_value: 'Abel Tuter' }],
+        }],
+      }),
+    },
+    ...dictionaryRoutes,
+  ], { tables: { allow: [], deny: ['sys_user'] } })
+
+  const data = await app.answer('sn_query', { table: 'incident', groupBy: 'assigned_to' })
+  assert.deepEqual(data.groups, [{ value: ID, count: 3 }])
+  assert.equal(app.sentTo('incident', 'stats')[0].params.get('sysparm_display_value'), null)
+})
+
+test('payload display values quoted with apos entities are withheld', async () => {
+  const payload =
+    `<sys_script action="INSERT_OR_UPDATE"><note>` +
+    `&lt;owner display_value=&apos;Abel Tuter&apos;&gt;${ID}&lt;/owner&gt;` +
+    `</note></sys_script>`
+
+  const app = await connect([
+    closedTables(tableRow('sys_user', 'User')),
+    { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Updates')] },
+    {
+      table: 'sys_dictionary', query: 'nameINsys_update_xml',
+      rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'payload')],
+    },
+    ...dictionaryRoutes,
+    { table: 'sys_update_xml', rows: [{ name: NAME, payload }] },
+  ], { tables: { allow: [], deny: ['sys_user'] } })
+
+  const data = await app.answer('sn_query', { table: 'sys_update_xml', fields: ['payload'] })
+  assert.doesNotMatch(data.records[0].payload, /Abel Tuter/)
+  assert.match(data.records[0].payload, /display_value=&apos;\[withheld\]&apos;/)
+})
+
+test('a hidden version suffix match leaves origin unknown', async () => {
+  const app = await connect([
+    { table: 'sys_metadata', rows: [] },
+    { table: 'sys_update_xml', rows: [] },
+    { table: 'sys_update_version', rows: [null], total: 1 },
+    { table: 'upgrade_history_task', rows: [] },
+  ])
+
+  const data = await app.answer('sn_origin', { sysId: ID })
+  assert.equal(data.verdict, 'unknown')
+  assert.match(app.sentTo('sys_update_version')[0].query, new RegExp(`^nameENDSWITH_${ID}\\^`))
+})
+
+test('an HTML 413 is about one request rather than the whole instance call', async () => {
+  const app = await connect([
+    { table: 'sys_script', status: 413, body: '<html>Request too large</html>' },
+    {
+      table: 'sys_properties',
+      rows: [{ name: 'glide.war', value: 'glide-zurich-example.zip', type: 'string' }],
+    },
+    ...sourceTables.map((table) => ({ table, rows: [{ sys_id: '1' }] })),
+  ])
+
+  const data = await app.answer('sn_instance')
+  assert.equal(data.sources.sys_script, 'unknown')
+  assert.equal(data.release.build, 'glide-zurich-example.zip')
 })
