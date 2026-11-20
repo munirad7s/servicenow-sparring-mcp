@@ -304,7 +304,7 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
    * answers a field it cannot use with no rows looks the same, so where no row shows a class it is asked for a
    * row with or without one: none, of a table that has rows, and the condition is not relied on.
    */
-  const proofs = new Map<string, { at: number; applied: Promise<boolean> }>()
+  const proofs = new Map<string, { at: number; drops: number; applied: Promise<boolean> }>()
   async function prove(table: string, field: string, kinds: string[]): Promise<{ applied: boolean; lasting: boolean }> {
     const [a, b] = NO_SUCH_CLASS
     const ask = (query: string, fields = ['sys_id']) => sn.query<Record<string, unknown>>({ table, query, fields, limit: 1, trusted: true }).catch(unlessNoConnection(null))
@@ -345,10 +345,12 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     const kinds = ['ISEMPTY', ...(condition.includes('IN') ? ['IN'] : []), ...(condition.includes('NOT IN') ? ['NOT IN'] : []), ...(condition.includes('STARTSWITH') ? ['STARTSWITH'] : [])]
     const key = `${table}.${field} ${kinds.join(' ')}`
     const hit = proofs.get(key)
-    if (hit && Date.now() - hit.at < PROOF_TTL_MS) return hit.applied
+    // A proof holds for the table, or the view, as it was when it was given. Once everything about tables was
+    // dropped, it is asked for again: a view that was changed need no longer apply what it applied.
+    if (hit && hit.drops === dict.drops && Date.now() - hit.at < PROOF_TTL_MS) return hit.applied
 
     const proof = prove(table, field, kinds)
-    const entry = { at: Date.now(), applied: proof.then((result) => result.applied) }
+    const entry = { at: Date.now(), drops: dict.drops, applied: proof.then((result) => result.applied) }
     proofs.delete(key)
     proofs.set(key, entry)
     if (proofs.size > MAX_PROOFS) proofs.delete(proofs.keys().next().value as string)

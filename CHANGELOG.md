@@ -5,10 +5,12 @@ answer; such changes are listed under "Changed".
 
 ## Unreleased
 
-Two reviews, and this time before the release that carries the answers to them: one of the fixes of 0.4.3, and
-one of the answers to that. The first rated 10 of 13 as holding for the case they were written for and not for
-another, the second 5 of 8, with the same pattern as before: a rule that stood where the fault was found and not
-where every path runs through.
+Three reviews, and this time before the release that carries the answers to them: one of the fixes of 0.4.3,
+one of the answers to that, and one of the answers to that. The first rated 10 of 13 as holding for the case
+they were written for and not for another, the second 5 of 8, the third 3 of 6, with the same pattern as before:
+a rule that stood where the fault was found and not where every path runs through. The third was asked to say
+for each finding whether an instance that behaves as documented can cause it, or only a text or an answer made
+for the purpose: three were of the first kind.
 
 ### Security
 
@@ -25,7 +27,13 @@ where every path runs through.
   order has a text that keeps something: an element that ends inside a list takes the key of the list along, so
   that the rest of the list stays, and a list that never closes takes the end of the element around it, so that
   what stands before the list stays. All of them are found in the text as it came now, before anything is taken
-  out, and what overlaps is taken out as one.
+  out, and what overlaps is taken out as one. A text or a number behind such a key is a place like the others:
+  an element that ended inside it took its key along as well.
+- **A list that never closes took the rest of a record along.** It holds the rest of the text, because what is
+  behind an opening bracket without its end cannot be told apart. A script is no JSON: a quote can stand in a
+  pattern there (`{"token": {pattern: /"/}}`), and the list behind such a key never closed for the reading. In a
+  payload, the rest of the record went with it. Inside a CDATA section such a list holds the rest of the
+  section now, and nothing behind its end.
 - **Taking one thing out can make the next one recognisable.** An element that holds another element is none
   that holds text, until the inner one is gone. A text is read until a reading finds nothing more, and only
   then is it quoted or cut: cut after one reading, the end that the next reading needed was gone.
@@ -39,6 +47,10 @@ where every path runs through.
 - **What was read before everything about tables was dropped is not remembered after it.** A look-up that was
   under way when the look at the table of tables found a change wrote what it had read into what is remembered,
   and brought the old state back for ten minutes.
+- **A proof outlived the table it was given for.** That the instance applies a condition on the class of a row,
+  or on a field of a database view, is asked once and kept for ten minutes. It was kept past the moment when
+  everything else about tables was dropped, and a view that was changed in between need no longer apply what it
+  applied. Both kinds of proof are asked for again after a drop.
 - **A look that came without what it looks for is no "nothing changed".** Where the number of tables or the time
   of the last change did not come back, two looks were alike whatever happened between them. Such a look
   drops what is remembered, every time.
@@ -55,6 +67,9 @@ where every path runs through.
 - A company code that comes back without a value that can be read is a failed read: it was kept for ten minutes
   as "not set".
 - A note that stands for something taken out is not cut in two where a long text is shortened.
+- A document inside a CDATA section is read a second way, with a sign put into the text that does not stand in
+  it. Three signs were tried, and a text that carried all three was passed on after one reading. Any of 6,400 is
+  taken now, and a text that carries them all is not passed on.
 - `npm run compare`: a direct read that brings no list is no answer to hold anything against, also where the
   status says 200; where neither the server nor the direct read got a list, that is a difference and the run
   ends with 1; and a setting that cannot be read is not taken for "off".

@@ -385,8 +385,20 @@ export class Dictionary {
    */
   private dropped = 0
 
+  /**
+   * How often everything about tables was dropped. Whoever remembers something that was shown for a table as it
+   * was, a proof that the instance applies a condition for one, keeps this number beside it: remembered under
+   * another number, it is of a table that may no longer be what it was.
+   */
+  get drops(): number {
+    return this.dropped
+  }
+
   private forgetTables(): void {
     this.dropped++
+    // What a view was seen to filter by, and that it has rows, was seen of the view as it was defined then.
+    this.carried.clear()
+    this.someRow.clear()
     for (const cache of [this.tables, this.columnSets, this.choiceLists, this.labelSets, this.ruleCounts, this.archiveCounts, this.rotations, this.closedSets, this.knownNames, this.partLists, this.shownSets, this.childSets]) cache.clear()
   }
 
@@ -1118,6 +1130,7 @@ export class Dictionary {
     const key = `${view}.${path}`
     const known = this.carried.get(key)
     if (known && Date.now() - known.at < this.ttlMs) return known.value
+    const asked = this.dropped
     // A view that is closed on this machine is refused as that, not as a field that could not be proven.
     const read = (query: string) =>
       this.gated.query({ table: view, query, fields: ['sys_id'], limit: 1 }).catch((error) => {
@@ -1131,14 +1144,15 @@ export class Dictionary {
       const seen = this.someRow.get(view)
       if (seen !== undefined && Date.now() - seen < this.ttlMs) return { total: 1, records: [{}] }
       const answer = await read('')
-      if (answer && (answer.records.length > 0 || (answer.total ?? 0) > 0)) {
+      // Remembered only if nothing was dropped while it was asked: what was seen belongs to the state before.
+      if (asked === this.dropped && answer && (answer.records.length > 0 || (answer.total ?? 0) > 0)) {
         if (this.someRow.size >= MAX_ENTRIES) this.someRow.clear()
         this.someRow.set(view, Date.now())
       }
       return answer
     }
     const proof = await proveCondition(ask, path, (await this.emptyOnInvalidQuery()) === false)
-    if (proof === 'applied') {
+    if (proof === 'applied' && asked === this.dropped) {
       if (this.carried.size >= MAX_ENTRIES) this.carried.clear()
       this.carried.set(key, { value: Promise.resolve(true), at: Date.now() })
     }

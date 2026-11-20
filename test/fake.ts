@@ -256,6 +256,9 @@ export const showsParents: Route = { table: 'sys_db_object', exact: 'super_class
 /** Dictionary of a small world: incident extends task; both point to sys_user. */
 export const dictionaryRoutes: Route[] = [
   showsParents,
+  // The look at the table of tables: how many there are and which was changed last. The same every time, as on an
+  // instance where nobody creates a table meanwhile. A test that wants a change puts its own answer in front.
+  { table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'last', sys_updated_on: '2026-01-01 00:00:00' }], total: 100 },
   { table: 'sys_db_object', query: 'name=incident', rows: [tableRow('incident', 'Incident', 'task')] },
   { table: 'sys_db_object', query: 'name=task', rows: [tableRow('task', 'Task')] },
   { table: 'sys_db_object', query: 'name=sys_user', rows: [tableRow('sys_user', 'User')] },

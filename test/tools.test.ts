@@ -1148,6 +1148,19 @@ test('a proof that the instance applies a condition is kept for ten minutes, not
   t.mock.timers.tick(2 * 60_000)
   await answer('sn_query', { table: 'task', fields: ['number'] })
   assert.equal(proofsFrom('task').length, 8)
+
+  // And not past a change of the tables: a proof was given for a table, or a view, as it was. Where the look at
+  // the table of tables finds a change, what is remembered about tables is dropped, and the proofs with it.
+  const world = familyWorld([below, { table: 'task', rows: [{ number: 'TASK1' }] }])
+  const changing = await connect(world, { tables: { allow: [], deny: ['incident'] } })
+  await changing.answer('sn_query', { table: 'task', fields: ['number'] })
+  t.mock.timers.tick(31_000)
+  await changing.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(changing.proofsFrom('task').length, 4)
+  world.unshift({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'new', sys_updated_on: '2026-11-20 10:20:00' }], total: 101 })
+  t.mock.timers.tick(31_000)
+  await changing.answer('sn_query', { table: 'task', fields: ['number'] })
+  assert.equal(changing.proofsFrom('task').length, 8)
 })
 
 test('the name and the payload of a captured change are kept back where its record is in a closed table', async () => {
@@ -2963,6 +2976,14 @@ test('a secret is taken out where a section stands inside a section, and where t
   assert.equal(property.withheld, 1)
   assert.doesNotMatch(property.text, /TOPSECRET/)
   // What holds no secret comes back as it was, the mark included.
+  // The second reading puts a sign into the text that does not stand in it. A text that carries the first signs
+  // one would think of is read with another.
+  const signs = scrubSecrets('\uE000\uE001\uF8FF<a><![CDATA[<b><password><![CDATA[hunter2]]]]><![CDATA[></password></b>]]></a>')
+  assert.doesNotMatch(signs.text, /hunter2/)
+  assert.match(signs.text, /^\uE000\uE001\uF8FF<a>.*<password>\[withheld\]<\/password>/)
+  // One that carries every such sign cannot be read that way, and is not passed on.
+  const every = Array.from({ length: 0xf8ff - 0xe000 + 1 }, (_, index) => String.fromCharCode(0xe000 + index)).join('')
+  assert.equal(scrubSecrets(`${every}<a><![CDATA[<b><password><![CDATA[hunter2]]]]><![CDATA[></password></b>]]></a>`).text, '[withheld]')
   const harmless = '<a><![CDATA[<b><note><![CDATA[plain]]]]><![CDATA[></note></b>]]></a>'
   assert.deepEqual(scrubSecrets(harmless), { text: harmless, withheld: 0 })
   // A value that holds "]]>" is still read as one run of sections.
@@ -5806,6 +5827,13 @@ test('a list or an object behind a key that looks like a secret is taken out who
   // Taking one thing out can make the next recognisable: the text is read until a reading finds nothing more.
   // An element that holds another element is none that holds text, until the inner one is gone.
   assert.deepEqual(clean('<password>S3CRET {"token":"<x>z</x>"}</password>'), { text: '<password>[withheld]</password>', withheld: 2 })
+  // A text or a number behind a key is a place like the others: an element that ends inside it does not take
+  // its key along.
+  assert.deepEqual(clean('{"note":"<password>","token":"</password>LEAK"}'), { text: '{"note":"[withheld]}', withheld: 1 })
+  // A list that never closes holds the rest of the text. Inside a CDATA section it holds the rest of the section
+  // and no more: a script is no JSON, and a quote in a pattern would take the rest of the record along.
+  const script = '<sys_script><script><![CDATA[\nvar lexer = {"token": {pattern: /"/}};\ngs.info("ready");\n]]></script><description>ordinary</description></sys_script>'
+  assert.equal(clean(script).text, '<sys_script><script><![CDATA[\nvar lexer = {"token": "[withheld]"]]></script><description>ordinary</description></sys_script>')
   // Each bracket is closed by its own kind: "}" inside a list of texts closes nothing, and neither does one outside a text.
   assert.equal(clean('{"tokens":["a}b"],"n":1}').text, '{"tokens":"[withheld]","n":1}')
   assert.equal(clean('{"tokens":[1,2},3],"n":1}').text, '{"tokens":"[withheld]","n":1}')

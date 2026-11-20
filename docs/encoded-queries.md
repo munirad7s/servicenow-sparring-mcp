@@ -290,6 +290,12 @@ Also measured:
 - Asked for the same 519 records, 0.4.1 and 0.4.2 gave the same answer from `sn_origin` for 514. The other five
   were asked for by the sys_id at the end of the name of a version: no record answers and no captured change is
   left, and the versions are. 5 of 74 such sys_ids, so it is no rare case on an instance that has been cleaned.
+- A cell of a row is a text, or a value with what the instance shows for it. Read from 50 tables with every
+  kind of field, 20 rows each: without display values 48,364 cells, every one a text or empty. With
+  `sysparm_display_value=all` 48,364 cells, every one an object of `value` and `display_value`, the display
+  value empty in 2,391 of them; 680 cells of currency fields carried a third part, `currency_display_value`.
+  No cell was a list or another kind of object. The server passes on value and display value; an object of
+  another shape, which no cell here had, is passed on as the text it is written as.
 - The table of tables had 10,806 rows. Asked for the one changed last and for how many there are, it answered in
   about 120 milliseconds with 97 bytes. Asked for a name that ends in a given sys_id, the versions (49,263
   rows) answered in 0.2 seconds, and the entries of upgrades through their reference in 0.1.

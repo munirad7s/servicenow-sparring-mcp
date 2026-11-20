@@ -248,8 +248,11 @@ function scrubReading(text: string): { text: string; withheld: number } {
   // inner one never ends. So the text is read a second time, with that mark taken as the end it stands for, and
   // what either reading finds is taken out.
   if (!first.text.includes(NESTED_END)) return first
-  const mark = ['\uE000', '\uE001', '\uF8FF'].find((sign) => !first.text.includes(sign))
-  if (!mark) return first
+  // A sign that does not stand in the text: one of the 6,400 that are set aside for private use. A text that
+  // carries every one of them is not read a second way, and not passed on either.
+  let mark = ''
+  for (let code = 0xe000; code <= 0xf8ff && !mark; code++) if (!first.text.includes(String.fromCharCode(code))) mark = String.fromCharCode(code)
+  if (!mark) return { text: WITHHELD, withheld: first.withheld + 1 }
   const second = scrubOnce(first.text.replaceAll(NESTED_END, `${mark}]]>`))
   return { text: second.text.replaceAll(`${mark}]]>`, NESTED_END), withheld: first.withheld + second.withheld }
 }
@@ -288,7 +291,7 @@ function scrubOnce(text: string): { text: string; withheld: number } {
   // kind after the other, each order loses something: an element can end inside a list and take its key along,
   // and a list that never closes can take the end of the element around it. Where two places overlap, both are
   // taken out as one.
-  const places: Array<{ start: number; end: number; put: string }> = [...secretContainers(text)]
+  const places: Array<{ start: number; end: number; put: string }> = [...secretContainers(text), ...secretValues(text)]
   for (const markup of text.includes('&lt;') ? [PLAIN_MARKUP, ESCAPED_MARKUP] : [PLAIN_MARKUP]) {
     for (const element of simpleElements(text, looksSecret, markup)) {
       // "true" and "false" are switches such as "display_password", not secrets. And a note is no secret.
@@ -388,24 +391,27 @@ function scrubOnce(text: string): { text: string; withheld: number } {
       judge(unescaped(record)) ? withoutEscaped(record, isValue, true) : record,
     )
   }
+  return { text: out, withheld }
+}
 
-  // JSON, also where it sits inside a string of another JSON text and its quotes are escaped. There an escape of
-  // the inner text is written with two backslashes: \\u003d, \\/ and, for a quote inside the value, \\\". An
-  // escape of the outer text has one, as where "/" was written "\/", and a line break between key and value "\n".
+/**
+ * The text or number behind a JSON key whose name suggests a secret, as places in the text. Also where the JSON
+ * sits inside a string of another JSON text and its quotes are escaped. There an escape of the inner text is
+ * written with two backslashes: \\u003d, \\/ and, for a quote inside the value, \\\". An escape of the outer text
+ * has one, as where "/" was written "\/", and a line break between key and value "\n".
+ */
+function* secretValues(text: string): Generator<{ start: number; end: number; put: string }> {
   for (const quote of ['"', String.raw`\\"`]) {
     const value = quote === '"' ? String.raw`"(?:[^"\\]|\\.)+"` : String.raw`\\"(?:[^"\\]|\\\\(?:\\\\|\\"|[^"\\])|\\[^"\\])+\\"`
     const gap = quote === '"' ? String.raw`\s*` : String.raw`(?:\s|\\[nrt])*`
-    out = out.replace(new RegExp(String.raw`(${quote}([A-Za-z_][\w.-]*)${quote}${gap}:${gap})(?:${value}|-?\d[\d.]*)`, 'g'), (whole, lead: string, key: string) => {
-      if (!LOOKS_SECRET.test(key) || /:(?:\s|\\[nrt])*\\?"(true|false)\\?"$/.test(whole)) return whole
-      const mark = quote === '"' ? '"' : String.raw`\"`
-      const without = `${lead}${mark}${WITHHELD}${mark}`
-      // Taken out before, by this pass on an earlier reading or as a list: nothing is taken out twice.
-      if (whole === without) return whole
-      withheld++
-      return without
-    })
+    const mark = quote === '"' ? '"' : String.raw`\"`
+    for (const match of text.matchAll(new RegExp(String.raw`(${quote}([A-Za-z_][\w.-]*)${quote}${gap}:${gap})(?:${value}|-?\d[\d.]*)`, 'g'))) {
+      const [whole, lead, key] = match
+      // "true" and "false" are switches, and what an earlier reading put there is a note.
+      if (!LOOKS_SECRET.test(key) || /:(?:\s|\\[nrt])*\\?"(true|false)\\?"$/.test(whole) || whole === `${lead}${mark}${WITHHELD}${mark}`) continue
+      yield { start: match.index + lead.length, end: match.index + whole.length, put: `${mark}${WITHHELD}${mark}` }
+    }
   }
-  return { text: out, withheld }
 }
 
 /**
@@ -424,10 +430,26 @@ function* secretContainers(text: string): Generator<{ start: number; end: number
     const escaped = match[1] !== '"'
     const end = endOfContainer(text, bracket, escaped)
     const mark = escaped ? String.raw`\"` : '"'
-    yield { start: bracket, end: end < 0 ? text.length : end + 1, put: `${mark}${WITHHELD}${mark}` }
-    if (end < 0) return
-    opening.lastIndex = end + 1
+    // A list that never closes holds the rest of the text. Inside a CDATA section it holds the rest of the
+    // section: nothing of a text inside a section stands behind its end. A script reads otherwise than JSON, a
+    // quote can stand in a pattern there, and its list would take the rest of the record around it along.
+    const section = end < 0 ? endOfSection(text, bracket) : -1
+    const until = end >= 0 ? end + 1 : section >= 0 ? section : text.length
+    yield { start: bracket, end: until, put: `${mark}${WITHHELD}${mark}` }
+    if (until === text.length) return
+    opening.lastIndex = until
   }
+}
+
+/** Where the CDATA section ends that "at" stands in, plain or written with entities, or -1 where it stands in none. */
+function endOfSection(text: string, at: number): number {
+  for (const [start, end] of [['<![CDATA[', ']]>'], ['&lt;![CDATA[', ']]&gt;']]) {
+    const opened = text.lastIndexOf(start, at)
+    if (opened < 0) continue
+    const closed = text.indexOf(end, opened + start.length)
+    if (closed > at) return closed
+  }
+  return -1
 }
 
 /**

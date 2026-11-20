@@ -803,3 +803,96 @@ test('which names are tables is not remembered from an answer that arrived after
   assert.deepEqual([...(await early)], ['u_open'])
   assert.deepEqual([...(await dictionary.knownTables(['u_open', 'u_new']))].sort(), ['u_new', 'u_open'])
 })
+
+test('what a view was seen to filter by is asked again once everything about tables was dropped', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp = (total: number): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], total })
+  const routes: Route[] = [
+    stamp(100),
+    { table: 'sys_properties', rows: [] },
+    { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] },
+    { table: 'v_tasks', rows: [{ sys_id: '1' }] },
+  ]
+  const closed = fakeInstance(routes, { tables: { allow: [], deny: ['u_private'] } })
+  const dictionary = new Dictionary(closed.sn)
+  const asked = () => closed.calls.filter((call) => call.table === 'v_tasks').length
+  // What the table is comes first, as in every call of a tool, and with it the first look.
+  await dictionary.table('u_open')
+  assert.equal(await dictionary.viewCarries('v_tasks', 'tsk_number'), true)
+  const first = asked()
+  // Remembered: asked again half a minute later, with no table changed, it costs nothing.
+  t.mock.timers.tick(31_000)
+  await dictionary.table('u_open')
+  assert.equal(await dictionary.viewCarries('v_tasks', 'tsk_number'), true)
+  assert.equal(asked(), first)
+  // A table is created. The view may have been changed with it: what it was seen to do is asked for again.
+  routes.unshift(stamp(101))
+  t.mock.timers.tick(31_000)
+  await dictionary.table('u_open')
+  assert.equal(await dictionary.viewCarries('v_tasks', 'tsk_number'), true)
+  assert.ok(asked() > first, `${asked()} requests after ${first}`)
+})
+
+test('a proof about a view that arrives after everything was dropped is not remembered', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp = (total: number): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], total })
+  const routes: Route[] = [stamp(100), { table: 'sys_properties', rows: [] }, { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] }, { table: 'v_tasks', rows: [{ sys_id: '1' }] }]
+  const closed = fakeInstance(routes, { tables: { allow: [], deny: ['u_private'] } })
+  const dictionary = new Dictionary(closed.sn)
+  await dictionary.table('u_open')
+  // The questions to the view are slow to be answered.
+  let arrive = () => {}
+  const held = new Promise<void>((resolve) => (arrive = resolve))
+  const query = closed.sn.query.bind(closed.sn)
+  let holding = true
+  closed.sn.query = (async (opts: Parameters<typeof query>[0]) => {
+    const read = await query(opts)
+    if (holding && opts.table === 'v_tasks') await held
+    return read
+  }) as typeof closed.sn.query
+  const early = dictionary.viewCarries('v_tasks', 'tsk_number')
+  await new Promise((done) => setImmediate(done))
+  routes.unshift(stamp(101))
+  t.mock.timers.tick(31_000)
+  await dictionary.table('u_open')
+  holding = false
+  arrive()
+  assert.equal(await early, true)
+  // The one who asked has the answer. The next one asks again: the view may no longer be what it was.
+  const before = closed.calls.filter((call) => call.table === 'v_tasks').length
+  assert.equal(await dictionary.viewCarries('v_tasks', 'tsk_number'), true)
+  assert.ok(closed.calls.filter((call) => call.table === 'v_tasks').length > before)
+})
+
+test('that a view has rows is not remembered from an answer that arrived after everything was dropped', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const stamp = (total: number): Route => ({ table: 'sys_db_object', match: /^ORDERBYDESCsys_updated_on/, rows: [{ sys_id: 'x', sys_updated_on: '2026-11-20 09:00:00' }], total })
+  const routes: Route[] = [stamp(100), { table: 'sys_properties', rows: [] }, { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] }, { table: 'v_tasks', rows: [{ sys_id: '1' }] }]
+  const closed = fakeInstance(routes, { tables: { allow: [], deny: ['u_private'] } })
+  const dictionary = new Dictionary(closed.sn)
+  await dictionary.table('u_open')
+  let arrive = () => {}
+  const held = new Promise<void>((resolve) => (arrive = resolve))
+  const query = closed.sn.query.bind(closed.sn)
+  let holding = true
+  closed.sn.query = (async (opts: Parameters<typeof query>[0]) => {
+    const read = await query(opts)
+    // Only the question whether the view has a row at all is slow.
+    if (holding && opts.table === 'v_tasks' && !opts.query) await held
+    return read
+  }) as typeof closed.sn.query
+  const early = dictionary.viewCarries('v_tasks', 'tsk_number')
+  await new Promise((done) => setImmediate(done))
+  await new Promise((done) => setImmediate(done))
+  routes.unshift(stamp(101))
+  t.mock.timers.tick(31_000)
+  await dictionary.table('u_open')
+  holding = false
+  arrive()
+  await early
+  // Asked about another field, the view is asked again whether it has a row: it was seen to have one before.
+  const anyRow = () => closed.calls.filter((call) => call.table === 'v_tasks' && call.query === '').length
+  const before = anyRow()
+  await dictionary.viewCarries('v_tasks', 'tsk_state')
+  assert.equal(anyRow(), before + 1)
+})
