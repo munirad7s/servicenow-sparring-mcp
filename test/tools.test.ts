@@ -1112,6 +1112,11 @@ test('which tables are parts of a rotated one is read from the list of the insta
     const guessing = await connect([...routes, ...world], { tables: lists })
     for (const table of ['u_queue2', 'u_queue7777', 'u_report2024']) assert.equal((await guessing.call('sn_query', { table, fields: ['sys_id'] })).data.error, 'blocked', `${name}: ${table}`)
   }
+  // The list names each table through a reference into sys_table_rotation. Where that table is closed, the list
+  // is not asked at all: the server reads it without the rules, and would walk into a closed table.
+  const walled = await connect([schedule, ...world], { tables: { allow: [], deny: ['u_queue', 'u_report', 'sys_table_rotation'] } })
+  assert.equal((await walled.call('sn_query', { table: 'u_report2024', fields: ['sys_id'] })).data.error, 'blocked')
+  assert.equal(walled.sentTo('sys_table_rotation_schedule').length, 0)
 })
 
 test('the archive of a table the deny list names is closed, also where the instance no longer has the table', async () => {
@@ -2316,6 +2321,8 @@ test('the payload of a captured change is passed on without its secrets, and can
     // not know is not passed on.
     { table: 'sys_db_object', exact: 'name=sys_auth_profile_basic', rows: [tableRow('sys_auth_profile_basic', 'Basic Auth Configuration')] },
     { table: 'sys_db_object', exact: 'name=sys_script', rows: [tableRow('sys_script', 'Business Rule')] },
+    // The table of linked files is one the instance knows, and it is open: what closes its record is that it is a copy.
+    { table: 'sys_db_object', exact: 'name=sys_metadata_link', rows: [tableRow('sys_metadata_link', 'Application File Link')] },
     { table: 'sys_dictionary', query: 'nameINsys_update_xml', rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'payload'), column('sys_update_xml', 'type')] },
     ...dictionaryRoutes,
     { table: 'sys_update_xml', rows },
@@ -3165,6 +3172,11 @@ test('a login that is rejected in the middle of a call is passed on as that', as
   const partly = await lists.call('sn_plugins')
   assert.equal(partly.isError, true)
   assert.equal(partly.data.error, 'auth')
+  // Also where the request that is rejected is the last one of the call, so that nothing after it fails as well.
+  const last = await connect([{ table: 'v_plugin', rows: [{ id: 'com.example', name: 'Example', active: 'active', version: '1.0' }] }, { table: 'sys_store_app', rows: [{ name: 'Example app', scope: 'x_example', version: '1.0', active: 'true', vendor: 'Example' }] }, rejected('sys_app')])
+  const atTheEnd = await last.call('sn_plugins')
+  assert.equal(atTheEnd.isError, true)
+  assert.equal(atTheEnd.data.error, 'auth')
   // The same for an instance that can no longer be reached, and for one that answers with a page in place of data.
   for (const [kind, broken] of [['network', { unreachable: true }], ['invalid_response', { body: '<html>Your instance is hibernating</html>' }]] as const) {
     const gone = await connect([{ table: 'v_plugin', rows: [{ id: 'com.example', name: 'Example', active: 'active', version: '1.0' }] }, ...['sys_store_app', 'sys_scope', 'sys_app'].map((table): Route => ({ table, ...broken }))])

@@ -3,10 +3,11 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
-## Unreleased
+## 0.4.0 (2026-11-20)
 
 Found by three reviews of 0.3.4, by a fourth round on the fixes, and by measuring on a live instance what they
 claimed about the platform. The fourth round found three mistakes in fixes of the same day, before a release.
+A minor version, because two answers changed their shape: see "Changed".
 
 ### Security
 
@@ -130,10 +131,11 @@ claimed about the platform. The fourth round found three mistakes in fixes of th
   walks, and says so where a table sits at the ninth, below which nothing is counted.
 - The query of every category of `sn_dependencies` is held by a test: what applies to a child table always, never,
   or only with a flag on the record was measured once, and a changed word would have changed an answer unseen.
-- **Ten of the rules this round added were held by no test**, found by a sixth run of single-line changes, over
-  91 lines of the new code. Among them: a proof is kept for ten minutes and not for good; an answer that says "no
-  row matches" and carries a row is no proof; a reference into the table of application files loses the name
-  behind it; a refusal is written to the audit log once. Each has a test now.
+- **Thirteen of the rules this round added were held by no test**, found by a sixth and a seventh run of
+  single-line changes, over 146 lines of the new code. Among them: a proof is kept for ten minutes and not for
+  good; an answer that says "no row matches" and carries a row is no proof; a reference into the table of
+  application files loses the name behind it; a refusal is written to the audit log once; a login rejected at
+  the last request of a call ends the call as well. Each has a test now.
 - Four more rules without a test, found by a fifth run of single-line changes over 30 lines of the configuration,
   the paging and the error texts: the first row of an answer is always shown, however large (reading on would
   otherwise never get past it); a refusal by the instance counts as a login that worked; the roles of the account

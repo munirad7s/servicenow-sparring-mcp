@@ -1,6 +1,6 @@
 {
   "name": "servicenow-sparring",
-  "version": "0.3.4",
+  "version": "0.4.0",
   "description": "Read-only MCP server that lets an AI agent check claims about ServiceNow against a live instance: out-of-the-box or custom, captured customizations, upgrade skips",
   "type": "module",
   "main": "dist/index.js",
