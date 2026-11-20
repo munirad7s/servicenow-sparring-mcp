@@ -356,11 +356,17 @@ On one instance of the Australia release, with `npm run origin-check`:
   name and the verdict is `unknown`. This is not an independent confirmation for all 77: 36 of them have no
   customer update at all, and `sn_origin` knows about them only because it reads what the upgrade found. Before it
   did, it called those 36 out-of-the-box.
-- **200 random application files:** 193 `out_of_box_as_captured`, 7 `unknown` (14 of 198 in the sample before).
-  Those belong to no package: parts of flows and actions, which are captured with their parent and carry no name
-  of their own, and the tables of the text index.
-- **199 random captured changes:** 103 `customer_created`, 77 `customized`, 18 `custom_application_file`, 1
-  `unknown`. Of the 77 customized records, 62 were captured under system accounts and 15 by people.
+- **Random application files, five samples:** 7 of 200, 12 of 200, 14 of 198, 23 of 198 and 29 of 300 are
+  `unknown`, the rest `out_of_box_as_captured` but for a handful that were made or changed here. The share
+  differs that much between samples, so read it as "about one in thirteen". The unknown ones carry no update
+  name of their own or belong to no package: parts of flows and actions and the role lists of access controls,
+  which are captured with their parent, and the tables of the text index.
+- **195 random captured changes:** 97 `customer_created`, 70 `customized`, 27 `custom_application_file`, 1
+  `deleted_here`. Of the 70 customized records, 59 were captured under system accounts and 11 by people.
+- **This release against the one before, on the same 670 records** (the files the upgrade skipped, 300
+  application files, 293 captured changes): no verdict differs. For two records `capturedBy` changed from "nobody" to "people": their change exists only as a version
+  from an update set, whose author is now read. The other changes to the rule concern evidence that is missing,
+  hidden or comes without a total, which an administrator's account on this instance never meets.
 - **Fields nobody touched.** Two in three dictionary entries of the instance (207,943 of 299,720) store no update
   name, because they were never captured. Asked for by the name they would get, such as
   `sys_dictionary_incident_category`, they are found by the table and field the name describes.
@@ -376,7 +382,7 @@ What follows from that:
   notices, by comparing content, and this server cannot compare content. Where no upgrade has looked at a record
   yet, such a change is invisible here.
 - **"Customized" is the platform's word, not a statement about people.** On this instance most of the customized
-  records were changed by installations, upgrades and jobs (62 of 77 in the sample), and 2,783 of all 6,631
+  records were changed by installations, upgrades and jobs (59 of 70 in the sample), and 2,783 of all 6,631
   captured changes have no person on them at all. `capturedBy` tells them apart, `sn_delta` counts them, and its `peopleOnly`
   leaves them out.
 - **The rule is measured on one instance.** The verdicts were compared with the upgrade engine and with the stored

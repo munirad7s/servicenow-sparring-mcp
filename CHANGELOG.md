@@ -93,8 +93,8 @@ platform was measured on an instance before anything was changed; the numbers ar
   now decides from a vendor version in view where the versions could not be counted, from a vendor's current
   version where earlier versions could not be counted, and finds a field by its update name where the table of
   application files could not be asked. It sends no request whose answer it would not use: 1 instead of 4 for a
-  record the account may not read. Checked again on the test instance: 77 of the 79 files the upgrade skipped
-  as changed are `customized`, as before, and every `unknown` in a sample of 672 has one of the known reasons.
+  record the account may not read. Checked on the test instance against 0.3.1, on the same 670 records: no
+  verdict differs, and 77 of the 79 files the upgrade skipped as changed are `customized`, as before.
 - `sn_dependencies` listed the choices of a parent table beside those of the table where it could not count
   which table they belong to, listed every language of a choice when inactive ones were asked for, and listed
   unpublished workflow versions then. It names what it does not see for a field: client scripts that run when
