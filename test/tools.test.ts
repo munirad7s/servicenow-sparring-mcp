@@ -2169,23 +2169,33 @@ test('what the tables behind the references of a row show as their names is read
 })
 
 /** One open table with a reference into another: what the second shows as its name decides whether the name comes back. */
-async function referenceDisplayCase(target: string, targetColumns: Data[], options: { parents?: string[]; extra?: Route[]; closed?: string; shown?: string } = {}) {
-  const { parents = [], extra = [], closed = 'sys_user', shown = 'Abel Tuter' } = options
+async function referenceDisplayCase(target: string, targetColumns: Data[], options: { parents?: string[]; extra?: Route[]; closed?: string; shown?: string; beside?: boolean } = {}) {
+  const { parents = [], extra = [], closed = 'sys_user', shown = 'Abel Tuter', beside = false } = options
+  // "beside": the row shows a second name, behind a reference to a table that shows a text of its own. What the
+  // two tables show is then asked for together, in one request for both.
+  const other: Route[] = beside
+    ? [
+        knownTables(target, 'u_plain'),
+        { table: 'sys_db_object', exact: 'name=u_plain', rows: [tableRow('u_plain', 'Plain')] },
+        { table: 'sys_dictionary', query: 'nameINu_plain', rows: [column('u_plain', 'u_title', 'string', '', { display: 'true' })] },
+      ]
+    : []
   const { answer } = await connect(
     [
       ...extra,
+      ...other,
       closedTables(tableRow(closed, closed)),
       { table: 'sys_db_object', exact: 'name=u_holder', rows: [tableRow('u_holder', 'Holder')] },
       { table: 'sys_db_object', exact: `name=${target}`, rows: [tableRow(target, target, ...parents)] },
       ...parents.map((name): Route => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] })),
-      { table: 'sys_dictionary', query: 'nameINu_holder', rows: [column('u_holder', 'u_ref', 'reference', target)] },
+      { table: 'sys_dictionary', query: 'nameINu_holder', rows: [column('u_holder', 'u_ref', 'reference', target), column('u_holder', 'u_other', 'reference', 'u_plain')] },
       { table: 'sys_dictionary', query: `nameIN${[target, ...parents].join(',')}`, rows: targetColumns },
       ...dictionaryRoutes,
-      { table: 'u_holder', rows: [{ u_ref: labelled(ID, shown) }] },
+      { table: 'u_holder', rows: [{ u_ref: labelled(ID, shown), u_other: labelled(ID, 'A title') }] },
     ],
     { tables: { allow: [], deny: [closed] } },
   )
-  return answer('sn_query', { table: 'u_holder', fields: ['u_ref'], displayValue: true })
+  return answer('sn_query', { table: 'u_holder', fields: beside ? ['u_ref', 'u_other'] : ['u_ref'], displayValue: true })
 }
 
 test('what a table shows as its name is read from every entry that can say so', async () => {
@@ -2195,6 +2205,10 @@ test('what a table shows as its name is read from every entry that can say so', 
   assert.deepEqual((await referenceDisplayCase('u_child', [shows('u_parent', 'u_owner', 'reference', 'sys_user')], { parents: ['u_parent'] })).records, hidden)
   // A list of closed records as the name of a row.
   assert.deepEqual((await referenceDisplayCase('u_people', [shows('u_people', 'u_users', 'glide_list', 'sys_user')])).records, hidden)
+  // The same where the row shows two names and the two tables are asked about together: the other name stays.
+  const together = [{ u_ref: ID, u_other: { value: ID, display: 'A title' } }]
+  assert.deepEqual((await referenceDisplayCase('u_people', [shows('u_people', 'u_users', 'glide_list', 'sys_user')], { beside: true })).records, together)
+  assert.deepEqual((await referenceDisplayCase('u_owned', [shows('u_owned', 'u_owner', 'reference', 'sys_user')], { beside: true })).records, together)
   // Nothing marked: the platform takes a field by its name, and each of those names can be a reference.
   for (const field of ['name', 'u_name', 'number', 'u_number']) {
     assert.deepEqual((await referenceDisplayCase('u_fallback', [column('u_fallback', field, 'reference', 'sys_user')])).records, hidden, field)
@@ -5823,4 +5837,105 @@ test('a table created below a closed one is kept out within half a minute', asyn
   t.mock.timers.tick(31_000)
   assert.equal((await call('sn_query', { table: 'task', fields: ['number'] })).data.error, 'blocked')
   assert.equal(sentTo('task').length, sent)
+})
+
+// Seven changes of one line each that a review of 0.4.1 predicted no test would notice. Run, seven of them were not.
+
+test('blanks around the type of a system property inside a text do not give its value away', async () => {
+  const xml = '<sys_properties><name>x.smtp</name><type><![CDATA[ password2 ]]></type><value>PROPERTY_SECRET</value></sys_properties>'
+  const { answer } = await connect([...dictionaryRoutes, { table: 'incident', rows: [{ short_description: xml }] }])
+  const data = await answer('sn_query', { table: 'incident', fields: ['short_description'] })
+  assert.doesNotMatch(JSON.stringify(data.records), /PROPERTY_SECRET/)
+  assert.match(data.records[0].short_description, /<value>\[withheld\]<\/value>/)
+})
+
+test('the label of a counted group is read for what looks like a secret, like its value', async () => {
+  const { answer } = await connect([
+    { table: 'incident', api: 'stats', rows: [{ stats: { count: '3' }, groupby_fields: [{ field: 'state', value: '1', display_value: '{"api_key":"LABEL_SECRET"}' }] }] },
+    ...dictionaryRoutes,
+  ])
+  const data = await answer('sn_query', { table: 'incident', groupBy: 'state' })
+  assert.equal(data.groups[0].display, '{"api_key":"[withheld]"}')
+  assert.doesNotMatch(JSON.stringify(data), /LABEL_SECRET/)
+  // Said by the function that counted, in its own words: one value inside a text.
+  assert.match(data.warnings.join(' '), /1 value\(s\) inside a text were withheld/)
+})
+
+test('which names are tables is not settled by a list that says nothing about its length', async () => {
+  // Two tables whose names begin alike, the longer one closed. Asked which of the beginnings of an update name
+  // are tables, the instance answers with the shorter one and no total: the longer one can be hidden.
+  const { answer } = await connect(
+    [
+      { ...knownTables('u_open'), noTotal: true },
+      { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Updates')] },
+      { table: 'sys_db_object', query: '^ORname=sys_update_xml', rows: [tableRow('sys_update_xml', 'Updates')] },
+      { table: 'sys_db_object', exact: 'name=u_open', rows: [tableRow('u_open', 'Open')] },
+      { table: 'sys_db_object', query: '^ORname=u_open', rows: [tableRow('u_open', 'Open')] },
+      { table: 'sys_db_object', exact: 'name=u_open_private', rows: [tableRow('u_open_private', 'Private')] },
+      { table: 'sys_dictionary', query: 'nameINsys_update_xml', rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'target_name')] },
+      ...dictionaryRoutes,
+      { table: 'sys_update_xml', rows: [{ name: 'u_open_private_custom', target_name: 'Closed payroll' }] },
+    ],
+    { tables: { allow: ['sys_*', 'u_open'], deny: [] } },
+  )
+  const data = await answer('sn_query', { table: 'sys_update_xml', fields: ['target_name'] })
+  assert.equal(data.records[0].target_name, '[withheld: the record is in a table closed on this machine]')
+})
+
+test('the name of a deleted file is kept back through a reference to its entry as well', async () => {
+  // The field is defined on the parent of the table the reference points into. The rule is found by the table
+  // that the reference leads to.
+  const { answer } = await connect(
+    [
+      closedTables(tableRow('sys_user', 'User')),
+      { table: 'sys_db_object', exact: 'name=u_holder', rows: [tableRow('u_holder', 'Holder')] },
+      { table: 'sys_db_object', exact: 'name=sys_metadata_delete', rows: [tableRow('sys_metadata_delete', 'Deleted file', 'sys_metadata')] },
+      { table: 'sys_db_object', exact: 'name=sys_metadata', rows: [tableRow('sys_metadata', 'Application file')] },
+      { table: 'sys_dictionary', query: 'nameINu_holder', rows: [column('u_holder', 'u_deleted', 'reference', 'sys_metadata_delete')] },
+      { table: 'sys_dictionary', query: 'nameINsys_metadata_delete,sys_metadata', rows: [column('sys_metadata', 'sys_name'), column('sys_metadata', 'sys_update_name')] },
+      ...dictionaryRoutes,
+      { table: 'u_holder', rows: [{ 'u_deleted.sys_name': 'Abel Tuter', 'u_deleted.sys_update_name': `sys_user_${ID}` }] },
+    ],
+    { tables: { allow: [], deny: ['sys_user'] } },
+  )
+  const data = await answer('sn_query', { table: 'u_holder', fields: ['u_deleted.sys_name'] })
+  assert.deepEqual(data.records, [{ 'u_deleted.sys_name': '[withheld: the record is in a table closed on this machine]' }])
+})
+
+test('what a view was proven to filter by is asked again after ten minutes', async (t) => {
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-20T10:00:00Z') })
+  const proof: Route = { table: 'v_inc', exact: 'inc_numberISEMPTY^inc_numberISNOTEMPTY', rows: [] }
+  const { answer, call } = await connect([
+    proof,
+    { table: 'sys_db_object', exact: 'name=v_inc', rows: [] },
+    { table: 'sys_db_view', query: 'name=v_inc', rows: [{ sys_id: 'a'.repeat(32), name: 'v_inc', label: 'Incidents' }] },
+    { table: 'sys_db_view_table', rows: [{ sys_id: 'b'.repeat(32), table: 'incident', variable_prefix: 'inc' }] },
+    { table: 'sys_db_view_table_field', rows: [] },
+    ...dictionaryRoutes,
+    { table: 'v_inc', rows: [{ inc_number: 'INC1' }] },
+  ])
+  await answer('sn_query', { table: 'v_inc', query: 'inc_number=INC1', fields: ['inc_number'] })
+  // Within the ten minutes the proof holds, also where the instance has stopped applying the condition since.
+  proof.rows = [{ inc_number: 'INC1' }]
+  t.mock.timers.tick(9 * 60_000)
+  await answer('sn_query', { table: 'v_inc', query: 'inc_number=INC1', fields: ['inc_number'] })
+  // After them it is asked again, and the instance now answers with rows where there can be none.
+  t.mock.timers.tick(2 * 60_000)
+  const result = await call('sn_query', { table: 'v_inc', query: 'inc_number=NEVER', fields: ['inc_number'] })
+  assert.equal(result.data.error, 'validation')
+  assert.match(result.data.message, /did not prove that it applies a condition on it/)
+})
+
+test('sn_origin: other records of a kind say how its records are named only where all of them are in view', async () => {
+  const kind = 'sys_security_acl_role'
+  const peer = { sys_id: 'f'.repeat(32), sys_class_name: kind, sys_update_name: `${kind}_${'f'.repeat(32)}` }
+  const unnamed = origin('sys_plugins', [], [], { sys_update_name: '', sys_class_name: kind })
+  // One other record in view, and the instance does not say how many there are.
+  const untold = await connect([{ table: 'sys_metadata', query: 'sys_update_nameISNOTEMPTY', noTotal: true, rows: [peer] }, ...unnamed])
+  assert.equal((await untold.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
+  assert.equal(untold.sentTo('sys_update_xml').length, 0)
+  // One in view and one hidden from this account: that one can be named by another rule.
+  const partly = await connect([{ table: 'sys_metadata', query: 'sys_update_nameISNOTEMPTY', rows: [peer, null] }, ...unnamed])
+  assert.equal((await partly.answer('sn_origin', { sysId: ID })).verdict, 'unknown')
+  assert.equal(partly.sentTo('sys_update_xml').length, 0)
 })
