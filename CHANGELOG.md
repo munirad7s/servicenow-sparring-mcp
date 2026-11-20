@@ -5,8 +5,63 @@ answer; such changes are listed under "Changed".
 
 ## Unreleased
 
-Found by measuring, not by reading: every function was held against the instance asked directly, and the
-differences were followed up. Two of them were answers this server exists to prevent.
+Found by measuring, not by reading: every function was held against the instance asked directly, and each
+difference was followed up. Two of them were answers this server exists to prevent. After that, two reviews: one
+of these changes, and one of the fixes of 0.4.0. Every claim of theirs was measured before anything was changed,
+and several did not hold: an underscore in a value is no wildcard, and the Aggregate API applies a condition on
+the class of a row wherever the Table API does. Those are noted in `docs/encoded-queries.md`. The gravest finding
+came from following up one of them on the instance: with a table closed, the names of its records came back two
+tables away.
+
+### Security
+
+- **The name of a record in a closed table came back two tables away.** A table can show a record it points to as
+  its own name: its display field is then a reference. Measured: 673 tables of the test instance do, 46 of them
+  show a user, and a reference into such a table shows the name behind that second reference (48 of 60 fields
+  tried). The server left the name behind a reference out only where the reference itself points into a closed
+  table. With users closed, ten of ten cells of a field two tables away carried the name of a user; with groups
+  closed twenty of twenty; a count per value carried the names as labels, and a sort or a comparison with text by
+  such a field was answered. That holds for every release that could close tables. The server now reads what the
+  table behind a reference shows as its name and follows it from table to table: where that leads into a closed
+  table, to a record of any table, or cannot be told, the name is left out, and comparing or sorting by the
+  reference is refused. A read with display values costs two more requests for each table its references point
+  into, once in ten minutes. On eight ordinary tables with users closed, no other name was left out because of it.
+- **The name of a deleted record of a closed table came back behind a reference.** Measured: the table of
+  deleted records shows the name of the record that was deleted as its own display value, and 83,948 rows of
+  another table point into it; the log of archived records and the entries for deleted application files do the
+  same. Read from those tables, a name was already judged by the table of its record. Behind a reference nothing
+  says which table that was: with a table closed, 20 of 20 cells carried the name of a deleted record of it, a
+  count per reference its label, and a comparison with text and a sort by the reference were answered. The name
+  behind a reference into one of these tables is now left out while tables are closed, and comparing it with
+  text or sorting by it is refused. `npm run compare -- --closed` tries this way round as well.
+- **A secret inside a document that itself stands in a CDATA section passed.** The end of an inner section is
+  written `]]]]><![CDATA[>` there, the element was never seen to end, and its content was passed on, as was every
+  record of a property behind it. The same for markup written with entities that carries such a section: fifteen
+  payloads of the test instance are written that way, none of them around a secret. The record of a property
+  whose closing tag carries a blank, a prefix or capitals was not seen to end either, and a table named behind
+  an entity with zeros in front (`&#00000060;`) was not found. On 1,292 real payloads the output is the same as
+  that of 0.4.0.
+- **The value of a system property could be read through a database view** in two cases the fix of 0.4.0 left
+  out: a view over a table that extends `sys_properties`, and a view on an instance where the account cannot
+  read the table of tables, so that the server did not know it for a view.
+- **"Is not one of" went out unproven.** It is the condition that leaves the rows of closed tables out, and it
+  was asked by itself only where the row asked for came back with its class. Where rows have a class and that
+  row is hidden, or comes without the field, the request is refused now.
+- **Records captured under a name that does not begin with their table kept their names.** Measured over 6,631
+  captured changes, whose payload names the table, and over the application files of 1,998 classes: the choices
+  of a field are captured as `sys_choice_<table>_<field>` and are a record of `sys_choice_set`, the related lists
+  of a form as `sys_ui_related_<table>_<view>` (`sys_ui_related_list`), and a version of a workflow under the name
+  of the workflow (`wf_workflow_version`). Closing one of those tables did not keep the names of its captured
+  changes back. The server knows the three rules now. The entry for a deleted application file
+  (`sys_metadata_delete`) keeps the name of the record that was deleted: read from its own table it is judged by
+  its update name, and `sys_metadata` answers without those rows while tables are closed.
+- **A table could come back as "no table".** What the server remembers about names is bounded, and the answer
+  was read back from it: a table whose entry had to make room while the same call asked about more names counted
+  as no table. Under a list of the only tables that may be read, a record of a closed table could then pass for
+  one of the open table its name also begins with.
+- **A new part of a rotated table could be read until the list of parts was read again.** The list is remembered
+  for ten minutes, and a part that the instance creates in between is not on it. A name that reads like a part of
+  a rotated table and is not on the list now has the list read anew, once a minute at most.
 
 ### Fixed
 
@@ -15,11 +70,13 @@ differences were followed up. Two of them were answers this server exists to pre
   every field of a joined table for a field of the view. Measured on 40 such views: the instance drops a condition
   on a field outside the list and answers with every row, 11,759 of 11,759 for a value nobody has, or refuses it
   with 403. A sort by such a field does nothing. It also dropped the condition on one of eight fields that a list
-  did name. That is the answer this server exists to prevent, and the definition of a view does not say which
-  fields are affected. So the instance is asked: before a view is filtered, sorted or counted by a field, the
-  server asks for the rows where that field is empty and filled at once. An instance that applies the condition
-  answers with none; one that drops it answers with rows, and the query is refused before it goes out. The answer
-  is kept for ten minutes, and only while the view has rows. The lists are read as well
+  did name, and on 3 of 28 fields reached through a reference of the view. That is the answer this server exists
+  to prevent, and the definition of a view does not say which fields are affected. So the instance is asked:
+  before a view is filtered, sorted or counted by a field, the server asks for the rows where that field, as the
+  query writes it, is empty and filled at once. An instance that applies the condition answers with none; one that
+  drops it answers with rows, and the query is not sent. An instance can also be set to answer a query it cannot
+  use with no rows: there the view has to show a row for "empty or filled" as well. An answer is kept for ten
+  minutes; one from a view without rows proves nothing and is not kept. The lists are read as well
   (`sys_db_view_table_field`): a field outside one is no field of the view, unless the instance passes that
   question for it, as it does for a few system fields a row carries beyond its list. `sn_schema` leaves the
   fields outside a list out and says how many; where the lists cannot be read, it lists every field with a
@@ -28,60 +85,106 @@ differences were followed up. Two of them were answers this server exists to pre
 - **A list read page by page brought some rows twice and missed others.** Measured: where rows are equal in what
   a query sorts by, the instance gives them another place from one page to the next. `sn_delta` sorts captured
   changes by the time of their last change, and most of them share it with a neighbour (244 of 299 in a row): ten
-  pages of a hundred were 989 different rows, so eleven customizations were listed twice and eleven never. The entries of
-  upgrades were 153 of 158, a query sorted by type 753 of 1,000. Every sorted query is now sent with the sys_id
-  as its last sort key, in the direction of the key before it, which costs nothing when measured on a table of
-  3.5 million rows. Each of these reads then brought every row once. The answer names the query as it was sent.
-  A query that asks for no order is sent as before: read by pages it brought no row twice.
+  pages of a hundred were 989 different rows, so eleven customizations were listed twice and eleven never. The
+  entries of upgrades were 153 of 158, a query sorted by type 753 of 1,000. Every sorted query is now sent with
+  the sys_id as its last sort key, in the direction of the key before it, which costs nothing when measured on a
+  table of 3.5 million rows. Each of these reads then brought every row once. The answer names the query as it
+  was sent. A row of a database view has no sys_id of its own: read sorted by pages, three views brought 322, 396
+  and 298 different rows of 400. Such a read now takes the sys_ids of the tables the view joins as keys, where
+  the view carries them, and eight views then brought 400 of 400; where it does not carry them, the answer says
+  that rows can come twice. On a large view the keys cost time (one of 12,489 rows: 9 seconds with one key, 23
+  with three), and a read that runs out of time says so. The lists the server reads whole for its own checks are
+  sorted by the sys_id as well.
+- **A text search on a database view found nothing.** Measured on thirty views that join a table with a text
+  index: the search matched no row on the view where it finds rows on the table. "No rows" was the answer. The
+  search is refused now, with the tables to search instead.
 - **The thirty largest groups were not the same thirty on every call.** Measured: the instance gives the groups of
   a count another order from one request to the next, three orders in five requests. `sn_delta` and
   `sn_upgrade_skips` now put groups of the same size in the order of their names, as `sn_query` did already.
+- **A table without rows could be counted as one group.** Measured: counted per class, 2 of 51 tables without rows
+  and 15 views answer with one group of no rows and an empty value. Such a group is left out.
 - **`sn_origin` gave up on a record that stores no update name.** Measured: a third of the application files of
   an instance store none, because they were never captured. Dictionary entries and labels were already found by
   what they describe. For any other class the answer was `unknown`, with the claim that such a record is captured
   as part of another one. That is true for the parts of flows and actions, and wrong for 10,804 files of the test
   instance, among them 6,079 roles of access controls and 2,765 access controls: the other records of those
-  classes are named `<table>_<sys_id>`, and changes to them are captured under such names. `sn_origin` now reads
-  the first and the last five names of the class. Where all are built that way, it judges the record under the
-  name it would get and says so; where no record of the class carries a name, or the names follow another rule,
-  the verdict stays `unknown` and the warning says which of the two it is. Such a call costs 6 requests, not 1.
-
+  classes are named by their table and their sys_id, and changes to them are captured under such names.
+  `sn_origin` now reads the first and the last five names of the class. Where all of them end in the sys_id of
+  their record and begin with the same word, it judges the record under the name it would get and says so;
+  otherwise the verdict stays `unknown` and the warning says what was found. Such a call costs 6 requests, not 1.
+  It no longer takes a row of a database view for a record, and it does not trust the names of a class of which
+  rows are hidden from the account.
 - **A list of counts that was cut did not say so.** `sn_delta` and `sn_upgrade_skips` list the thirty largest
   groups of `byType` (and `byDisposition`). Where there were more, the rest was left out without a word, and a sum
   over the list came out below `total`. Both now say how many groups there are, and `sn_delta` how many rows the
   ones left out hold between them.
+- **An answer that is JSON but not that of an instance did not end the call.** A gateway that answers `{}` with
+  HTTP 200 in the middle of a call was thrown as one failed look-up, and a function that catches those answered
+  "could not be read", where the same failure as an HTML page ended the call. It ends the call now and does not
+  count as an accepted login. So does a request that is held back after a timeout while nothing has ever
+  answered. The audit log wrote the status 200 for a request that failed with an answer of HTTP 200 (too large,
+  an error inside it, no list): it writes the kind of failure now.
+- **A page of update names could cost hundreds of requests.** Under a list of the only tables that may be read,
+  every beginning of every update name on a page is asked about. In a test with two hundred names that share no
+  beginning, that cost 368 requests in `sn_delta` and ended `sn_query` at the 500 a call may send. Measured on
+  the instance: no name of 76,000 has more than fifteen beginnings, and the most a page of two hundred had
+  between them was 433. A page now asks about two thousand at most, says how many names it left out, and treats
+  those as records whose table cannot be told. Where the look-up itself fails, the answer says that as well.
+- **Two inputs cost far more than their length.** A text with many beginnings of an element and blanks inside
+  one closing tag was read once per beginning, and a table name that can be read as an archive and as a part in
+  many ways took ten seconds for eighty characters.
+- **On an instance that answers a query it cannot use with no rows, the check before a class condition proved
+  nothing.** Every question that has to match nothing is answered with nothing there, also for a field the
+  instance cannot use, and the request then came back empty: "no rows" of a table that has some. Where no row
+  shows a class, the table is now asked for a row with or without one, and for any row.
 
 ### Changed
 
 No answer changed its shape. What a caller can notice:
 
-- The `query` of an answer to a sorted query ends in `^ORDERBYsys_id` or `^ORDERBYDESCsys_id`: that is what was
-  sent.
-- On a database view, a query that the instance would answer unfiltered is refused. That includes a field outside
-  the list of the view that is only asked for as a field to return: the instance left it out of the row before,
-  and the answer said so.
+- The `query` of an answer to a sorted query ends in `^ORDERBYsys_id` or `^ORDERBYDESCsys_id`, and on a database
+  view in the sys_ids of the tables it joins: that is what was sent.
+- On a database view, a query that the instance would answer unfiltered is refused, and so is a text search.
+  That includes a field outside the list of the view that is only asked for as a field to return: the instance
+  left it out of the row before, and the answer said so.
 - `sn_schema` lists fewer fields for a view that carries a field list.
 - `sn_origin` answers with a verdict for some records it called `unknown` before, and such a call costs 6
   requests where it cost 1.
+- While tables are closed, a reference into the table of deleted records, the log of archived records or the
+  entries for deleted application files comes as a sys_id without the name, and cannot be compared with text or
+  sorted by. The same goes for a reference into a table that shows a record of a closed table as its own name.
+- While tables are closed, `sys_metadata` answers without the entries for deleted application files, and a
+  captured change named `sys_choice_…`, `sys_ui_related_…` or `wf_workflow_…` comes without its readable name
+  where `sys_choice_set`, `sys_ui_related_list` or `wf_workflow_version` is closed.
+- A call ends with an error where a gateway answers with JSON that is no answer of an instance.
+- In the audit log, a request that failed never has the status 200.
 - `doctor` ends with 1 where the instance drops a condition on a field the functions filter by.
 
 ### Added
 
 - **`doctor` asks the instance whether it applies a condition on each field the functions filter by.** The
   server writes queries of its own on fields of the platform, for four of its functions and to read the
-  dictionary (52 fields of 21 tables), and does not look those fields up before each call. An instance that does
+  dictionary (63 fields of 22 tables), and does not look those fields up before each call. An instance that does
   not know one of them, on another release for example, would drop the condition and answer with every row.
-  `doctor` asks each field once, names the ones that are dropped, and ends with 1 for them.
-- **`npm run compare`** holds the server against the instance asked directly, past everything the server does to
-  a request. It reads the dictionary a second time, one table of the parent chain after the other, and compares
-  each field with what `sn_schema` says; and it sends a few hundred encoded queries both ways. On the test
-  instance: 2,727 fields of 55 tables without a difference, and of 331 queries 311 with the same total and the
-  same first rows, 18 refused as intended, two sent with a condition added on purpose (properties that hold a
-  secret). It also reads whole rows both ways (2,019 cells: 60 differ, each marked as withheld, as cut, or as a
-  time kept in UTC) and counts per value (21 of 21 the same as the Aggregate API). It ends with 1 if anything
-  differs, so it can run before a release. Its first run found the rows that change places between pages.
-  With `--closed <tables>` it starts a server on which a table is closed and tries every way round it, from what
-  the instance itself says belongs to the table: 290 checks for four tables on the test instance, no finding.
+  `doctor` asks each field once, names the ones that are dropped, and ends with 1 for them. It tells a field
+  that is applied from a table without rows, and from an instance that answers the field with nothing.
+- **`npm run compare`** holds the server against the instance asked directly, past everything the server does to a
+  request. It reads the dictionary a second time, one table of the parent chain after the other, and compares each
+  field with what `sn_schema` says; and it sends a few hundred encoded queries both ways. On the test instance, in
+  the last run: 2,214 fields of 36 tables without a difference, and of 331 queries 298 with the same total and the
+  same rows, 13 more once the sort has its last key, 18 refused as intended, and two sent with a condition added
+  on purpose (properties that hold a secret). It also reads whole rows both ways (2,019 cells: 60 differ, each
+  marked as withheld, as cut, or as a time kept in UTC) and counts per value (21 of 21 the same as the Aggregate
+  API), reads sorted lists of tables and views page by page and looks for a row that comes twice (6 lists of
+  tables and 5 of views, 3,733 rows, none twice), and asks each field a view lists both ways (122 applied and
+  sent, one dropped and refused). It ends with 1 if anything differs, so it can run before a release. Its first
+  run found the rows that change places between pages, and a later one the field of a view that the instance drops
+  although the view lists it. With `--closed <tables>` it starts a server on which a table is closed and tries the
+  ways round it that it knows, from what the instance itself says belongs to the table: for twelve tables on the
+  test instance, among them one with 132 tables below it and one with 1,347, 684 checks passed, none found
+  anything, and two were refused by the instance itself, which proves nothing. A check counts as passed only where
+  the server refuses because of the closed table or answers without anything of it. With the two rules for names
+  behind references switched off, it reported 16 findings on three tables.
 
 ## 0.4.0 (2026-11-20)
 

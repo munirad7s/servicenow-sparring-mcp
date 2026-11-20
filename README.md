@@ -617,30 +617,33 @@ What was tested, and what was not:
   closed; with form layouts closed, the names of their captured changes were withheld; with one table closed
   that application files link to, 17 of 92 linked files came back without name and payload.
   `npm run compare -- --closed` repeats such trials from what the instance itself says belongs to a table: for
-  nine tables, among them one with 132 tables below it and one with 1,347, 618 checks passed without a finding,
+  twelve tables, among them one with 132 tables below it and one with 1,347, 684 checks passed without a finding,
   and two more were refused by the instance itself, which proves nothing either way. With the rule that takes
-  the names off references switched off for a trial, it reported eight findings. That is a trial on one
+  the names off references switched off for a trial, it reported eight findings, and sixteen on three tables
+  with the two rules switched off that follow a name to the table it comes from. That is a trial on one
   instance, not a proof: the rules are in `src/closed.ts`, and the unit tests hold them. What an account sees
   that may not read or filter by what a table extends was not tried, because the test account is an
   administrator: the server asks for proof of both and closes everything without it. Those proofs were only ever
   seen to pass.
-- Against the instance asked directly, with `npm run compare`: 2,727 fields of 55 tables came out the same in
-  every property compared, and so did two earlier runs with other tables at random. Of 331 encoded queries, 311
-  brought the same total and the same first rows as the Table API, 18 were refused as intended, and two went out
-  with a condition added on purpose: a comparison on the value of a system property leaves out the properties
-  that hold a secret, and the answer says so. Of 2,019 cells in 24 reads of whole rows, 60 differed, each one
-  marked: 30 values withheld or cut, and 30 times that the server keeps as they are stored, in UTC, where the
-  instance shows them in the time zone of the account. 21 counts per value came out the same as the Aggregate
-  API, each group once. The first run showed one more difference, and it was the instance:
-  rows that are equal in what a query sorts by change places between pages. A thousand captured changes read
-  newest first, in ten pages, were 989 different rows. The server now sends the sys_id as the last sort key of
-  every sorted query, and the same read brings a thousand.
+- Against the instance asked directly, with `npm run compare`: in the last run 2,214 fields of 36 tables came
+  out the same in every property compared, and so did three earlier runs with other tables at random (2,727
+  fields of 55 tables in one of them). Of 331 encoded queries, 298 brought the same total and the same rows as
+  the Table API, 13 more the same rows once the sort has its last key, 18 were refused as intended, and two went
+  out with a condition added on purpose: a comparison on the value of a system property leaves out the
+  properties that hold a secret, and the answer says so. Of 2,019 cells in 24 reads of whole rows, 60 differed,
+  each one marked: 30 values withheld or cut, and 30 times that the server keeps as they are stored, in UTC,
+  where the instance shows them in the time zone of the account. 21 counts per value came out the same as the
+  Aggregate API, each group once. Six sorted lists of tables and five of database views, read page by page,
+  brought 3,733 rows and none twice. The first run showed one more difference, and it was the instance: rows that
+  are equal in what a query sorts by change places between pages. A thousand captured changes read newest first,
+  in ten pages, were 989 different rows. The server now sends the sys_id as the last sort key of every sorted
+  query, and the same read brings a thousand.
 - Database views with a field list, tried on 30 of them by `npm run compare`, after the 40 that were measured by
   hand: of 31 conditions on a field outside the list that no row carries, the instance dropped 15 and refused 16
   with 403 when asked directly; the server asked its question for each, and sent none of the 31 queries. Of 54
-  system fields a row carried beyond its list, 52 passed the proof and were used. Of
-  123 fields that the lists of 12 views name, the instance applied a condition on 122, and the server sent it;
-  it dropped the condition on one, and the server refused that one. `npm run compare` repeats the last trial.
+  system fields a row carried beyond its list, 52 passed the proof and were used. Of 123 fields that the lists
+  of 12 views name, the instance applied a condition on 122, and the server sent it; it dropped the condition on
+  one, and the server refused that one. `npm run compare` repeats the last trial.
 - On another release, run `npm run doctor`, `npm run smoke` and `npm run compare` first.
 - Signing in with a token is covered by unit tests only.
 - CI runs the unit tests on Linux, Windows and macOS.
