@@ -45,4 +45,5 @@ and run the tests. Since 0.3.4 that was done for 396 lines, and 54 of the change
 If you change how a tool reads the instance, run `npm run smoke` and `npm run compare` against a real instance and
 say in the pull request which release it was. `npm run compare` asks the instance a second time, past the server,
 and ends with 1 if a field or a query comes out differently: its first run found rows that change places between
-pages. If you change `sn_origin`, run `npm run origin-check` before and after.
+pages. If you change what a closed table keeps back, run `npm run compare -- --closed <tables>` as well. If you
+change `sn_origin`, run `npm run origin-check` before and after.

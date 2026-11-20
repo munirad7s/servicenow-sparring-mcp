@@ -522,6 +522,19 @@ differ only where the server marks it, as withheld or as cut. And it holds count
 API, read by pages. It prints counts, and for a difference the field or the query concerned, never a value. Run it
 with no table closed on the machine.
 
+With `--closed` it asks the other question, for each table named: with that table closed, does anything of it
+come through?
+
+```bash
+npm run compare -- --closed incident sys_user
+```
+
+It reads from the instance itself what belongs to the table (the tables below and above it, the fields that point
+into it, the views that join it, the captured changes to its records) and tries every way round through a server
+of its own: the table and its child tables, rows and totals through the tables above, names behind references,
+conditions, sorts and counts through a reference, text searches, views, and the names of captured changes. A row,
+a name or a count of the closed table that comes back is a finding, and it ends with 1.
+
 To check the verdicts of `sn_origin` by hand, let it write a sheet:
 
 ```bash
@@ -549,7 +562,10 @@ What was tested, and what was not:
   found in 15 requests; a database view of 44 rows, 7 of them of a closed child table, answered with 37; with
   `syslog` closed, its parts were refused, and so was the one-digit part of another rotated table when that was
   closed; with form layouts closed, the names of their captured changes were withheld; with one table closed
-  that application files link to, 17 of 92 linked files came back without name and payload. That is a trial on one instance, not a proof:
+  that application files link to, 17 of 92 linked files came back without name and payload.
+  `npm run compare -- --closed` repeats such trials from what the instance itself says belongs to a table: for
+  incidents, users, business rules and servers (58 tables with those below), 290 checks without a finding, and
+  eight findings when the rule that takes the names off references was switched off for a trial. That is a trial on one instance, not a proof:
   the rules are in `src/closed.ts`, and the unit tests hold them. What an account sees that may not read or
   filter by what a table extends was not tried, because the test account is an administrator: the server asks
   for proof of both and closes everything without it. Those proofs were only ever seen to pass.

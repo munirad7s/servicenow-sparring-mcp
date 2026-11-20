@@ -22,6 +22,14 @@
  * concerned, with sys_ids replaced, never a value. It ends with 1 if anything
  * differs. Run it with no table closed on the machine: a closed table changes
  * totals on purpose.
+ *
+ * With --closed it asks the other question: npm run compare -- --closed incident sys_user
+ * For each table named, a server is started on which that table is closed, and
+ * the instance is asked directly what belongs to the table: the tables below it,
+ * the tables above it, the fields that point into it, the views that join it,
+ * the captured changes to its records. Then every way round is tried through
+ * the server. A row, a name or a count of the closed table that comes back is a
+ * finding. That is a trial on the data of one instance, not a proof.
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -33,20 +41,28 @@ import { buildServer } from './server.js'
 type Data = Record<string, any>
 type Row = Record<string, string>
 
-const wanted = Number(process.argv[2] ?? 20)
+const closedMode = process.argv[2] === '--closed'
+const toClose = closedMode ? process.argv.slice(3) : []
+if (closedMode && (!toClose.length || toClose.some((name) => !/^[a-z][a-z0-9_]{0,79}$/.test(name)))) throw new Error('Name the tables to close, for example: npm run compare -- --closed incident sys_user')
+const wanted = closedMode ? 0 : Number(process.argv[2] ?? 20)
 if (!Number.isInteger(wanted) || wanted < 0 || wanted > 500) throw new Error('The number of random tables must be a whole number between 0 and 500.')
 
 const settings = loadSettings(process.env, process.cwd(), { cwdFile: true })
-const sn = new ServiceNowClient(settings)
-const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
-const client = new Client({ name: 'compare', version: '1.0.0' })
-await Promise.all([client.connect(clientTransport), buildServer(sn).connect(serverTransport)])
 
-async function call(name: string, args: Data): Promise<{ data: Data; isError: boolean }> {
-  const result = await client.callTool({ name, arguments: args })
-  const text = (result.content as Array<{ text: string }>)[0]?.text ?? '{}'
-  return { data: text.startsWith('{') ? JSON.parse(text) : { error: 'protocol', message: text }, isError: result.isError === true }
+/** A server of its own, as an agent meets it, with the tables named closed on it. */
+async function serverWith(deny: string[]) {
+  const instance = new ServiceNowClient({ ...settings, tables: deny.length ? { allow: [], deny } : settings.tables })
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  const mcp = new Client({ name: 'compare', version: '1.0.0' })
+  await Promise.all([mcp.connect(clientTransport), buildServer(instance).connect(serverTransport)])
+  const ask = async (name: string, args: Data): Promise<{ data: Data; isError: boolean }> => {
+    const result = await mcp.callTool({ name, arguments: args })
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '{}'
+    return { data: text.startsWith('{') ? JSON.parse(text) : { error: 'protocol', message: text }, isError: result.isError === true }
+  }
+  return { instance, ask }
 }
+const { instance: sn, ask: call } = await serverWith([])
 
 // The second way to the instance: a plain GET, past everything the server does to a request.
 let direct = 0
@@ -71,6 +87,8 @@ async function all(table: string, query: string, fields: string[]): Promise<Row[
   }
 }
 const masked = (text: string) => text.replace(/[0-9a-f]{32}/g, '<sys_id>')
+
+if (closedMode) process.exit(await closedTables(toClose))
 
 console.log(`Compared with the Table API on ${sn.host}`)
 if (settings.tables.allow.length || settings.tables.deny.length) {
@@ -401,3 +419,146 @@ for (const line of miscounted) console.log(`         ${line}`)
 
 console.log(`\n${sn.requestCount + direct} requests, all GET: ${sn.requestCount} by the server, ${direct} directly.`)
 process.exit(differences.length || wrong.length || altered.length || miscounted.length ? 1 : 0)
+
+// ---------------------------------------------------------------- closed tables
+
+/** Tries every way round a closed table, for each table named. Returns the exit code. */
+async function closedTables(names: string[]): Promise<number> {
+  console.log(`A closed table, tried on ${new URL(settings.instanceUrl).host}`)
+  const list = async (table: string, query: string, columns: string[], limit = 1_000) => (await get(table, { sysparm_query: query, sysparm_fields: columns.join(','), sysparm_limit: limit })).rows ?? []
+  const rowsThatMatch = async (table: string, query: string) => Number((await get(table, { sysparm_query: query, sysparm_fields: 'sys_id', sysparm_limit: 1 })).total ?? NaN)
+  const passed = new Map<string, number>()
+  const good = (kind: string) => passed.set(kind, (passed.get(kind) ?? 0) + 1)
+  const findings: string[] = []
+  let requests = 0
+
+  for (const closed of names) {
+    // What belongs to the table, read from the instance itself: level by level down, step by step up.
+    const family = [closed]
+    for (let level = [closed]; level.length; ) {
+      const next: string[] = []
+      for (let at = 0; at < level.length; at += 40) next.push(...(await list('sys_db_object', `super_class.nameIN${level.slice(at, at + 40).join(',')}`, ['name'], 5_000)).map((row) => row.name))
+      level = next.filter((name) => !family.includes(name))
+      family.push(...level)
+    }
+    const parents: string[] = []
+    for (let row = (await list('sys_db_object', `name=${closed}`, ['name', 'super_class.name'], 1))[0]; row?.['super_class.name'] && parents.length < 32; row = (await list('sys_db_object', `name=${row['super_class.name']}`, ['name', 'super_class.name'], 1))[0]) {
+      parents.push(row['super_class.name'])
+    }
+    if (!(await list('sys_db_object', `name=${closed}`, ['name'], 1)).length) {
+      console.log(`\n${closed}: the instance has no such table`)
+      continue
+    }
+    const inFamily = (query: string) => Promise.all(Array.from({ length: Math.ceil(family.length / 60) }, (_, part) => query.replace('<family>', family.slice(part * 60, part * 60 + 60).join(','))))
+    const { instance, ask } = await serverWith([closed])
+    const before = findings.length
+    const finding = (text: string) => findings.push(`${closed} closed: ${text}`)
+
+    // 1. The table itself and tables below it.
+    for (const table of family.slice(0, 6)) {
+      const read = await ask('sn_query', { table, limit: 1 })
+      if (read.isError && read.data.error === 'blocked') good('the table or a table below it is refused')
+      else finding(`${table} is answered`)
+      const counted = await ask('sn_query', { table, groupBy: 'sys_created_by' })
+      if (counted.isError && counted.data.error === 'blocked') good('a count on the table or a table below it is refused')
+      else finding(`${table} is counted per value`)
+    }
+    for (const [name, args] of [['sn_dependencies', { table: closed }], ['sn_query', { table: `ar_${closed}`, limit: 1 }]] as const) {
+      if ((await ask(name, args)).isError) good('what is attached to the table, and its archive, are refused')
+      else finding(`${name} with ${JSON.stringify(args)} is answered`)
+    }
+
+    // 2. Through the tables above it: no row of the family, and a total without them.
+    for (const parent of parents) {
+      const queries = ['', 'sys_created_onISNOTEMPTY^ORDERBYDESCsys_created_on', `sys_class_name=${closed}`, `sys_class_nameIN${family.slice(0, 3).join(',')}`, `sys_class_nameINSTANCEOF${closed}`, 'sys_class_name!=zz^ORDERBYsys_class_name', `sys_class_nameSTARTSWITH${closed.slice(0, 4)}`]
+      for (const query of queries) {
+        const read = await ask('sn_query', { table: parent, query, fields: ['sys_id', 'sys_class_name'], limit: 100 })
+        if (read.isError) {
+          good('a query on a table above is refused')
+          continue
+        }
+        const ids = (read.data.records as Data[]).map((row) => String(row.sys_id ?? '')).filter(Boolean)
+        const shown = (read.data.records as Data[]).filter((row) => family.includes(String(row.sys_class_name))).length
+        let closedRows = 0
+        for (let at = 0; at < ids.length; at += 40) for (const part of await inFamily(`sys_idIN${ids.slice(at, at + 40).join(',')}^sys_class_nameIN<family>`)) closedRows += await rowsThatMatch(parent, part)
+        if (shown || closedRows) finding(`${parent} with "${masked(query)}": ${Math.max(shown, closedRows)} of ${ids.length} rows are rows of the closed table`)
+        else good('rows read through a table above hold none of the closed table')
+        const whole = await rowsThatMatch(parent, query)
+        let closedInAll = 0
+        for (const part of await inFamily([query.split('^ORDERBY')[0], 'sys_class_nameIN<family>'].filter(Boolean).join('^'))) closedInAll += await rowsThatMatch(parent, part)
+        // Fewer is no finding: the server also leaves out what it cannot tell apart, linked application files for one.
+        if (Number(read.data.total) <= whole - closedInAll) good('the total through a table above counts no closed row')
+        else finding(`${parent} with "${masked(query)}": the total is ${read.data.total}, and only ${whole - closedInAll} rows are open`)
+      }
+      const perClass = await ask('sn_query', { table: parent, groupBy: 'sys_class_name', limit: 200 })
+      if (perClass.isError) good('a count per class on a table above is refused')
+      else if ((perClass.data.groups as Data[]).some((group) => family.includes(String(group.value)))) finding(`${parent} counted per class shows a class of the closed table`)
+      else good('a count per class through a table above shows no closed class')
+    }
+
+    // 3. Fields of open tables that point into the family, where they are filled.
+    const pointing: Array<[string, string]> = []
+    for (const part of await inFamily('referenceIN<family>^internal_type=reference^active=true^elementISNOTEMPTY')) {
+      for (const entry of await list('sys_dictionary', part, ['name', 'element'], 400)) pointing.push([entry.name, entry.element])
+      if (pointing.length > 800) break
+    }
+    const tried: Array<[string, string]> = []
+    for (const [table, field] of pointing) {
+      if (tried.length >= 8) break
+      if (family.includes(table) || parents.includes(table) || /^(var__|sys_|ts_|v_)/.test(table)) continue
+      if ((await rowsThatMatch(table, `${field}ISNOTEMPTY`)) > 0) tried.push([table, field])
+    }
+    for (const [table, field] of tried) {
+      const shown = await ask('sn_query', { table, query: `${field}ISNOTEMPTY`, fields: [field], limit: 20, displayValue: true })
+      if (shown.isError) good('a read of a field that points into the closed table is refused')
+      else if ((shown.data.records as Data[]).some((row) => row[field] && typeof row[field] === 'object' && (row[field].display ?? row[field].display_value))) finding(`${table}.${field}: cells carry the name of a record of the closed table`)
+      else good('a reference into the closed table comes without the name of the record')
+      for (const query of [`${field}.sys_created_byISNOTEMPTY`, `${field}.sys_idISNOTEMPTY`, `${field}LIKEa`, `${field}STARTSWITHa`, `ORDERBY${field}`]) {
+        const probe = await ask('sn_query', { table, query, fields: ['sys_id'], limit: 1 })
+        if (probe.isError) good('a condition or a sort that reads the closed record through a reference is refused')
+        else finding(`${table} with "${query}" is answered, and it reads a record of the closed table`)
+      }
+      if ((await ask('sn_query', { table, fields: [`${field}.sys_created_by`], limit: 1 })).isError) good('a field of the closed record asked for through a reference is refused')
+      else finding(`${table}: the field ${field}.sys_created_by is answered, and it is a field of the closed table`)
+      const counted = await ask('sn_query', { table, groupBy: field, limit: 50 })
+      if (counted.isError) good('a count per reference into the closed table is refused')
+      else if ((counted.data.groups as Data[]).some((group) => group.display)) finding(`${table} counted per ${field}: the groups carry names of records of the closed table`)
+      else good('a count per reference into the closed table comes without names')
+      if ((await ask('sn_query', { table, query: '123TEXTQUERY321=a', fields: ['sys_id'], limit: 1 })).isError) good('a text search on a table that points into the closed one is refused')
+      else finding(`${table}: a text search is answered, and it finds records by the names of the closed table`)
+    }
+
+    // 4. Database views that join the family.
+    const views = new Set<string>()
+    for (const part of await inFamily('tableIN<family>')) for (const member of await list('sys_db_view_table', part, ['view.name'], 200)) if (member['view.name']) views.add(member['view.name'])
+    for (const view of [...views].slice(0, 6)) {
+      const read = await ask('sn_query', { table: view, limit: 1 })
+      if (read.isError && read.data.error === 'blocked') good('a view that joins the closed table is refused')
+      else finding(`the view ${view} joins the closed table and is answered`)
+    }
+
+    // 5. Captured changes to its records: their names and payloads, and the verdict on one of them.
+    const ownName = new RegExp(`^${closed}_[0-9a-f]{32}$`)
+    const captured = (await list('sys_update_xml', `nameSTARTSWITH${closed}_`, ['name'], 200)).map((row) => row.name).filter((name) => ownName.test(name))
+    if (captured.length) {
+      const read = await ask('sn_query', { table: 'sys_update_xml', query: `nameIN${captured.slice(0, 20).join(',')}`, fields: ['name', 'target_name', 'payload'], limit: 20 })
+      if (read.isError) good('captured changes to records of the closed table are refused')
+      else if ((read.data.records as Data[]).some((row) => !String(row.target_name ?? '').startsWith('[withheld') || !String(row.payload ?? '').startsWith('[withheld'))) finding('sys_update_xml: a captured change to a record of the closed table comes with its name or its payload')
+      else good('captured changes to records of the closed table come without name and payload')
+      const origin = await ask('sn_origin', { updateName: captured[0] })
+      if (origin.isError && origin.data.error === 'blocked') good('sn_origin for a record of the closed table is refused')
+      else finding('sn_origin by the update name of a record of the closed table is answered')
+    }
+
+    requests += instance.requestCount
+    console.log(`\n${closed}: ${family.length} table(s) with those below it, ${parents.length} above, ${pointing.length} fields point into them (${tried.length} tried), ${views.size} views join them, ${captured.length} captured changes; ${findings.length - before} finding(s)`)
+  }
+
+  console.log('')
+  for (const [kind, value] of [...passed].sort((a, b) => b[1] - a[1])) console.log(`  ${String(value).padStart(5)}  ${kind}`)
+  console.log(`  ${String(findings.length).padStart(5)}  finding(s)`)
+  for (const line of findings.slice(0, 60)) console.log(`         ${line}`)
+  console.log(`\n${requests + direct} requests, all GET: ${requests} by the servers, ${direct} directly.`)
+  return findings.length ? 1 : 0
+}
+
