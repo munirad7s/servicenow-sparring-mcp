@@ -237,14 +237,25 @@ const perCaller = await ask('sn_query', { table: 'incident', groupBy: 'caller_id
 check('groups counted by such a reference carry no names', !perCaller.isError && (perCaller.data.groups ?? []).every((group: Data) => !group.display), `${perCaller.data.totalGroups} groups`)
 check('comparing such a reference with text is refused', blocked(await ask('sn_query', { table: 'incident', query: 'caller_idSTARTSWITHa', fields: ['sys_id'], limit: 1 })))
 check('a text search on a table that points into it is refused', refused(await ask('sn_query', { table: 'incident', query: '123TEXTQUERY321=network', fields: ['sys_id'], limit: 1 })))
-const userChanges = await ask('sn_query', { table: 'sys_update_xml', query: 'nameSTARTSWITHsys_user_', fields: ['target_name'], limit: 5 })
-check(
-  'the name of a captured change to one of its records is withheld',
-  !userChanges.isError && (userChanges.data.records ?? []).every((row: Data) => String(row.target_name).startsWith('[withheld')),
-  `${userChanges.data.returned} of ${userChanges.data.total} read`,
-)
 
-check('every request was a GET', methods.size === 1 && methods.has('GET'), `${sn.requestCount + closedSn.requestCount} requests`)
+// A third server, on which business rules are closed. A captured change says by its name which table its record
+// is of: "sys_script_<sys_id>" is a business rule, "sys_script_include_<sys_id>" is a script include.
+const rulesSn = new ServiceNowClient({ ...settings, tables: { allow: settings.tables.allow, deny: [...settings.tables.deny, 'sys_script'] } }, recorded)
+const [rulesClient, rulesServer] = InMemoryTransport.createLinkedPair()
+const rules = new Client({ name: 'smoke-rules', version: '1.0.0' })
+await Promise.all([rules.connect(rulesClient), buildServer(rulesSn).connect(rulesServer)])
+const changes = async (prefix: string) => {
+  const result = await rules.callTool({ name: 'sn_query', arguments: { table: 'sys_update_xml', query: `nameSTARTSWITH${prefix}`, fields: ['name', 'target_name'], limit: 50 } })
+  const data: Data = JSON.parse((result.content as Array<{ text: string }>)[0]?.text ?? '{}')
+  return (data.records ?? []).filter((row: Data) => new RegExp(`^${prefix}[0-9a-f]{32}$`).test(String(row.name)))
+}
+const withheld = (row: Data) => String(row.target_name).startsWith('[withheld')
+const [ofRules, ofIncludes] = [await changes('sys_script_'), await changes('sys_script_include_')]
+console.log('\nWith business rules closed on this machine:')
+check('the name of a captured change to a business rule is withheld', ofRules.length > 0 && ofRules.every(withheld), `${ofRules.length} changes`)
+check('the name of a captured change to a script include is passed on', ofIncludes.length > 0 && !ofIncludes.some(withheld), `${ofIncludes.length} changes`)
+
+check('every request was a GET', methods.size === 1 && methods.has('GET'), `${sn.requestCount + closedSn.requestCount + rulesSn.requestCount} requests`)
 check('only the two read endpoints were called', [...paths].every((path) => path === '/api/now/table' || path === '/api/now/stats'), [...paths].join(', '))
 
 console.log(failures ? `\n${failures} check(s) failed.` : '\nAll checks passed.')

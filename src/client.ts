@@ -30,9 +30,11 @@ export interface Gate {
   enter(table: string, query: string, paths: string[]): Promise<string>
   /**
    * Whether the display value of a field can be the name of a record in a closed table: "closed" if it points
-   * into one, "untold" if it cannot be told where it points.
+   * into one, "untold" if it cannot be told where it points. "shown" asks about the display value as it is
+   * passed on, where a field of a kind that is not known to show nothing of other records counts as "untold".
+   * Without it the question is whether a comparison with text, or a sort, works on such names.
    */
-  hidesNames(table: string, path: string): Promise<'closed' | 'untold' | null>
+  hidesNames(table: string, path: string, shown?: boolean): Promise<'closed' | 'untold' | null>
 }
 
 export interface Page<T = Row> {
@@ -176,7 +178,7 @@ export class ServiceNowClient {
         const { value: raw, display_value: shown } = value as { value?: unknown; display_value?: unknown }
         // A display value that only repeats what is stored names nothing.
         if (shown === raw || shown === '' || shown === null || shown === undefined) continue
-        if (!verdicts.has(key)) verdicts.set(key, await gate.hidesNames(table, key))
+        if (!verdicts.has(key)) verdicts.set(key, await gate.hidesNames(table, key, true))
         const verdict = verdicts.get(key)
         if (!verdict) continue
         ;(verdict === 'closed' ? notes?.names : notes?.untold)?.add(key)
@@ -232,7 +234,7 @@ export class ServiceNowClient {
     const gate = this.restricted ? this.gate : null
     const query = gate ? await this.entered(gate, 'stats', table, given, [...named, groupBy], [groupBy]) : given
     // The label of a group is the name behind a reference: not asked for where that could be a record of a closed table.
-    const hidden = gate && labels ? await gate.hidesNames(table, groupBy) : null
+    const hidden = gate && labels ? await gate.hidesNames(table, groupBy, true) : null
     const display = labels && !hidden
     if (hidden) (hidden === 'closed' ? currentCall()?.closed.names : currentCall()?.closed.untold)?.add(groupBy)
 

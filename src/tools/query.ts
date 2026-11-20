@@ -2,8 +2,8 @@ import { z } from 'zod'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { Row } from '../client.js'
 import type { Column } from '../dictionary.js'
-import { ServiceNowError, validation } from '../errors.js'
-import { assertTableName, isTableName } from '../query.js'
+import { ServiceNowError, unlessNoConnection, validation } from '../errors.js'
+import { assertTableName } from '../query.js'
 import { clip, fail, listing, listShape, ok, rawOf, rowSchema, source, tidy } from '../result.js'
 import { traced } from '../trace.js'
 import {
@@ -13,10 +13,12 @@ import {
   guardFields,
   holdsSecret,
   isClosedRecord,
+  isClosedTableName,
   JOURNAL_TYPES,
   knowRecordTables,
   LOOKS_SECRET,
   mayBePropertyValue,
+  NAMED_LIKE_A_PAYLOAD,
   payloadTables,
   propertyValueFields,
   READ_ONLY,
@@ -24,6 +26,7 @@ import {
   recordPayload,
   scrubSecrets,
   SECRET_NOTE,
+  viewField,
   type Context,
   type Guard,
 } from './shared.js'
@@ -51,7 +54,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
    * this machine. Where the type of a field cannot be read, its name decides. The names behind references into a
    * closed table never get this far: the client takes them off every answer, whichever tool asked.
    */
-  async function withhold(table: string, rows: Row[], known: Map<string, Column>, complete: boolean, warnings: string[]): Promise<Row[]> {
+  async function withhold(table: string, rows: Row[], known: Map<string, Column>, owners: Guard['owners'], complete: boolean, warnings: string[]): Promise<Row[]> {
     const byType = new Set<string>()
     const byName = new Set<string>()
     const counts = { typed: 0, named: 0, neither: 0, inText: 0, closedRecords: 0, closedNames: 0, diffs: 0 }
@@ -65,8 +68,13 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
       if (value && typeof value === 'object' && !Array.isArray(value)) return Object.fromEntries(Object.entries(value).map(([part, text]) => [part, scrub(text)])) as T
       return value
     }
-    const propertyValues = table === 'sys_properties' ? new Set<string>() : await propertyValueFields(ctx, table)
+    const propertyValues = table === 'sys_properties' ? { has: () => false } : await propertyValueFields(ctx, table)
     const restricted = ctx.sn.restricted
+    // What the name stands for: a table, a view with the tables it joins, or nothing that could be read. A field
+    // without a dictionary entry at hand is then judged by the definition of the view, or by its name alone.
+    const shape = await ctx.dict.table(table).catch(unlessNoConnection(null))
+    const describe = (key: string): Column | undefined => known.get(key) ?? (shape?.members ? viewField(shape.members, key) : undefined)
+    const guessed = (key: string, pattern: RegExp) => !shape && !known.has(key) && pattern.test(key)
     /** Whether a payload carries a record of a closed table. Where it names no table at all, that cannot be ruled out. */
     const carriesClosed = async (payload: string) => {
       const tables = payloadTables(payload)
@@ -81,7 +89,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     // Which tables the update names of this page begin with is asked for the page as a whole.
     if (restricted) {
       const beside = (row: Row) => Object.keys(row).flatMap((key) => {
-        const nameOf = recordNameKey(table, key, known.get(key))
+        const nameOf = recordNameKey(table, key, describe(key), owners.get(key)?.table)
         return nameOf?.holds === 'update_name' && nameOf.path in row ? [rawOf(row[nameOf.path])] : []
       })
       await knowRecordTables(ctx, rows.flatMap(beside))
@@ -91,13 +99,15 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     for (const row of rows) {
       const out: Row = {}
       for (const [key, value] of Object.entries(row)) {
-        const column = known.get(key)
+        const column = describe(key)
         // Reached through a view, a reference or a child path, the value of a system property comes without the type
         // that would say whether it is a secret. Only the plain "value" of sys_properties itself is judged by its row.
         const ownValue = table === 'sys_properties' && key === 'value'
         const fromProperties = propertyValues.has(key) || (!ownValue && mayBePropertyValue(column, key))
-        const carries = recordPayload(table, key, column)
-        const nameOf = restricted ? recordNameKey(table, key, column) : null
+        const carries = recordPayload(table, key, column) ?? (guessed(key, NAMED_LIKE_A_PAYLOAD) ? (key.endsWith('_diff') ? 'diff' : 'payload') : null)
+        // Named like the name of a record of another table, on something that could not be read: not told which.
+        const unknownName = guessed(key, /(?:^|_)(?:target_name|record_name)$/) ? ({ key: '', path: '', holds: 'untold' } as const) : null
+        const nameOf = restricted ? (recordNameKey(table, key, column, owners.get(key)?.table) ?? unknownName) : null
 
         if (carries && filled(value)) {
           if (carries === 'diff') {
@@ -109,14 +119,18 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
             out[key] = CLOSED_NAME
           } else {
             // A payload names the record behind every reference. While tables are closed, those names are taken out.
+            // Also where the markup of a record inside the payload is written with entities.
             const text = scrub(rawOf(value))
-            out[key] = restricted ? text.replace(/(\sdisplay_value\s*=\s*)(?:"[^"]*"|'[^']*')/g, '$1"[withheld]"') : text
+            out[key] = restricted
+              ? text.replace(/(\sdisplay_value\s*=\s*)(?:"[^"]*"|'[^']*')/g, '$1"[withheld]"').replace(/(\sdisplay_value\s*=\s*)(&(?:amp;)*(?:quot|apos);).*?\2/g, '$1$2[withheld]$2')
+              : text
           }
         } else if (nameOf && filled(value)) {
           // The readable name of a record of another table. Without what says which record, there is no telling: an
           // empty name is no table, and no update name stands for a closed record.
           const which = nameOf.path in row ? rawOf(row[nameOf.path]) : ''
-          const closed = nameOf.holds === 'table' ? !isTableName(which) || (await ctx.closed.reason(which)) !== null : await isClosedRecord(ctx, which)
+          const closed =
+            nameOf.holds === 'untold' ? true : nameOf.holds === 'table' ? !nameOf.notTables?.includes(which) && (await isClosedTableName(ctx, which)) : await isClosedRecord(ctx, which)
           if (closed) counts.closedNames++
           out[key] = closed ? CLOSED_NAME : scrub(value)
         } else if (fromProperties || holdsSecret(column, key)) {
@@ -204,11 +218,13 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
   /** Rows per value of one field, through the Aggregate API. An unknown field would be ignored there too, and counted as one group. */
   async function countPerValue(table: string, query: string, groupBy: string, limit: number, offset: number) {
     const guard = await guardFields(ctx, table, query, [], groupBy)
-    const column = guard.resolved.get(groupBy)
+    const column = guard.described.get(groupBy)
     if (holdsSecret(column, groupBy)) {
       throw validation(`"${groupBy}" holds a secret. Its values are not listed, also not as groups.`, table)
     }
-    if (recordPayload(table, groupBy, column)) {
+    // Where it could not be read what the name stands for, a field that is named like a payload counts as one.
+    const unread = !column && !(await ctx.dict.table(table).catch(unlessNoConnection(null)))
+    if (recordPayload(table, groupBy, column) || (unread && NAMED_LIKE_A_PAYLOAD.test(groupBy))) {
       throw validation(`"${groupBy}" holds whole records as text, secrets included. Its values are not listed as groups.`, table)
     }
     if (mayBePropertyValue(column, groupBy) || (table === 'sys_properties' && groupBy === 'value') || (await propertyValueFields(ctx, table)).has(groupBy)) {
@@ -217,7 +233,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     if (JOURNAL_TYPES.has(column?.type ?? '')) {
       throw validation(`"${groupBy}" is a journal field. Its entries are stored in sys_journal_field, and the field itself holds nothing to count by. Count there instead: element=${column?.sourceField ?? groupBy.split('.').at(-1)}, grouped by element_id.`, table)
     }
-    if (ctx.sn.restricted && recordNameKey(table, groupBy, column)) {
+    if (ctx.sn.restricted && recordNameKey(table, groupBy, column, guard.owners.get(groupBy)?.table)) {
       throw new ServiceNowError(`"${groupBy}" holds the readable names of records of other tables, and tables are closed on this machine: its values are not listed as groups. Nothing was sent.`, 'blocked', table)
     }
 
@@ -332,7 +348,9 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
 
         // The type of a system property decides whether its value is a secret, and without a type its name does: both are
         // read along. So is the update name beside the readable name of a record, which says whether its table is closed.
-        const beside = ctx.sn.restricted ? (fields ?? []).map((field) => recordNameKey(table, field, guard.resolved.get(field))?.path).filter((key): key is string => Boolean(key)) : []
+        const beside = ctx.sn.restricted
+          ? (fields ?? []).map((field) => recordNameKey(table, field, guard.resolved.get(field), guard.owners.get(field)?.table)?.path).filter((key): key is string => Boolean(key))
+          : []
         const readAlong = [...new Set([...(table === 'sys_properties' && fields?.includes('value') ? ['type', 'name'] : []), ...beside])].filter((field) => !fields?.includes(field))
         const page = await ctx.sn.query<Row>({
           table,
@@ -348,7 +366,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         if (leftOut.length) warnings.push(`The instance left out the requested field(s) ${leftOut.join(', ')}.`)
 
         const { known, complete } = await describeFields(table, fields, guard)
-        const rows = await withhold(table, displayValue ? page.records.map(tidy) : page.records, known, complete, warnings)
+        const rows = await withhold(table, displayValue ? page.records.map(tidy) : page.records, known, guard.owners, complete, warnings)
         // Without a list of fields the row itself says which fields it carries.
         const journals = displayValue ? [] : (fields ?? Object.keys(first ?? {})).filter((field) => JOURNAL_TYPES.has(known.get(field)?.type ?? ''))
         if (journals.length) {

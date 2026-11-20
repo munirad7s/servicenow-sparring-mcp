@@ -1316,11 +1316,11 @@ test('a record in a closed table is not read by the other tools either, and its 
   // Asked for by its sys_id, the table of application files is read without the rows of the closed table, so the
   // record is not found, and the answer says that rows were left out.
   const filtered = await connect(
-    [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_script', rows: [] }, ...origin('sys_plugins', [], [], {}, [skip('Skipped')])],
+    [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_metadata_link,sys_script', rows: [] }, ...origin('sys_plugins', [], [], {}, [skip('Skipped')])],
     closed,
   )
   const answer = await filtered.answer('sn_origin', { sysId: ID })
-  assert.equal(filtered.sentTo('sys_metadata')[0].query, `sys_id=${ID}^sys_class_nameNOT INsys_script^ORsys_class_nameISEMPTY`)
+  assert.equal(filtered.sentTo('sys_metadata')[0].query, `sys_id=${ID}^sys_class_nameNOT INsys_metadata_link,sys_script^ORsys_class_nameISEMPTY`)
   assert.equal(answer.record, null)
   assert.match(answer.warnings.join(' '), /Rows that belong to a closed child table of this one were left out/)
   assert.doesNotMatch(JSON.stringify(answer), /Example rule/)
@@ -1330,7 +1330,7 @@ test('a record in a closed table is not read by the other tools either, and its 
 
   // A captured change gives the record away by its name. Found that way, nothing more is read of it.
   const traced = await connect(
-    [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_script', rows: [] }, { table: 'sys_update_xml', query: `nameENDSWITH_${ID}`, rows: [{ name: NAME }] }, ...origin('sys_plugins', [change()], [], {}, [skip('Skipped')])],
+    [...world, { table: 'sys_metadata', query: 'sys_class_nameNOT INsys_metadata_link,sys_script', rows: [] }, { table: 'sys_update_xml', query: `nameENDSWITH_${ID}`, rows: [{ name: NAME }] }, ...origin('sys_plugins', [change()], [], {}, [skip('Skipped')])],
     closed,
   )
   // The list of what an upgrade skipped names the record of a closed table by its file, not by its readable name.
@@ -1788,6 +1788,11 @@ test('text that begins ten thousand things and ends none costs its length, not i
     `<sys_properties><type>password</type>${'<value><![CDATA['.repeat(60_000)}</sys_properties>`,
     '<!-- '.repeat(60_000),
     `{"c":"{\\"api_key\\":\\"${'\\\\\\\\'.repeat(100_000)}`,
+    // Many beginnings that share one end, with blanks behind it: the blanks were skipped anew from each beginning.
+    `${'<password><![CDATA['.repeat(40_000)}]]>${' '.repeat(400_000)}`,
+    // Wrappers that never end: each new element was held against every one that was open.
+    '<xml>'.repeat(200_000),
+    '<a b="1" '.repeat(60_000),
   ]
   const started = performance.now()
   for (const text of hostile) {
@@ -1869,6 +1874,63 @@ test('the tables of the records a payload carries are all found', () => {
   assert.deepEqual(payloadTables('<record_update><incident action="INSERT_OR_UPDATE"><x a="1>2"/><task>abc</task><note><![CDATA[</incident><sys_user>]]></note></incident></record_update>'), ['incident'])
 })
 
+test('a payload does not hide the table of a record behind the way it is written', () => {
+  const tables = (text: string) => payloadTables(text).sort()
+  // A ">" in an attribute in front of the one that names the table, or in front of the action.
+  assert.deepEqual(tables('<record_update description="a > b" table="sys_user"><incident><sys_user display_value="a > b" action="INSERT_OR_UPDATE"><name>x</name></sys_user></incident></record_update>'), ['incident', 'sys_user'])
+  // An element that is never ended does not move the record behind it one level down.
+  assert.deepEqual(
+    tables('<record_update table="sys_ui_page"><sys_ui_page action="INSERT_OR_UPDATE"><html><br>Hello</html></sys_ui_page><sys_user><user_name>abel</user_name></sys_user></record_update>'),
+    ['sys_ui_page', 'sys_user'],
+  )
+  // Every wrapper that names a table counts, not the first one only.
+  assert.deepEqual(tables('<unload><record_update table="incident"><incident/></record_update><record_update table="sys_user"><x/></record_update></unload>'), ['incident', 'sys_user', 'x'])
+  // Measured: the instance compares names without regard to case. A table in capitals, or with a prefix, is the same table.
+  assert.deepEqual(tables('<record_update table="SYS_USER"><SYS_USER ACTION="INSERT_OR_UPDATE"><name>x</name></SYS_USER></record_update>'), ['sys_user'])
+  assert.deepEqual(tables('<record_update><x:sys_user action="DELETE"/></record_update>'), ['sys_user'])
+
+  // Measured: a linked application file carries the record it links to as a whole payload in a CDATA section.
+  const inner = '<?xml version="1.0" encoding="UTF-8"?><record_update table="sys_user"><sys_user action="INSERT_OR_UPDATE"><name>Abel Tuter</name></sys_user></record_update>'
+  const link = (payload: string) => `<record_update table="sys_metadata_link"><sys_metadata_link action="INSERT_OR_UPDATE"><tablename>sys_user</tablename><payload>${payload}</payload></sys_metadata_link></record_update>`
+  assert.deepEqual(tables(link(`<![CDATA[${inner}]]>`)), ['sys_metadata_link', 'sys_user'])
+  // The same written with entities, once or twice over.
+  const escaped = (text: string) => text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;')
+  assert.deepEqual(tables(link(escaped(inner))), ['sys_metadata_link', 'sys_user'])
+  assert.deepEqual(tables(link(escaped(escaped(inner)))), ['sys_metadata_link', 'sys_user'])
+
+  // The text of a field is not the markup of the payload: a web page in a CDATA section names no tables.
+  assert.deepEqual(
+    tables('<record_update table="sys_ui_page"><sys_ui_page action="INSERT_OR_UPDATE"><html><![CDATA[<div><table><tr><td>x</td></tr></table><br></div>]]></html><description>a &lt;b&gt;bold&lt;/b&gt; word</description></sys_ui_page></record_update>'),
+    ['sys_ui_page'],
+  )
+  // More tables than can be looked at one by one: such a payload cannot be judged, which an empty list says.
+  const many = `<unload>${Array.from({ length: 60 }, (_, index) => `<u_table_${index}/>`).join('')}</unload>`
+  assert.deepEqual(payloadTables(many), [])
+})
+
+test('a secret is taken out of a text however its element is written', () => {
+  const withheld = (text: string) => {
+    const cleaned = scrubSecrets(text)
+    assert.doesNotMatch(cleaned.text, /TOPSECRET|abc.{0,12}def/, text)
+    assert.ok(cleaned.withheld >= 1, text)
+    return cleaned.text
+  }
+  // A ">" inside an attribute value does not end the tag.
+  assert.equal(withheld('<user_password display_value="a > b"><![CDATA[TOPSECRET]]></user_password>'), '<user_password>[withheld]</user_password>')
+  // A value that holds "]]>" is written as two CDATA sections.
+  assert.equal(withheld('<user_password><![CDATA[abc]]]]><![CDATA[>def]]></user_password>'), '<user_password>[withheld]</user_password>')
+  // JSON inside a JSON string, where the outer text escaped a character of its own: "/" as "\/", "=" as "=".
+  assert.equal(withheld(String.raw`{"body": "{\"api_key\": \"abc\/def\"}"}`), String.raw`{"body": "{\"api_key\": \"[withheld]\"}"}`)
+  assert.equal(withheld(String.raw`{"body": "{\"api_key\": \"abc=def\", \"name\": \"x\"}"}`), String.raw`{"body": "{\"api_key\": \"[withheld]\", \"name\": \"x\"}"}`)
+
+  // A system property that holds a secret, with a text in front of its type that only looks like a type.
+  withheld('<sys_properties><description><![CDATA[uses <type>string</type>]]></description><name>x</name><type>password2</type><value>TOPSECRET</value></sys_properties>')
+  // An element that ends in itself holds no record: the property behind it is judged by its own type.
+  withheld('<record_update><sys_properties action="DELETE"/><incident><type>string</type></incident><sys_properties action="INSERT_OR_UPDATE"><name>x</name><type>password2</type><value>TOPSECRET</value></sys_properties></record_update>')
+  // A property of another type keeps its value.
+  assert.equal(scrubSecrets('<sys_properties action="INSERT_OR_UPDATE"><name>glide.ui.width</name><type>integer</type><value>120</value></sys_properties>').withheld, 0)
+})
+
 test('the payload of a captured change is passed on without its secrets, and cannot be searched', async () => {
   const payload = (table: string, inner: string) => `<?xml version="1.0"?><record_update table="${table}"><${table} action="INSERT_OR_UPDATE">${inner}</${table}></record_update>`
   const rows = [
@@ -1905,6 +1967,175 @@ test('the payload of a captured change is passed on without its secrets, and can
   }
   assert.equal(sentTo('sys_update_xml').length, 1)
   assert.equal((await answer('sn_query', { table: 'sys_update_xml', query: 'payloadISNOTEMPTY^nameSTARTSWITHsys_script', fields: ['name'] })).returned, 3)
+})
+
+test('a linked application file does not give away the record it links to', async () => {
+  // Measured: such a file is named after the record it links to, and carries that record as its payload. Its name
+  // is a field it inherits, so the dictionary says that the table of application files defines it.
+  const WITHHELD = '[withheld: the record is in a table closed on this machine]'
+  const inner = (table: string, name: string) => `<?xml version="1.0"?><record_update table="${table}"><${table} action="INSERT_OR_UPDATE"><name>${name}</name></${table}></record_update>`
+  const links = [
+    { sys_name: 'Abel Tuter', tablename: 'sys_user', sys_class_name: 'sys_metadata_link', payload: inner('sys_user', 'Abel Tuter') },
+    { sys_name: 'A question', tablename: 'incident', sys_class_name: 'sys_metadata_link', payload: inner('incident', 'A question') },
+  ]
+  const fields = [column('sys_metadata', 'sys_name'), column('sys_metadata', 'sys_class_name', 'sys_class_name'), column('sys_metadata_link', 'tablename'), column('sys_metadata_link', 'payload')]
+  const world: Route[] = [
+    closedTables(tableRow('sys_user', 'User')),
+    { table: 'sys_db_object', exact: 'name=sys_metadata_link', rows: [tableRow('sys_metadata_link', 'Application File Link', 'sys_metadata')] },
+    { table: 'sys_db_object', exact: 'name=sys_metadata', rows: [tableRow('sys_metadata', 'Application File')] },
+    { table: 'sys_dictionary', query: 'nameINsys_metadata_link,sys_metadata', rows: fields },
+    { table: 'sys_dictionary', query: 'nameINsys_metadata^', rows: fields.slice(0, 2) },
+    ...dictionaryRoutes,
+    { table: 'sys_metadata_link', rows: links },
+    { table: 'sys_metadata', rows: [{ sys_name: 'Example rule', sys_class_name: 'sys_script' }] },
+    stats('sys_metadata_link', { 'Abel Tuter': 1 }),
+  ]
+  const closed = await connect(world, { tables: { allow: [], deny: ['sys_user'] } })
+
+  // Read from its own table, the row says which table the record is of.
+  const read = await closed.answer('sn_query', { table: 'sys_metadata_link', fields: ['sys_name', 'payload'] })
+  assert.deepEqual(read.records.map((row: Data) => row.sys_name), [WITHHELD, 'A question'])
+  assert.equal(read.records[0].payload, WITHHELD)
+  assert.match(read.records[1].payload, /A question/)
+  // The same without a list of fields.
+  const whole = await closed.answer('sn_query', { table: 'sys_metadata_link' })
+  assert.doesNotMatch(JSON.stringify(whole.records), /Abel Tuter/)
+  // Not found out by trying either.
+  for (const args of [{ query: 'sys_nameSTARTSWITHAbel' }, { query: 'ORDERBYsys_name' }, { groupBy: 'sys_name' }]) {
+    const { data } = await closed.call('sn_query', { table: 'sys_metadata_link', ...args })
+    assert.equal(data.error, 'blocked', JSON.stringify(args))
+    assert.match(data.message, /holds the readable names of records of other tables/)
+  }
+
+  // Read as rows of the parent table, nothing says which table the record is of. The parent answers without them.
+  const parent = await closed.answer('sn_query', { table: 'sys_metadata', query: 'sys_nameSTARTSWITHA', fields: ['sys_name'] })
+  assert.equal(closed.sentTo('sys_metadata')[0].query, 'sys_nameSTARTSWITHA^sys_class_nameNOT INsys_metadata_link^ORsys_class_nameISEMPTY')
+  assert.match(parent.warnings.join(' '), /were left out by a condition on sys_class_name/)
+
+  // Nothing is closed: the names stay, and the parent is read as it is.
+  const open = await connect(world)
+  assert.deepEqual((await open.answer('sn_query', { table: 'sys_metadata_link', fields: ['sys_name'] })).records.map((row: Data) => row.sys_name), ['Abel Tuter', 'A question'])
+  await open.answer('sn_query', { table: 'sys_metadata', fields: ['sys_name'] })
+  assert.equal(open.sentTo('sys_metadata')[0].query, '')
+})
+
+test('a field of a view is judged by the table it comes from, also where the dictionary of that table is not readable', async () => {
+  const WITHHELD = '[withheld: the record is in a table closed on this machine]'
+  const payload = '<record_update table="sys_user"><sys_user action="INSERT_OR_UPDATE"><name>Abel Tuter</name></sys_user></record_update>'
+  const view: Route[] = [
+    { table: 'sys_db_object', exact: 'name=v_updates', rows: [] },
+    { table: 'sys_db_view', query: 'name=v_updates', rows: [{ sys_id: 'c'.repeat(32), name: 'v_updates', label: 'Updates' }] },
+    { table: 'sys_db_view_table', rows: [{ table: 'sys_update_xml', variable_prefix: 'ux' }] },
+    { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Customer Update')] },
+    // The fields of the joined table are hidden from this account.
+    { table: 'sys_dictionary', query: 'nameINsys_update_xml', status: 403 },
+    { table: 'v_updates', rows: [{ ux_name: `sys_user_${ID}`, ux_target_name: 'Abel Tuter', ux_payload: payload, ux_type: 'User' }] },
+  ]
+  // Without a list of fields nothing has to be looked up before the view is read, and the row comes with everything.
+  const open = await connect([...view, ...dictionaryRoutes])
+  const row = (await open.answer('sn_query', { table: 'v_updates' })).records[0]
+  // No table is closed: the payload is passed on. It is still a payload, which is not counted by, searched or sorted by.
+  assert.match(row.ux_payload, /Abel Tuter/)
+  for (const args of [{ groupBy: 'ux_payload' }, { query: 'ux_payloadLIKEAbel' }, { query: 'ORDERBYux_payload' }]) {
+    const { data } = await open.call('sn_query', { table: 'v_updates', ...args })
+    assert.equal(data.error, 'validation', JSON.stringify(args))
+    assert.match(data.message, /holds whole records as text/, JSON.stringify(args))
+  }
+  assert.equal(open.sentTo('v_updates', 'stats').length, 0)
+
+  // With the user table closed, the record of a user is not passed on, and neither is its name.
+  const closed = await connect([closedTables(tableRow('sys_user', 'User')), ...view, ...dictionaryRoutes], { tables: { allow: [], deny: ['sys_user'] } })
+  const kept = (await closed.answer('sn_query', { table: 'v_updates' })).records[0]
+  assert.equal(kept.ux_payload, WITHHELD)
+  assert.equal(kept.ux_target_name, WITHHELD)
+  assert.equal(kept.ux_type, 'User')
+})
+
+test('on something that could not be read as a table or a view, a field is judged by its name', async () => {
+  // The definition of the view is hidden from this account, and the view itself answers. Then it cannot be ruled
+  // out that it hands out the values of system properties, or whole records.
+  const hidden: Route[] = [
+    { table: 'sys_db_object', exact: 'name=v_props', rows: [] },
+    { table: 'sys_db_view', query: 'name=v_props', status: 403 },
+    { table: 'v_props', rows: [{ prop_name: 'glide.smtp.pw', prop_value: 'ciphertext', prop_type: 'password2', u_payload: '<x><password>s3cr3t</password></x>', u_payload_diff: '<diff/>', other: 'plain' }] },
+  ]
+  const { answer, call } = await connect([...hidden, ...dictionaryRoutes])
+  const row = (await answer('sn_query', { table: 'v_props' })).records[0]
+  assert.equal(row.prop_value, '[withheld: this field holds a secret]')
+  assert.equal(row.u_payload, '<x><password>[withheld]</password></x>')
+  assert.match(row.u_payload_diff, /^\[withheld: the comparison of two payloads/)
+  assert.equal(row.other, 'plain')
+  assert.equal(row.prop_name, 'glide.smtp.pw')
+  assert.equal((await call('sn_query', { table: 'v_props', groupBy: 'prop_value' })).data.error, 'validation')
+})
+
+test('names of records of other tables are kept back on the tables that are known to hold them', async () => {
+  const WITHHELD = '[withheld: the record is in a table closed on this machine]'
+  const tables: Route[] = ['sys_scope_privilege', 'sys_ui_recent_selection', 'sys_script_include'].map((name) => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] }))
+  const world: Route[] = [
+    closedTables(tableRow('sys_script_include', 'Script Include')),
+    ...tables,
+    { table: 'sys_dictionary', query: 'nameINsys_scope_privilege', rows: [column('sys_scope_privilege', 'target_name'), column('sys_scope_privilege', 'target_type'), column('sys_scope_privilege', 'operation')] },
+    { table: 'sys_dictionary', query: 'nameINsys_ui_recent_selection', rows: [column('sys_ui_recent_selection', 'display_value'), column('sys_ui_recent_selection', 'value'), column('sys_ui_recent_selection', 'field')] },
+    ...dictionaryRoutes,
+    {
+      table: 'sys_scope_privilege',
+      rows: [
+        { target_name: 'PayrollUtils', target_type: 'sys_script_include', operation: 'execute' },
+        { target_name: 'GlideRecord', target_type: 'scriptable', operation: 'execute' },
+        { target_name: 'incident', target_type: 'sys_db_object', operation: 'read' },
+        // Not a table the instance knows: what the name is of cannot be told.
+        { target_name: 'Something', target_type: 'u_gone', operation: 'read' },
+      ],
+    },
+    { table: 'sys_ui_recent_selection', rows: [{ display_value: 'Abel Tuter', value: ID, field: 'caller_id' }] },
+  ]
+  const closed = await connect([{ table: 'sys_db_object', exact: 'name=sys_db_object', rows: [tableRow('sys_db_object', 'Table')] }, ...world], { tables: { allow: [], deny: ['sys_script_include'] } })
+  const privileges = await closed.answer('sn_query', { table: 'sys_scope_privilege', fields: ['target_name', 'operation'] })
+  assert.deepEqual(privileges.records.map((row: Data) => row.target_name), [WITHHELD, 'GlideRecord', 'incident', WITHHELD])
+  // Which record someone picked in a reference field: the row does not say which table it is of.
+  const picked = await closed.answer('sn_query', { table: 'sys_ui_recent_selection', fields: ['display_value', 'field'] })
+  assert.deepEqual(picked.records, [{ display_value: WITHHELD, field: 'caller_id' }])
+  assert.equal((await closed.call('sn_query', { table: 'sys_ui_recent_selection', query: 'display_valueSTARTSWITHAbel' })).data.error, 'blocked')
+
+  const open = await connect(world)
+  assert.deepEqual((await open.answer('sn_query', { table: 'sys_scope_privilege', fields: ['target_name'] })).records.map((row: Data) => row.target_name), ['PayrollUtils', 'GlideRecord', 'incident', 'Something'])
+})
+
+test('what a field shows is passed on only for kinds of fields that show nothing of other records', async () => {
+  // Measured: a condition shows the names behind the sys_ids it holds, and an attachment field shows the name of
+  // its file. A comparison with text works on what such a field stores, so that stays possible.
+  const fields: Route = {
+    table: 'sys_dictionary',
+    query: 'nameINincident,task',
+    rows: [column('task', 'number'), column('task', 'u_filter', 'conditions'), column('task', 'u_document', 'file_attachment'), column('task', 'u_stage', 'workflow'), column('task', 'u_odd', 'a_kind_not_measured')],
+  }
+  const row = {
+    number: 'INC1',
+    u_filter: labelled(`caller_id=${ID}`, 'Caller is Abel Tuter'),
+    u_document: labelled(ID, 'payroll-2026.xlsx'),
+    u_stage: labelled('waiting', 'Waiting for approval'),
+    u_odd: labelled('x', 'Something else'),
+  }
+  const world = [fields, { table: 'sys_db_object', exact: 'name=sys_attachment', rows: [tableRow('sys_attachment', 'Attachment')] }, ...dictionaryRoutes, { table: 'incident', rows: [row] }]
+  const wanted = { table: 'incident', fields: ['number', 'u_filter', 'u_document', 'u_stage', 'u_odd'], displayValue: true }
+
+  const users = await connect(world, { tables: { allow: [], deny: ['sys_user'] } })
+  const data = await users.answer('sn_query', wanted)
+  // The attachment table is open, so the name of the file stays. The stage shows its label.
+  assert.deepEqual(data.records, [{ number: 'INC1', u_filter: `caller_id=${ID}`, u_document: { value: ID, display: 'payroll-2026.xlsx' }, u_stage: { value: 'waiting', display: 'Waiting for approval' }, u_odd: 'x' }])
+  assert.match(data.warnings.join(' '), /could not be told which table these fields point to, so their display values were left out: u_filter, u_odd/)
+  // Comparing the condition with text is a comparison with what is stored.
+  assert.equal((await users.answer('sn_query', { table: 'incident', query: 'u_filterLIKEcaller_id', fields: ['number'] })).returned, 1)
+
+  const attachments = await connect([closedTables(tableRow('sys_attachment', 'Attachment')), ...world], { tables: { allow: [], deny: ['sys_attachment'] } })
+  const without = await attachments.answer('sn_query', wanted)
+  assert.equal(without.records[0].u_document, ID)
+  assert.match(without.warnings.join(' '), /closed on this machine were left out: u_document/)
+
+  // Nothing is closed: everything is shown.
+  const open = await connect(world)
+  assert.deepEqual((await open.answer('sn_query', wanted)).records[0].u_filter, { value: `caller_id=${ID}`, display: 'Caller is Abel Tuter' })
 })
 
 test('the value of a system property is not handed out under another name', async () => {

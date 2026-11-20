@@ -44,6 +44,8 @@ const PAYLOAD_FIELDS = new Map<string, string[]>([
   ['sys_audit_delete', ['payload']],
   ['sys_archive_log', ['payload']],
   ['sys_metadata_link', ['payload']],
+  // The record another instance sent for comparison, stored compressed.
+  ['sys_sync_preview_remote', ['payload']],
 ])
 
 /** "payload" or "diff" if the field carries a whole record, as itself or as a comparison of two. */
@@ -61,51 +63,80 @@ const WITHHELD = '[withheld]'
 /**
  * Looks for the same text again and again while a longer text is read from left to right. A stretch that was
  * searched once is not searched again: a text made of ten thousand beginnings and no end then costs its length,
- * not its length squared. Ask with positions that do not go backwards.
+ * not its length squared. A question that goes back costs the way back and no more.
  */
 function finder(text: string, needle: string): (from: number) => number {
-  let found = -2
+  // "found" is the first place at or behind "asked", or -1 if there is none.
+  let asked = Infinity
+  let found = -1
   return (from) => {
-    if (found !== -1 && found < from) found = text.indexOf(needle, from)
+    if (from < asked) {
+      // Only the stretch in front of what was searched before.
+      const near = asked === Infinity ? text.indexOf(needle, from) : text.slice(from, asked + needle.length - 1).indexOf(needle)
+      if (asked === Infinity) found = near
+      else if (near >= 0) found = from + near
+    } else if (found !== -1 && found < from) {
+      found = text.indexOf(needle, from)
+    }
+    asked = from
     return found
   }
 }
 
+/** The attributes of a tag, read as such: a value may hold ">". */
+const ATTRIBUTES = String.raw`(?:\s+[\w:.-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*`
+
 /**
- * The elements of a text that hold nothing but text, <tag …>text</tag>, with the text plain or in one CDATA
- * section. Read in one pass. Only the elements whose name is wanted are looked into.
+ * The elements of a text that hold nothing but text, <tag …>text</tag>, with the text plain or in CDATA sections.
+ * Read in one pass. Only the elements whose name is wanted are looked into.
  */
 function* simpleElements(text: string, wanted: (tag: string) => boolean): Generator<{ start: number; end: number; tag: string; plain: string }> {
   const cdataEnd = finder(text, ']]>')
-  const OPEN = /<([A-Za-z_][\w.-]*)(?:\s[^<>]*)?>/g
+  const OPEN = new RegExp(String.raw`<([A-Za-z_][\w.-]*)${ATTRIBUTES}\s*>`, 'g')
   const CDATA = /\s*<!\[CDATA\[/y
   const BLANKS = /\s*/y
+  // The blanks behind one place are skipped once, however many elements end there.
+  const skipped = { from: -1, to: -1 }
+  const behindBlanks = (from: number) => {
+    if (from < skipped.from || from > skipped.to) {
+      BLANKS.lastIndex = from
+      BLANKS.test(text)
+      skipped.from = from
+      skipped.to = BLANKS.lastIndex
+    }
+    return skipped.to
+  }
   let done = 0
   for (let match = OPEN.exec(text); match; match = OPEN.exec(text)) {
     const tag = match[1]
     if (match.index < done || !wanted(tag)) continue
     const from = match.index + match[0].length
-    let plain: string
+    const closing = `</${tag}>`
+    const pieces: Array<[number, number]> = []
     let after: number
     CDATA.lastIndex = from
     if (CDATA.test(text)) {
-      const inner = CDATA.lastIndex
-      const close = cdataEnd(inner)
-      if (close < 0) continue
-      BLANKS.lastIndex = close + 3
-      BLANKS.test(text)
-      after = BLANKS.lastIndex
-      plain = text.slice(inner, close)
+      // A value that holds "]]>" is written as two sections, one behind the other.
+      let inner = CDATA.lastIndex
+      for (;;) {
+        const close = cdataEnd(inner)
+        if (close < 0) break
+        pieces.push([inner, close])
+        if (!text.startsWith('<![CDATA[', close + 3)) break
+        inner = close + 12
+      }
+      if (!pieces.length || cdataEnd(pieces.at(-1)![0]) < 0) continue
+      after = behindBlanks(pieces.at(-1)![1] + 3)
     } else {
       after = text.indexOf('<', from)
       // No "<" is left, or the element is empty.
       if (after <= from) continue
-      plain = text.slice(from, after)
+      pieces.push([from, after])
     }
-    const closing = `</${tag}>`
+    // The text is cut out only where the element ends as it should: ten thousand beginnings share one end.
     if (!text.startsWith(closing, after)) continue
     done = after + closing.length
-    yield { start: match.index, end: done, tag, plain: plain.trim() }
+    yield { start: match.index, end: done, tag, plain: pieces.map(([start, end]) => text.slice(start, end)).join('').trim() }
   }
 }
 
@@ -115,7 +146,8 @@ function* simpleElements(text: string, wanted: (tag: string) => boolean): Genera
  * only: the types of the record's fields are not at hand here.
  *
  * A system property inside a payload is judged like one read from its table: by its type, without a type by its
- * name, and without both its value is taken out.
+ * name, and without both its value is taken out. Any element "type" of the record that says "password" counts: a
+ * text in front of it that only looks like a type does not make the property harmless.
  *
  * The text comes from the instance, and whoever can write a record can write this text. It is read in passes that
  * cost its length: see finder().
@@ -139,8 +171,8 @@ export function scrubSecrets(text: string): { text: string; withheld: number } {
   }
   let out = without(text, (tag) => LOOKS_SECRET.test(tag), false)
 
-  // A system property: its type says whether the value is a secret.
-  const RECORD = /<sys_properties(?:\s[^<>]*)?>/g
+  // A system property: its type says whether the value is a secret. An element that ends in itself holds none.
+  const RECORD = new RegExp(String.raw`<sys_properties${ATTRIBUTES}\s*>`, 'g')
   const CLOSING = '</sys_properties>'
   const recordEnd = finder(out, CLOSING)
   let cleaned = ''
@@ -151,9 +183,9 @@ export function scrubSecrets(text: string): { text: string; withheld: number } {
     const end = close + CLOSING.length
     const record = out.slice(match.index, end)
     const fields = [...simpleElements(record, (tag) => tag === 'type' || tag === 'name')]
-    const type = fields.find((field) => field.tag === 'type')?.plain ?? ''
-    const name = fields.find((field) => field.tag === 'name')?.plain ?? ''
-    const secret = type ? /^password2?$/i.test(type) : name ? LOOKS_SECRET.test(name) : true
+    const types = fields.filter((field) => field.tag === 'type' && field.plain).map((field) => field.plain)
+    const names = fields.filter((field) => field.tag === 'name' && field.plain).map((field) => field.plain)
+    const secret = types.length ? types.some((type) => /^password2?$/i.test(type)) : names.length ? names.some((name) => LOOKS_SECRET.test(name)) : true
     if (secret) {
       cleaned += out.slice(last, match.index) + without(record, (tag) => tag === 'value', true)
       last = end
@@ -163,9 +195,10 @@ export function scrubSecrets(text: string): { text: string; withheld: number } {
   if (last) out = cleaned + out.slice(last)
 
   // JSON, also where it sits inside a string of another JSON text and its quotes are escaped. There an escape of
-  // the inner text is written with two backslashes: \\u003d, \\/ and, for a quote inside the value, \\\".
+  // the inner text is written with two backslashes: \\u003d, \\/ and, for a quote inside the value, \\\". An
+  // escape of the outer text has one, as where "/" was written "\/".
   for (const quote of ['"', String.raw`\\"`]) {
-    const value = quote === '"' ? String.raw`"(?:[^"\\]|\\.)+"` : String.raw`\\"(?:[^"\\]|\\\\(?:\\\\|\\"|[^"\\]))+\\"`
+    const value = quote === '"' ? String.raw`"(?:[^"\\]|\\.)+"` : String.raw`\\"(?:[^"\\]|\\\\(?:\\\\|\\"|[^"\\])|\\[^"\\])+\\"`
     out = out.replace(new RegExp(String.raw`(${quote}([A-Za-z_][\w.-]*)${quote}\s*:\s*)(?:${value}|-?\d[\d.]*)`, 'g'), (whole, lead: string, key: string) => {
       if (!LOOKS_SECRET.test(key) || /:\s*\\?"(true|false)\\?"$/.test(whole)) return whole
       withheld++
@@ -253,25 +286,64 @@ export async function isClosedRecord(ctx: Context, updateName: string): Promise<
  * record is in a closed table. A query has to do the same. The field lists were read from the dictionary of an
  * instance.
  */
-const RECORD_NAMES = new Map<string, Record<string, { key: string; holds: 'update_name' | 'table' }>>([
+interface NameKey {
+  /** The field beside the name that says which record it is. */
+  key: string
+  /** What that field holds. "untold": nothing in the row says which table the record is of. */
+  holds: 'update_name' | 'table' | 'untold'
+  /** Values of the key that name no table, and no record of one. */
+  notTables?: string[]
+}
+const RECORD_NAMES = new Map<string, Record<string, NameKey>>([
   ['sys_update_xml', { target_name: { key: 'name', holds: 'update_name' } }],
   ['sys_update_version', { record_name: { key: 'name', holds: 'update_name' } }],
+  ['sys_update_diff', { target_name: { key: 'name', holds: 'update_name' } }],
+  ['sys_sync_preview_remote', { record_name: { key: 'name', holds: 'update_name' } }],
   ['sys_upgrade_history_log', { target_name: { key: 'file_name', holds: 'update_name' } }],
   ['sys_audit_delete', { display_value: { key: 'tablename', holds: 'table' } }],
   ['sys_archive_log', { display_value: { key: 'from_table', holds: 'table' } }],
+  // Measured: a linked application file is named after the record it links to. The field is one it inherits.
   ['sys_metadata_link', { sys_name: { key: 'tablename', holds: 'table' } }],
+  // Measured: what one scope may use of another is a table, a script include, or a class of the platform
+  // ("scriptable"), which is no record.
+  ['sys_scope_privilege', { target_name: { key: 'target_type', holds: 'table', notTables: ['scriptable'] } }],
+  // The name of the record someone picked in a reference field. Which table it is of, the row does not say.
+  ['sys_ui_recent_selection', { display_value: { key: 'value', holds: 'untold' } }],
 ])
 
-/** For a field that holds the name of a record of another table: the path of the field that says which record, and what that field holds. */
-export function recordNameKey(table: string, path: string, column?: Column): { path: string; holds: 'update_name' | 'table' } | null {
+/**
+ * For a field that holds the name of a record of another table: the path of the field that says which record, and
+ * what that field holds. "owner" is the table a dot-walked path ends on, where that is known.
+ */
+export function recordNameKey(table: string, path: string, column?: Column, owner?: string): (NameKey & { path: string }) | null {
   const field = column ? (column.sourceField ?? column.name) : (path.split('.').at(-1) ?? path)
-  const owner = column ? column.definedOn : path === field ? table : null
+  // The table the field is read on, and the table that defines it: a child table inherits fields, and a view
+  // takes its fields from the tables it joins.
+  const plain = path === field && !column?.sourceField
+  const tables = [...(column ? [column.definedOn] : []), ...(plain ? [table] : owner ? [owner] : [])]
   // Reached through a reference without a dictionary entry at hand: the names used for an update name decide.
-  const known = owner ? RECORD_NAMES.get(owner)?.[field] : [...RECORD_NAMES.values()].map((fields) => fields[field]).find((entry) => entry?.holds === 'update_name')
+  const known = tables.length ? tables.map((name) => RECORD_NAMES.get(name)?.[field]).find(Boolean) : [...RECORD_NAMES.values()].map((fields) => fields[field]).find((entry) => entry?.holds === 'update_name')
   if (!known) return null
   // Beside the field, under the same prefix: "upgrade_detail.target_name" has "upgrade_detail.file_name".
-  if (column?.sourceField) return { path: path.slice(0, path.length - field.length) + known.key, holds: known.holds }
-  return { path: path.includes('.') ? `${path.slice(0, path.lastIndexOf('.'))}.${known.key}` : known.key, holds: known.holds }
+  if (column?.sourceField) return { ...known, path: path.slice(0, path.length - field.length) + known.key }
+  return { ...known, path: path.includes('.') ? `${path.slice(0, path.lastIndexOf('.'))}.${known.key}` : known.key }
+}
+
+/**
+ * What the definition of a database view says about one of its fields where the dictionary entry is not at hand:
+ * the table the field comes from and its name there. Enough to tell a payload, the name of a record of another
+ * table and the value of a system property. undefined for a field of no joined table.
+ */
+export function viewField(members: Array<{ table: string; prefix: string }>, key: string): Column | undefined {
+  const member = members.filter(({ prefix }) => key.startsWith(`${prefix}_`)).sort((a, b) => b.prefix.length - a.prefix.length)[0]
+  if (!member) return undefined
+  return { name: key, label: '', type: '', reference: null, mandatory: false, readOnly: false, maxLength: null, active: true, choice: false, definedOn: member.table, sourceField: key.slice(member.prefix.length + 1) }
+}
+
+/** Whether a table that is named in a row may be read: what the row says, taken as the name of a table. */
+export async function isClosedTableName(ctx: Context, name: string): Promise<boolean> {
+  const table = name.toLowerCase()
+  return !isTableName(table) || (await ctx.closed.reason(table)) !== null
 }
 
 /** Elements that hold records and are none themselves. */
@@ -282,51 +354,98 @@ const SECTIONS: Array<[start: string, end: string]> = [
   ['<!--', '-->'],
   ['<?', '?>'],
 ]
+/** A payload that names more tables than this is not looked at table by table: it is taken for one that cannot be judged. */
+const MAX_PAYLOAD_TABLES = 40
+const TAG = new RegExp(String.raw`<(\/?)([A-Za-z_][\w.:-]*)(${ATTRIBUTES})\s*(\/?)>`, 'y')
+const ATTRIBUTE = /([\w:.-]+)\s*=\s*(?:"([^"]*)"|'([^']*)')/g
+const ENTITIES: Record<string, string> = { '&lt;': '<', '&gt;': '>', '&quot;': '"', '&apos;': "'", '&amp;': '&' }
+
+/** A tag name as the name of a table: in small letters, without a prefix, or null if it can be none. */
+const asTable = (name: string): string | null => {
+  const plain = name.slice(name.lastIndexOf(':') + 1).toLowerCase()
+  return /^[a-z0-9_]{1,80}$/.test(plain) ? plain : null
+}
 
 /**
- * The tables of the records a payload carries: the table named on its root, and every element that has an action
- * on it. Measured on 150 captured changes: 127 carried more than one such element, the record itself and what was
- * removed along with it.
+ * The tables of the records a payload carries. An empty list means that it cannot be told: the payload names no
+ * table, or more than can be looked at.
+ *
+ * Two signs are read wherever they stand, also inside a CDATA section and in markup that is written with
+ * entities: the table named on a "record_update", and every element that has an action on it. Measured: a linked
+ * application file carries the record it links to as a whole payload inside a CDATA section. And measured on 150
+ * captured changes: 127 carried more than one element with an action, the record itself and what was removed
+ * along with it.
+ *
+ * The third sign is the place of an element. Measured: a deleted or an archived record is stored under an element
+ * that carries the name of its table and nothing else, and a captured change under a wrapper. So the outermost
+ * element counts, and every element that stands directly inside a wrapper, whether it says what was done to it or
+ * not. That is read from the markup of the payload itself only: inside a CDATA section stands the text of a
+ * field, which can be a web page.
+ *
+ * Read in passes that cost the length of the text: see finder(). An attribute value may hold ">", so attributes
+ * are read as such and not skipped up to the next ">".
  */
 export function payloadTables(text: string): string[] {
   const names = new Set<string>()
-  const root = /<record_update\s[^<>]*?(?<![\w-])table\s*=\s*["']([a-z0-9_]{1,80})["']/.exec(text)?.[1]
-  if (root) names.add(root)
-  for (const match of text.matchAll(/<([a-z0-9_]{1,80})\s[^<>]*?(?<![\w-])action\s*=\s*["']/g)) names.add(match[1])
-  // Measured: a deleted or an archived record is stored under an element that carries the name of its table and
-  // nothing else, and a captured change under a wrapper. So the outermost element counts, and every element that
-  // stands directly inside a wrapper, whether it says what was done to it or not.
-  // Read in one pass that costs the length of the text: see finder(). An attribute value may hold ">", so
-  // attributes are read as such and not skipped up to the next ">".
-  const open: string[] = []
-  const ends = SECTIONS.map(([, end]) => finder(text, end))
-  const TAG = /<(\/?)([A-Za-z_][\w.-]*)(?:\s+[\w:.-]+(?:\s*=\s*(?:"[^"]*"|'[^']*'))?)*\s*(\/?)>/y
-  scan: for (let at = text.indexOf('<'); at >= 0; at = text.indexOf('<', at)) {
-    for (const [index, [start, end]] of SECTIONS.entries()) {
-      if (!text.startsWith(start, at)) continue
-      const close = ends[index](at + start.length)
-      // Not ended: the rest of the text is inside it.
-      if (close < 0) break scan
-      at = close + end.length
-      continue scan
+
+  /** Reads the tags of a text. "placed" also takes an element for a record by where it stands. */
+  const read = (source: string, placed: boolean): void => {
+    const open: string[] = []
+    // How many of the open elements are no wrapper: with none, the next element is a record.
+    let inside = 0
+    const ends = SECTIONS.map(([, end]) => finder(source, end))
+    scan: for (let at = source.indexOf('<'); at >= 0; at = source.indexOf('<', at)) {
+      if (placed) {
+        for (const [index, [start, end]] of SECTIONS.entries()) {
+          if (!source.startsWith(start, at)) continue
+          const close = ends[index](at + start.length)
+          // Not ended: the rest of the text is inside it.
+          if (close < 0) break scan
+          at = close + end.length
+          continue scan
+        }
+      }
+      TAG.lastIndex = at
+      const tag = TAG.exec(source)
+      if (!tag) {
+        at++
+        continue
+      }
+      at = TAG.lastIndex
+      const [, closing, name, attributes, empty] = tag
+      const table = asTable(name)
+      const element = table ?? name
+      if (closing) {
+        // Up to the element this tag ends: one that was never ended inside it ends with it.
+        const index = open.lastIndexOf(element)
+        if (index >= 0) for (const gone of open.splice(index)) if (!PAYLOAD_WRAPPERS.has(gone)) inside--
+        continue
+      }
+      let acted = false
+      for (const [, key, double, single] of attributes.matchAll(ATTRIBUTE)) {
+        const attribute = key.toLowerCase()
+        if (attribute === 'action') acted = true
+        const named = attribute === 'table' && element === 'record_update' ? asTable(double ?? single ?? '') : null
+        if (named) names.add(named)
+      }
+      if (table && !PAYLOAD_WRAPPERS.has(table) && (acted || (placed && inside === 0))) names.add(table)
+      if (placed && !empty) {
+        open.push(element)
+        if (!PAYLOAD_WRAPPERS.has(element)) inside++
+      }
     }
-    TAG.lastIndex = at
-    const tag = TAG.exec(text)
-    if (!tag) {
-      at++
-      continue
-    }
-    at = TAG.lastIndex
-    const [, closing, name, empty] = tag
-    if (closing) {
-      open.pop()
-      continue
-    }
-    if (open.every((parent) => PAYLOAD_WRAPPERS.has(parent)) && /^[a-z0-9_]{1,80}$/.test(name)) names.add(name)
-    if (!empty) open.push(name)
   }
-  for (const wrapper of PAYLOAD_WRAPPERS) names.delete(wrapper)
-  return [...names]
+
+  read(text, true)
+  // Once more without regard to sections, for what stands inside them, and for markup written with entities.
+  read(text, false)
+  let decoded = text
+  // "&amp;lt;" is markup that was written with entities twice.
+  for (let round = 0; round < 3 && /&(?:amp;)*lt;/.test(decoded); round++) {
+    decoded = decoded.replace(/&(?:lt|gt|quot|apos|amp);/g, (entity) => ENTITIES[entity])
+    read(decoded, false)
+  }
+  return names.size > MAX_PAYLOAD_TABLES ? [] : [...names]
 }
 
 /**
@@ -407,15 +526,30 @@ export function mayBePropertyValue(column: Column | undefined, path: string): bo
   return isPropertyValue(column) || (!column?.type && /\.value$/.test(path))
 }
 
+/** How a field is called that hands out the value of a system property, where nothing but its name is at hand. */
+const NAMED_LIKE_A_VALUE = /(?:^|_)value$/
+/** The same for a field that carries a whole record, or the comparison of two. */
+export const NAMED_LIKE_A_PAYLOAD = /(?:^|_)payload(?:_diff)?$/
+
+export interface PropertyValues {
+  /** Whether a field of the table hands out the value of a system property, or may. */
+  has(field: string): boolean
+  /** Whether the table hands out such values at all, or may. */
+  any: boolean
+}
+
 /**
- * The names under which a table hands out the value of a system property: its
- * own "value", or "<prefix>_value" where a database view joins sys_properties.
- * Known from the definition of the view, also where the dictionary is not readable.
+ * The names under which a table hands out the value of a system property: its own "value", or "<prefix>_value"
+ * where a database view joins sys_properties. Known from the definition of the view, also where the dictionary
+ * is not readable. Where the definition is not readable either, what the table is cannot be told, and every field
+ * that is named like such a value counts: a view of system properties could not be ruled out.
  */
-export async function propertyValueFields(ctx: Context, table: string): Promise<Set<string>> {
-  if (table === 'sys_properties') return new Set(['value'])
-  const info = await ctx.dict.table(table).catch(() => null)
-  return new Set((info?.members ?? []).filter((member) => member.table === 'sys_properties').map((member) => `${member.prefix}_value`))
+export async function propertyValueFields(ctx: Context, table: string): Promise<PropertyValues> {
+  if (table === 'sys_properties') return { has: (field) => field === 'value', any: true }
+  const info = await ctx.dict.table(table).catch(unlessNoConnection(null))
+  if (!info) return { has: (field) => NAMED_LIKE_A_VALUE.test(field), any: true }
+  const names = new Set((info.members ?? []).filter((member) => member.table === 'sys_properties').map((member) => `${member.prefix}_value`))
+  return { has: (field) => names.has(field), any: names.size > 0 }
 }
 
 export interface Guard {
@@ -426,6 +560,11 @@ export interface Guard {
   parsed: ParsedQuery
   /** Dictionary entries of the verified paths. Empty if the dictionary could not be used. */
   resolved: Map<string, Column>
+  /**
+   * The same, and for a field of a database view whose dictionary entry could not be read, what the definition
+   * of the view says: the table it comes from and its name there. For the checks that go by what a field holds.
+   */
+  described: Map<string, Column>
   /** The table and field each verified path takes its values from. */
   owners: FieldCheck['owners']
   warnings: string[]
@@ -460,7 +599,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
   }
 
   // A text search names no field and still reads fields: it goes through every check below.
-  if (!paths.length && !parsed.textSearch && !ctx.sn.restricted) return { fieldCheck: 'not needed: the call names no fields', query, parsed, resolved: new Map(), owners: new Map(), warnings }
+  if (!paths.length && !parsed.textSearch && !ctx.sn.restricted) return { fieldCheck: 'not needed: the call names no fields', query, parsed, resolved: new Map(), described: new Map(), owners: new Map(), warnings }
 
   // A child table of a closed table holds its rows. Refused before its fields are looked at: a hint about a
   // misspelled field would name them.
@@ -492,9 +631,17 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
       table,
     )
   }
+  // A field of a view whose dictionary entry could not be read is still a field of one of the tables the view
+  // joins: the definition of the view says which, and that decides what the field holds.
+  const shape = await ctx.dict.table(table).catch(unlessNoConnection(null))
+  const described = new Map(check.resolved)
+  for (const path of paths) {
+    const viaView = !described.has(path) && shape?.members ? viewField(shape.members, path) : undefined
+    if (viaView) described.set(path, viaView)
+  }
   // The other way round, a query on a parent answers with the rows of its child tables: those of closed ones are left
   // out by the gate every request passes through, which also says so in the answer.
-  const sent = await keepSecretsOutOfReach(ctx, table, query, parsed, check.resolved, warnings)
+  const sent = await keepSecretsOutOfReach(ctx, table, query, parsed, described, check.owners, warnings, !shape)
   refuseJournalConditions(table, parsed, check.resolved)
   warnAboutEmptyFields(parsed, check.resolved, warnings)
   await refuseChoiceLabels(ctx, table, parsed, check, warnings)
@@ -503,7 +650,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
 
   if (check.status === 'checked') {
     const fieldCheck = paths.length ? 'all field names verified against sys_dictionary' : 'not needed: the call names no fields'
-    return { fieldCheck, query: sent, parsed, resolved: check.resolved, owners: check.owners, warnings }
+    return { fieldCheck, query: sent, parsed, resolved: check.resolved, described, owners: check.owners, warnings }
   }
 
   // Not every name could be checked against the dictionary. What it did resolve was still checked for choice labels.
@@ -526,11 +673,11 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
         table,
       )
     }
-    return { fieldCheck: `field names verified against a row of the table, because ${why}`, query: sent, parsed, resolved: check.resolved, owners: check.owners, warnings }
+    return { fieldCheck: `field names verified against a row of the table, because ${why}`, query: sent, parsed, resolved: check.resolved, described, owners: check.owners, warnings }
   }
 
   if (probe.total === 0) {
-    return { fieldCheck: `not possible: ${why}, and the table has no rows to check against. An empty table answers every query with 0 rows.`, query: sent, parsed, resolved: check.resolved, owners: check.owners, warnings }
+    return { fieldCheck: `not possible: ${why}, and the table has no rows to check against. An empty table answers every query with 0 rows.`, query: sent, parsed, resolved: check.resolved, described, owners: check.owners, warnings }
   }
   // An ignored condition answers unfiltered, and an ignored field to count by answers with one group of all rows.
   if (parsed.fields.length || groupBy) {
@@ -541,7 +688,7 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
       table,
     )
   }
-  return { fieldCheck: `not possible: ${why}, and no row of the table is visible to check against`, query: sent, parsed, resolved: check.resolved, owners: check.owners, warnings }
+  return { fieldCheck: `not possible: ${why}, and no row of the table is visible to check against`, query: sent, parsed, resolved: check.resolved, described, owners: check.owners, warnings }
 }
 
 /**
@@ -557,7 +704,17 @@ export async function guardFields(ctx: Context, table: string, query: string, fi
  *
  * Returns the query to send.
  */
-async function keepSecretsOutOfReach(ctx: Context, table: string, query: string, parsed: ParsedQuery, resolved: Map<string, Column>, warnings: string[]): Promise<string> {
+async function keepSecretsOutOfReach(
+  ctx: Context,
+  table: string,
+  query: string,
+  parsed: ParsedQuery,
+  resolved: Map<string, Column>,
+  owners: FieldCheck['owners'],
+  warnings: string[],
+  /** true where the name could be read neither as a table nor as a view: a field is then judged by its name. */
+  unread = false,
+): Promise<string> {
   // The names of the records in a closed table are kept back from the answer. "Starts with A" on a reference into
   // that table compares with those names, and sorting by the reference orders the rows by them.
   if (ctx.sn.restricted) {
@@ -577,7 +734,7 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
 
   const compared = new Set([...parsed.otherFields, ...parsed.conditions.filter((condition) => !asksIfFilled(condition)).map(({ field }) => field)])
   if (ctx.sn.restricted) {
-    const named = [...compared].find((field) => recordNameKey(table, field, resolved.get(field)))
+    const named = [...compared].find((field) => recordNameKey(table, field, resolved.get(field), owners.get(field)?.table))
     if (named) {
       throw new ServiceNowError(
         `"${named}" holds the readable names of records of other tables, and tables are closed on this machine. It can be read, without the names of records in closed tables, ` +
@@ -600,7 +757,13 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
     if (payload) throw refuse(`"${payload.name}" holds whole records as text, secrets included`)
     // On sys_properties itself the properties that hold secrets are taken out of the query, below. Through a view
     // their type is not at hand.
-    if (table !== 'sys_properties' && (await propertyValueFields(ctx, table)).size) throw refuse('this view reads the values of system properties, and some of them are secrets')
+    if (table !== 'sys_properties' && (await propertyValueFields(ctx, table)).any) throw refuse('this view reads the values of system properties, and some of them are secrets')
+    // The name of a record behind a reference is found by the search as well, and some tables are named after
+    // records of other tables.
+    if (ctx.sn.restricted) {
+      const named = all.find((column) => column.reference && RECORD_NAMES.has(column.reference))
+      if (named) throw refuse(`it also finds records by the names behind their references: "${named.name}" points into ${named.reference}, whose rows carry the names of records of other tables`)
+    }
     // Measured: a text search finds a record by the name behind one of its references. A caller whose name stood in
     // no text field of an incident was found on all 8 of his incidents. So it is a way to try out names.
     if (ctx.sn.restricted) {
@@ -613,7 +776,7 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
   }
   if (!compared.size) return query
 
-  const whole = [...compared].find((field) => recordPayload(table, field, resolved.get(field)))
+  const whole = [...compared].find((field) => recordPayload(table, field, resolved.get(field)) ?? (unread && !resolved.has(field) && NAMED_LIKE_A_PAYLOAD.test(field)))
   if (whole) {
     throw validation(
       `"${whole}" holds whole records as text, with everything in them, secrets included. It can be read, with secrets taken out, but not searched or sorted by: ` +

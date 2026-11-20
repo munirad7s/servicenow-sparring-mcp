@@ -26,6 +26,32 @@ export interface ClosedTables extends Gate {
 
 /** Comments, work notes and the like: their entries are rows of another table. */
 const JOURNALS = new Set(['journal', 'journal_input', 'journal_list'])
+/** Fields that store the sys_id of an attachment. Measured: their display value is the name of its file. */
+const ATTACHMENTS = new Set(['file_attachment', 'audio', 'video'])
+/**
+ * Kinds of fields whose display value names no record of another table. Measured on one instance, for each of
+ * its 167 kinds of fields: 35 show something other than they store. For those listed here that is a label, a
+ * date in another form, a number with its unit, or the path of an image. A kind that is not listed and has no
+ * table it points to is not shown while tables are closed: a condition shows the names behind the sys_ids it
+ * holds, and what a kind that was not measured shows is not known.
+ */
+const SHOWS_ITSELF = new Set(
+  (
+    'string integer boolean GUID json table_name decimal float double longint long int numeric choice radio sys_class_name sys_class_code sys_class_path field_name short_field_name short_table_name ' +
+    'glide_date_time glide_date glide_time glide_duration glide_precise_time glide_utc_time due_date date datetime date_time calendar_date_time schedule_date_time integer_date integer_time timer time ' +
+    'day_of_week days_of_week month_of_year week_of_month repeat_type repeat_count counter auto_increment auto_number order_index percent_complete currency currency2 price ' +
+    'translated translated_text translated_field translated_html translate_field translatable_text html html_script html_template wiki_text markdown url email ph_number phone_number_e164 ip_addr ip_address ' +
+    'script script_plain script_server script_client email_script css XML color color_display bootstrap_color glyphicon Icon nds_icon image user_image workflow internal_type version hash char ' +
+    'string_full_utf8 string_full_utf_8 medium_text mediumtext wide_text multi_two_lines multi_small sysevent_name language api_version insert_timestamp json_translations graphql_schema formula'
+  ).split(' '),
+)
+/**
+ * Tables whose rows are copies of records of other tables, by the parent they are rows of. Measured: a linked
+ * application file (sys_metadata_link) carries the name of the record it links to as its own name, and the record
+ * as its payload. Read from its own table, the row says which table that record is of. Read as a row of the
+ * parent it does not, so while tables are closed the parent answers without these rows.
+ */
+const COPIES_BELOW: Record<string, string[]> = { sys_metadata: ['sys_metadata_link'] }
 
 /**
  * As long as a query may be once it is written into the address of a request. Measured: an instance took an
@@ -129,7 +155,7 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
 
   /** Whether a table that is open has a closed table below it, or may have one. */
   async function holdsClosedBelow(table: string): Promise<boolean> {
-    if ((await deniedBelow(table)).length > 0) return true
+    if (COPIES_BELOW[table]?.length || (await deniedBelow(table)).length > 0) return true
     const below = await allowedBelow(table)
     return below === null || below.unlisted || below.byParent.length > 0
   }
@@ -150,7 +176,7 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
     // Where the tables below cannot be listed, only the classes on the list are let through: that is all that can
     // be said, and a class on the list with a closed parent in between cannot be told. So nothing is sent.
     if (!listed) throw blocked(`Tables are closed on this machine, and the tables below "${table}" could not be listed, so it cannot be told which of its rows belong to a closed one.`, table)
-    const closed = [...new Set([...(await deniedBelow(table)), ...listed.byParent])].sort()
+    const closed = [...new Set([...(await deniedBelow(table)), ...listed.byParent, ...(COPIES_BELOW[table] ?? [])])].sort()
     if (closed.length) parts.push(`${field}NOT IN${closed.join(',')}^OR${field}ISEMPTY`)
     if (listed.unlisted) parts.push(sn.openClasses(field)!)
     return parts.length ? parts.join('^') : null
@@ -263,17 +289,18 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
       return sent
     },
 
-    async hidesNames(table, path) {
+    async hidesNames(table, path, shown = false) {
       if (!sn.restricted) return null
       const check = await dict.checkFields(table, [path])
       const column = check.resolved.get(path)
       // Which table the name comes from is not known: the type could not be read, or the field can point anywhere.
       if (!column?.type || column.type === 'document_id') return 'untold'
       // The display value of a journal field is the text of its entries, which are rows of sys_journal_field.
-      const target = column.type === 'domain_id' ? 'domain' : JOURNALS.has(column.type) ? 'sys_journal_field' : column.reference
-      if (column.type !== 'reference' && column.type !== 'glide_list' && !target) return null
-      if (!target) return 'untold'
-      return (await mayHoldClosed(target)) ? 'closed' : null
+      const target = column.type === 'domain_id' ? 'domain' : JOURNALS.has(column.type) ? 'sys_journal_field' : ATTACHMENTS.has(column.type) ? 'sys_attachment' : column.reference
+      if (target) return (await mayHoldClosed(target)) ? 'closed' : null
+      if (column.type === 'reference' || column.type === 'glide_list') return 'untold'
+      // A comparison with text works on what such a field stores. What it shows is another matter.
+      return shown && !SHOWS_ITSELF.has(column.type) ? 'untold' : null
     },
   }
 }
