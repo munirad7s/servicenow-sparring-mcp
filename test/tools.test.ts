@@ -429,6 +429,14 @@ test('a view that lists the fields it takes from a table has no other field of t
     assert.ok(!lost.calls.some((entry) => entry.table === 'incident_caller' && /inc_state=1|ORDERBYDESCinc_state/.test(entry.query)), JSON.stringify(args))
   }
 
+  // A walk through a reference starts at a field of the view: that field is what the instance has to filter by.
+  const withCaller: Route = { table: 'sys_db_view_table_field', rows: ['number', 'state', 'caller_id'].map((field) => ({ view_table: MEMBER, field })) }
+  const walked = await connect(world(withCaller, dropped('inc_caller_id'), rows))
+  const lostWalk = await walked.call('sn_query', { table: 'incident_caller', query: 'inc_caller_id.name=Abel', fields: ['inc_number'] })
+  assert.equal(lostWalk.data.error, 'validation')
+  assert.match(lostWalk.data.message, /"inc_caller_id" is asked of "incident_caller"/)
+  assert.ok(!walked.calls.some((entry) => entry.table === 'incident_caller' && entry.query.includes('inc_caller_id.name')))
+
   // A field outside the list, and the instance drops the condition: refused, in a condition, a sort, a field to
   // count by and a field to return alike. Nothing but the question went to the view.
   for (const args of [{ query: 'inc_short_descriptionLIKEprinter' }, { query: 'ORDERBYinc_short_description' }, { groupBy: 'inc_short_description' }, { fields: ['inc_short_description'] }, { query: 'inc_caller_id.name=Abel' }]) {
