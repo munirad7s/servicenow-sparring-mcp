@@ -12,9 +12,16 @@
  *    the instance is asked directly with that key, because without it the rows
  *    it answers with are not the same from one request to the next.
  *
+ * 3. Rows. Whole rows are read both ways and compared cell by cell. A cell may
+ *    differ only where the server says so in the cell itself: a value it
+ *    withholds, a long text it cuts, a text it took a secret out of. With display
+ *    values it also keeps a time as it is stored, in UTC.
+ * 4. Counts per value, against the Aggregate API, read by pages as an agent would.
+ *
  * It only reads. It prints counts, and for a difference the field or the query
- * concerned, with sys_ids replaced. It ends with 1 if anything differs. Run it
- * with no table closed on the machine: a closed table changes totals on purpose.
+ * concerned, with sys_ids replaced, never a value. It ends with 1 if anything
+ * differs. Run it with no table closed on the machine: a closed table changes
+ * totals on purpose.
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -44,8 +51,8 @@ async function call(name: string, args: Data): Promise<{ data: Data; isError: bo
 // The second way to the instance: a plain GET, past everything the server does to a request.
 let direct = 0
 const authorization = settings.auth.kind === 'basic' ? `Basic ${Buffer.from(`${settings.auth.username}:${settings.auth.password}`).toString('base64')}` : `Bearer ${settings.auth.token}`
-async function get(table: string, params: Record<string, string | number>): Promise<{ status: number; total: string | null; rows: Row[] | null }> {
-  const url = new URL(`/api/now/table/${table}`, settings.instanceUrl)
+async function get(table: string, params: Record<string, string | number>, api = 'table'): Promise<{ status: number; total: string | null; rows: Row[] | null }> {
+  const url = new URL(`/api/now/${api}/${table}`, settings.instanceUrl)
   for (const [key, value] of Object.entries({ ...params, sysparm_exclude_reference_link: 'true' })) url.searchParams.set(key, String(value))
   direct++
   // No method is named: a request without one is a GET.
@@ -279,5 +286,118 @@ for (const [kind, value] of [...tally].sort((a, b) => b[1] - a[1])) console.log(
 console.log(`  ${String(wrong.length).padStart(5)}  difference(s)`)
 for (const line of wrong.slice(0, 40)) console.log(`         ${line}`)
 
+// ------------------------------------------------------------------------ rows
+
+/** Reads of whole rows: table, query, fields, and whether display values are asked for. */
+const READS: Array<[string, string, string[], boolean]> = [
+  ['incident', 'ORDERBYnumber', ['number', 'short_description', 'description', 'state', 'priority', 'caller_id', 'assignment_group', 'opened_at', 'active', 'sys_class_name', 'cmdb_ci', 'close_notes', 'watch_list', 'business_duration'], false],
+  ['incident', 'ORDERBYnumber', ['number', 'state', 'priority', 'caller_id', 'assignment_group', 'opened_at', 'active', 'caller_id.name', 'assignment_group.manager'], true],
+  ['sys_script', 'collection=incident^ORDERBYname', ['name', 'collection', 'when', 'order', 'condition', 'script', 'filter_condition', 'active', 'sys_scope', 'sys_package'], false],
+  ['sys_script', 'collection=task^ORDERBYname', ['name', 'when', 'order', 'sys_scope', 'sys_package', 'sys_updated_by'], true],
+  ['sys_script_include', 'ORDERBYname', ['name', 'api_name', 'script', 'client_callable', 'access', 'sys_policy'], false],
+  ['sys_dictionary', 'name=incident^ORDERBYelement', ['name', 'element', 'internal_type', 'reference', 'max_length', 'mandatory', 'default_value', 'attributes', 'reference_qual', 'calculation'], false],
+  ['sys_properties', 'ORDERBYname', ['name', 'value', 'type', 'description', 'is_private'], false],
+  ['sys_properties', 'typeINpassword,password2', ['name', 'value', 'type'], false],
+  ['sys_user', 'ORDERBYuser_name', ['user_name', 'name', 'email', 'active', 'user_password', 'last_login_time', 'department', 'roles'], false],
+  ['sys_update_xml', 'ORDERBYDESCsys_updated_on', ['name', 'type', 'target_name', 'action', 'update_set', 'payload', 'sys_created_by'], false],
+  ['sys_update_xml', 'type=System Property^ORDERBYname', ['name', 'target_name', 'payload'], false],
+  ['sys_update_version', 'ORDERBYDESCsys_created_on', ['name', 'state', 'source_table', 'source', 'payload'], false],
+  ['sys_security_acl', 'nameSTARTSWITHincident^ORDERBYname', ['name', 'operation', 'type', 'condition', 'script', 'advanced', 'active'], false],
+  ['sys_ui_policy', 'table=incident^ORDERBYshort_description', ['short_description', 'conditions', 'on_load', 'reverse_if_false', 'script_true', 'run_scripts'], false],
+  ['sysevent_email_action', 'collection=incident^ORDERBYname', ['name', 'event_name', 'condition', 'recipient_fields', 'message_html', 'subject'], false],
+  ['sys_choice', 'name=incident^element=state^ORDERBYsequence', ['name', 'element', 'value', 'label', 'language', 'sequence', 'inactive'], false],
+  ['kb_knowledge', 'ORDERBYnumber', ['number', 'short_description', 'text', 'workflow_state', 'author', 'kb_knowledge_base'], false],
+  ['sys_db_object', 'nameSTARTSWITHincident^ORDERBYname', ['name', 'label', 'super_class', 'super_class.name', 'is_extendable', 'sys_scope.scope'], false],
+  ['task_sla', 'ORDERBYDESCsys_created_on', ['task', 'sla', 'stage', 'has_breached', 'percentage', 'business_duration', 'start_time'], true],
+  ['sys_audit_delete', 'ORDERBYDESCsys_created_on', ['tablename', 'display_value', 'payload'], false],
+  ['sys_email', 'ORDERBYDESCsys_created_on', ['subject', 'recipients', 'type', 'body_text'], false],
+  ['oauth_entity', '', ['name', 'client_id', 'client_secret', 'type'], false],
+  ['sys_auth_profile_basic', '', ['name', 'username', 'password'], false],
+  ['discovery_credentials', '', ['name', 'type', 'user_name', 'password'], false],
+]
+const STORED_TIME = /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2})?$/
+const cells = new Map<string, number>()
+const altered: string[] = []
+let compared = 0
+for (const [table, query, names, display] of READS) {
+  const mine = await call('sn_query', { table, query, fields: names, limit: 15, ...(display ? { displayValue: true } : {}) })
+  if (mine.isError) {
+    // A table or a field this instance lacks, or one this account may not read, is no finding about the server.
+    cells.set('reads left out: the table or a field is not there, or not readable', (cells.get('reads left out: the table or a field is not there, or not readable') ?? 0) + 1)
+    continue
+  }
+  // Asked directly with the query the answer names, so that both ways read the same rows.
+  const theirs = await get(table, { sysparm_query: String(mine.data.query), sysparm_fields: names.join(','), sysparm_limit: 15, ...(display ? { sysparm_display_value: 'all' } : {}) })
+  const rows = mine.data.records as Data[]
+  if (theirs.status !== 200 || !theirs.rows) {
+    altered.push(`${table}: the instance refuses the read when asked directly (HTTP ${theirs.status})`)
+    continue
+  }
+  if (rows.length !== theirs.rows.length) altered.push(`${table}: ${rows.length} rows through the server, ${theirs.rows.length} directly`)
+  // With display values the server writes a cell as plain text where the stored and the shown value are the same.
+  const shape = (cell: any) => (cell && typeof cell === 'object' ? { value: cell.value ?? '', display: cell.display_value ?? cell.display ?? cell.value ?? '' } : display ? { value: cell ?? '', display: cell ?? '' } : cell)
+  for (let index = 0; index < Math.min(rows.length, theirs.rows.length); index++) {
+    for (const name of names) {
+      // A field the instance itself leaves out of a row is left out of both.
+      if (!(name in theirs.rows[index]) && !(name in rows[index])) continue
+      compared++
+      const [mineCell, theirCell] = [shape(rows[index][name]), shape((theirs.rows[index] as Data)[name])]
+      if (JSON.stringify(mineCell) === JSON.stringify(theirCell)) continue
+      const shown = typeof rows[index][name] === 'string' ? (rows[index][name] as string) : JSON.stringify(rows[index][name] ?? null)
+      const kind = shown.startsWith('[withheld')
+        ? 'withheld, and marked in the cell'
+        : shown.includes('[withheld') || shown.includes('[cut here:')
+          ? 'a part withheld or cut, and marked in the cell'
+          : display && typeof mineCell === 'object' && mineCell.value === theirCell?.value && STORED_TIME.test(String(mineCell.value))
+            ? 'a time kept as it is stored, in UTC'
+            : ''
+      if (kind) cells.set(kind, (cells.get(kind) ?? 0) + 1)
+      else altered.push(`${table}.${name}: the cell differs and is not marked`)
+    }
+  }
+}
+console.log(`\nRows: ${READS.length} reads, ${compared} cells compared`)
+for (const [kind, value] of [...cells].sort((a, b) => b[1] - a[1])) console.log(`  ${String(value).padStart(5)}  ${kind}`)
+console.log(`  ${String(altered.length).padStart(5)}  difference(s)`)
+for (const line of [...new Set(altered)].slice(0, 40)) console.log(`         ${line}`)
+
+// ------------------------------------------------------------- counts per value
+
+const COUNTS: Array<[string, string, string]> = [
+  ['incident', 'priority', ''], ['incident', 'state', 'active=true'], ['incident', 'category', ''], ['incident', 'assignment_group', ''], ['incident', 'caller_id', 'active=true'], ['incident', 'made_sla', 'priority=1^NQpriority=2'],
+  ['task', 'sys_class_name', ''], ['sys_update_xml', 'type', ''], ['sys_update_xml', 'sys_created_by', ''], ['sys_update_xml', 'update_set', 'action=DELETE'], ['sys_script', 'collection', 'active=true'], ['sys_script', 'when', ''],
+  ['sys_dictionary', 'internal_type', 'name=task'], ['sys_db_object', 'super_class', ''], ['sys_security_acl', 'operation', ''], ['sys_properties', 'type', ''], ['sys_user', 'active', ''], ['cmdb_ci', 'sys_class_name', ''],
+  ['sys_update_version', 'source_table', ''], ['upgrade_history_task', 'upgrade_detail.disposition', ''], ['sys_choice', 'language', 'name=incident'],
+]
+let counted = 0
+let skipped = 0
+const miscounted: string[] = []
+for (const [table, groupBy, query] of COUNTS) {
+  const first = await call('sn_query', { table, groupBy, query, limit: 100 })
+  if (first.isError) {
+    skipped++
+    continue
+  }
+  const groups = [...(first.data.groups as Data[])]
+  // Read on by pages, as an agent would: every group has to come once.
+  for (let page = first.data; page.truncated && typeof page.nextOffset === 'number'; ) {
+    const next = await call('sn_query', { table, groupBy, query, limit: 100, offset: page.nextOffset })
+    if (next.isError) break
+    groups.push(...(next.data.groups as Data[]))
+    page = next.data
+  }
+  const theirs = await get(table, { sysparm_count: 'true', sysparm_group_by: groupBy, ...(query ? { sysparm_query: query } : {}) }, 'stats')
+  const want = new Map<string, number>(((theirs.rows ?? []) as Data[]).map((group) => [String(group.groupby_fields?.[0]?.value ?? ''), Number(group.stats?.count)]))
+  const got = new Map<string, number>(groups.map((group) => [String(group.value), Number(group.count)]))
+  const rowsInAll = [...want.values()].reduce((sum, value) => sum + value, 0)
+  const same = theirs.status === 200 && groups.length === want.size && got.size === want.size && [...want].every(([value, count]) => got.get(value) === count) && first.data.totalGroups === want.size && first.data.total === rowsInAll
+  if (same) counted++
+  else miscounted.push(`${table} per ${groupBy}${query ? ` where ${masked(query)}` : ''}: ${groups.length} groups read (${got.size} different), ${want.size} directly; total ${first.data.total}, directly ${rowsInAll}`)
+}
+console.log(`\nCounts per value: ${COUNTS.length - skipped}${skipped ? ` (${skipped} left out: not readable here)` : ''}`)
+console.log(`  ${String(counted).padStart(5)}  the same groups and counts as the Aggregate API, each group once`)
+console.log(`  ${String(miscounted.length).padStart(5)}  difference(s)`)
+for (const line of miscounted) console.log(`         ${line}`)
+
 console.log(`\n${sn.requestCount + direct} requests, all GET: ${sn.requestCount} by the server, ${direct} directly.`)
-process.exit(differences.length || wrong.length ? 1 : 0)
+process.exit(differences.length || wrong.length || altered.length || miscounted.length ? 1 : 0)

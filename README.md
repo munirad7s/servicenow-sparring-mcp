@@ -503,7 +503,7 @@ npm run typecheck
 npm run smoke         # end-to-end against the configured instance, read-only
 npm run call -- sn_schema '{"table":"incident","filter":"assign"}'
 npm run origin-check  # measures sn_origin on the configured instance, with about 1,200 requests for samples of 100
-npm run compare       # holds sn_schema and sn_query against the instance asked directly, about 1,500 requests
+npm run compare       # holds sn_schema and sn_query against the instance asked directly, about 1,300 requests
 ```
 
 `npm run smoke` drives the real server through an MCP client and exits with 1 if a check fails. It prints counts and
@@ -517,8 +517,10 @@ if anything differs. It reads the dictionary one table of the parent chain after
 field with what `sn_schema` says: type, reference, mandatory, read-only, length, deactivated, choice list, the
 table that defines it, and its label. And it sends a few hundred encoded queries to the Table API as they are and
 through `sn_query`: one the server passes on has to bring the same total and the same first rows, and the ones it
-refuses on purpose are counted apart. It prints counts, and for a difference the field or the query concerned.
-Run it with no table closed on the machine.
+refuses on purpose are counted apart. It reads whole rows both ways and compares them cell by cell: a cell may
+differ only where the server marks it, as withheld or as cut. And it holds counts per value against the Aggregate
+API, read by pages. It prints counts, and for a difference the field or the query concerned, never a value. Run it
+with no table closed on the machine.
 
 To check the verdicts of `sn_origin` by hand, let it write a sheet:
 
@@ -555,7 +557,10 @@ What was tested, and what was not:
   every property compared, and so did two earlier runs with other tables at random. Of 331 encoded queries, 311
   brought the same total and the same first rows as the Table API, 18 were refused as intended, and two went out
   with a condition added on purpose: a comparison on the value of a system property leaves out the properties
-  that hold a secret, and the answer says so. The first run showed one more difference, and it was the instance:
+  that hold a secret, and the answer says so. Of 2,019 cells in 24 reads of whole rows, 60 differed, each one
+  marked: 30 values withheld or cut, and 30 times that the server keeps as they are stored, in UTC, where the
+  instance shows them in the time zone of the account. 21 counts per value came out the same as the Aggregate
+  API, each group once. The first run showed one more difference, and it was the instance:
   rows that are equal in what a query sorts by change places between pages. A thousand captured changes read
   newest first, in ten pages, were 989 different rows. The server now sends the sys_id as the last sort key of
   every sorted query, and the same read brings a thousand.

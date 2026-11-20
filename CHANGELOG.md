@@ -35,8 +35,9 @@ answer; such changes are listed under "Changed".
   each field with what `sn_schema` says; and it sends a few hundred encoded queries both ways. On the test
   instance: 2,727 fields of 55 tables without a difference, and of 331 queries 311 with the same total and the
   same first rows, 18 refused as intended, two sent with a condition added on purpose (properties that hold a
-  secret). It ends with 1 if anything differs, so it can run before a release. Its first run found the rows that
-  change places between pages.
+  secret). It also reads whole rows both ways (2,019 cells: 60 differ, each marked as withheld, as cut, or as a
+  time kept in UTC) and counts per value (21 of 21 the same as the Aggregate API). It ends with 1 if anything
+  differs, so it can run before a release. Its first run found the rows that change places between pages.
 - **A list of counts that was cut did not say so.** `sn_delta` and `sn_upgrade_skips` list the thirty largest
   groups of `byType` (and `byDisposition`). Where there were more, the rest was left out without a word, and a sum
   over the list came out below `total`. Both now say how many groups there are, and `sn_delta` how many rows the
