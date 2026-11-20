@@ -1555,6 +1555,23 @@ test('sn_instance names the release, the account and what cannot be read', async
   const warnings = data.warnings.join(' ')
   assert.match(warnings, /sys_store_app \(acl; used by sn_plugins\)/)
   assert.match(warnings, /admin role and not snc_read_only/)
+  // No table "domain", and the property that changes what an unusable query returns is not set.
+  assert.deepEqual({ domains: data.domains, invalid: data.invalidQueryReturnsNoRows }, { domains: null, invalid: null })
+  assert.doesNotMatch(warnings, /domains|returns_no_rows/)
+})
+
+test('sn_instance names two settings that change what every answer means', async () => {
+  const { answer } = await connect([
+    { table: 'sys_properties', rows: [{ name: 'glide.war', value: 'glide-zurich-07-01-2025__patch1.zip' }, { name: 'glide.invalid_query.returns_no_rows', value: 'true' }] },
+    // The table exists only where domain separation is installed.
+    { table: 'domain', rows: [{ sys_id: '1' }], total: 7 },
+    ...sourceTables.map((table) => ({ table, rows: [{ sys_id: '1' }] })),
+  ])
+  const data = await answer('sn_instance')
+  assert.deepEqual({ domains: data.domains, invalid: data.invalidQueryReturnsNoRows }, { domains: 7, invalid: 'true' })
+  const warnings = data.warnings.join(' ')
+  assert.match(warnings, /separates its data into domains \(7 in the table "domain"\).*not a count over the whole instance/)
+  assert.match(warnings, /answers a condition it cannot use with no rows, not with all rows/)
 })
 
 test('sn_instance says so when the release property is hidden', async () => {

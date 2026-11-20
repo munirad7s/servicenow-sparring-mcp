@@ -9,6 +9,10 @@ This page lists what was measured, and what the server does about it. Each form 
 header was compared with the count of the unfiltered table and with the count of a correct form of the same
 condition. Other releases can behave differently; `test/query.test.ts` holds the same list as test cases.
 
+One setting changes the first table below. The system property `glide.invalid_query.returns_no_rows` was not set
+on that instance, which is the default. Set to `true`, it is documented to make a query the instance cannot use
+return no rows instead of all rows, though not in every case. `sn_instance` reports the property.
+
 ## Dropped: the instance answers as if the condition were not there
 
 | Form | Example | The server |

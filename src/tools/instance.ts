@@ -125,7 +125,8 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         'has been customized (captured customer updates, active store apps, custom apps, active plugins), whether the ' +
         'script sandbox is on, what the server knows about its own account (admin, read-only role), and which source ' +
         'tables this account can read. A source that is not readable means the tools depending on it cannot check ' +
-        'their part: report that as "could not be checked". The tool sends about 45 requests.',
+        'their part: report that as "could not be checked". It also says whether the instance separates data into ' +
+        'domains, which limits every answer to the domains of this account. The tool sends about 50 requests.',
       inputSchema: {},
       outputSchema: {
         ...sourceShape,
@@ -134,6 +135,14 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
           family: z.string().nullable(),
         }),
         scriptSandbox: z.string().nullable().describe('Value of glide.script.use.sandbox. null if it was not returned: hidden, or not set.'),
+        invalidQueryReturnsNoRows: z
+          .string()
+          .nullable()
+          .describe('Value of glide.invalid_query.returns_no_rows. "true" makes the instance answer a query it cannot use with no rows instead of all rows. null if not returned, which means the default: all rows.'),
+        domains: z
+          .number()
+          .nullable()
+          .describe('Rows in the table "domain". More than zero means domain separation: every answer is limited to the domains this account can see. null if the table does not exist (no domain separation) or cannot be read.'),
         lastUpgrade: upgradeShape.nullable().describe('Most recent platform upgrade of any kind. null if none is recorded or readable.'),
         lastFamilyUpgrade: upgradeShape.nullable().describe('Most recent change of release family among the last 30 upgrades.'),
         counts: z.object({
@@ -166,11 +175,11 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
         const sources: Record<string, string> = Object.fromEntries(probes.map(([table, result]) => [table, result.status]))
         const totalOf = (table: string) => probes.find(([name]) => name === table)?.[1].total ?? null
 
-        const [properties, upgrades, storeApps, scopeApps, plugins, account] = await Promise.all([
+        const [properties, upgrades, storeApps, scopeApps, plugins, account, domains] = await Promise.all([
           sn
             .query<{ name: string; value: string }>({
               table: 'sys_properties',
-              query: 'nameINglide.war,glide.script.use.sandbox',
+              query: 'nameINglide.war,glide.script.use.sandbox,glide.invalid_query.returns_no_rows',
               fields: ['name', 'value'],
               limit: 5,
             })
@@ -181,12 +190,24 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
           probe(sn, 'sys_scope', 'sys_class_name=sys_store_app^active=true'),
           probe(sn, 'v_plugin', 'active=active'),
           accountRoles(sn),
+          // The table exists only where domain separation is installed.
+          probe(sn, 'domain'),
         ])
 
         const build = properties?.get('glide.war') ?? null
         if (!properties) warnings.push('sys_properties could not be read, so the release is unknown.')
         else if (!build) warnings.push('The system property glide.war was not returned (hidden from this account, or not set), so the release is unknown.')
         if (!upgrades) warnings.push('sys_upgrade_history could not be read, so the upgrades are unknown.')
+
+        if ((domains.total ?? 0) > 0) {
+          warnings.push(
+            `This instance separates its data into domains (${domains.total} in the table "domain"). Rows and totals are those of the domains this account can see: ` +
+              'a count is not a count over the whole instance.',
+          )
+        }
+        if (properties?.get('glide.invalid_query.returns_no_rows') === 'true') {
+          warnings.push('glide.invalid_query.returns_no_rows is true: this instance answers a condition it cannot use with no rows, not with all rows. An unexpected zero can mean a condition was not understood.')
+        }
 
         const closed = SOURCES.filter(({ table }) => sources[table] !== 'readable')
         if (closed.length) {
@@ -205,6 +226,8 @@ export function registerInstanceTools(server: McpServer, ctx: Context) {
           ...source(sn, warnings),
           release: { build, family: build ? (/^glide-([a-z0-9]+)-/.exec(build)?.[1] ?? null) : null },
           scriptSandbox: properties?.get('glide.script.use.sandbox') ?? null,
+          invalidQueryReturnsNoRows: properties?.get('glide.invalid_query.returns_no_rows') ?? null,
+          domains: domains.status === 'readable' || domains.status === 'row_restricted' ? domains.total : null,
           lastUpgrade: pick(upgrades?.[0]),
           lastFamilyUpgrade: pick(upgrades?.find((upgrade) => upgrade.kind === 'family')),
           counts: {
