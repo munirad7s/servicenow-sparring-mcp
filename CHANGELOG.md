@@ -43,6 +43,11 @@ answer; such changes are listed under "Changed".
   name it would get and says so; where no record of the class carries a name, or the names follow another rule,
   the verdict stays `unknown` and the warning says which of the two it is. Such a call costs 6 requests, not 1.
 
+- **A list of counts that was cut did not say so.** `sn_delta` and `sn_upgrade_skips` list the thirty largest
+  groups of `byType` (and `byDisposition`). Where there were more, the rest was left out without a word, and a sum
+  over the list came out below `total`. Both now say how many groups there are, and `sn_delta` how many rows the
+  ones left out hold between them.
+
 ### Added
 
 - **`doctor` asks the instance whether it applies a condition on each field the functions filter by.** Four
@@ -60,10 +65,6 @@ answer; such changes are listed under "Changed".
   differs, so it can run before a release. Its first run found the rows that change places between pages.
   With `--closed <tables>` it starts a server on which a table is closed and tries every way round it, from what
   the instance itself says belongs to the table: 290 checks for four tables on the test instance, no finding.
-- **A list of counts that was cut did not say so.** `sn_delta` and `sn_upgrade_skips` list the thirty largest
-  groups of `byType` (and `byDisposition`). Where there were more, the rest was left out without a word, and a sum
-  over the list came out below `total`. Both now say how many groups there are, and `sn_delta` how many rows the
-  ones left out hold between them.
 
 ## 0.4.0 (2026-11-20)
 
