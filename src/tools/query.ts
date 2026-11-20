@@ -14,6 +14,7 @@ import {
   holdsSecret,
   isClosedRecord,
   JOURNAL_TYPES,
+  knowRecordTables,
   LOOKS_SECRET,
   mayBePropertyValue,
   payloadTables,
@@ -75,6 +76,15 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         if (await ctx.closed.reason(name)) return true
       }
       return false
+    }
+
+    // Which tables the update names of this page begin with is asked for the page as a whole.
+    if (restricted) {
+      const beside = (row: Row) => Object.keys(row).flatMap((key) => {
+        const nameOf = recordNameKey(table, key, known.get(key))
+        return nameOf?.holds === 'update_name' && nameOf.path in row ? [rawOf(row[nameOf.path])] : []
+      })
+      await knowRecordTables(ctx, rows.flatMap(beside))
     }
 
     const cleaned: Row[] = []

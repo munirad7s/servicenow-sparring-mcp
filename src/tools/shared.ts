@@ -1,7 +1,7 @@
 import type { Row, ServiceNowClient } from '../client.js'
 import type { ClosedTables } from '../closed.js'
 import type { Choice, Column, Dictionary, FieldCheck } from '../dictionary.js'
-import { noConnection, quoteInstanceText, ServiceNowError, validation } from '../errors.js'
+import { quoteInstanceText, ServiceNowError, unlessNoConnection, validation } from '../errors.js'
 import { assertFieldPath, isPlainValue, isTableName, parseEncodedQuery, withCondition, type Condition, type ParsedQuery } from '../query.js'
 
 export interface Context {
@@ -178,42 +178,73 @@ export function scrubSecrets(text: string): { text: string; withheld: number } {
 
 export const CLOSED_NAME = '[withheld: the record is in a table closed on this machine]'
 
-/** For a look-up that failed: a lost connection is passed on as it is, anything else is the value given. */
-const passOnNoConnection =
-  <T>(fallback: T) =>
-  (error: unknown): T => {
-    if (noConnection(error)) throw error
-    return fallback
+/** The longest update name an instance stores. A longer text is none. */
+const MAX_UPDATE_NAME = 250
+
+/**
+ * Every beginning of an update name that ends before an underscore and can be the name of a table, longest first.
+ * The name as a whole is none: something stands behind the table. A table name has at most eighty characters, so
+ * a name of any length costs a bounded number of cuts.
+ */
+function tableCuts(name: string): string[] {
+  const cuts: string[] = []
+  for (let at = name.lastIndexOf('_', 80); at > 0; at = name.lastIndexOf('_', at - 1)) {
+    const cut = name.slice(0, at)
+    if (isTableName(cut)) cuts.push(cut)
   }
+  return cuts
+}
+
+/** What stands before a generated sys_id at the end of an update name: the table, without a doubt. */
+const tableBeforeId = (name: string): string | undefined => /^(.+)_[0-9a-f]{32}$/.exec(name)?.[1]
+
+/**
+ * Asks in one go which beginnings of these update names are tables. isClosedRecord needs that for each name while
+ * a list names the only tables that may be read. A page of two hundred names shares most of its beginnings, so
+ * this is a handful of requests where asking name by name would be hundreds. Nothing is asked without such a list.
+ */
+export async function knowRecordTables(ctx: Context, updateNames: string[]): Promise<void> {
+  if (!ctx.sn.restricted || !ctx.sn.openClasses()) return
+  const cuts = updateNames.map((name) => name.toLowerCase()).filter((name) => name.length <= MAX_UPDATE_NAME).flatMap(tableCuts)
+  // A look-up that fails here fails again where the name is judged, and is dealt with there.
+  await ctx.dict.knownTables(cuts).catch(unlessNoConnection(null))
+}
 
 /**
  * true if an update name stands for a record of a table that is closed on this machine, or may stand for one. Such
- * a name begins with its table. Mostly the sys_id of the record follows, but not always, and a sys_id is not always
- * 32 hex digits, so every way to cut the name is looked at. The readable name of that record is then not passed on.
+ * a name begins with its table. Mostly the sys_id of the record follows, and then what stands before it is the
+ * table. Where something else follows, every way to cut the name is looked at. The readable name of that record is
+ * then not passed on.
  *
- * With a deny list, the closed tables are known by name: the record is in one if any cut gives one of them. With a
- * list of the only tables that may be read, the record has to be in a table that is found and open, and its table
- * is the longest beginning of the name that is a table: "sys_script_include_…" is no business rule. Where no table
+ * With a deny list, the closed tables are known by name: the record is in one if its table is one of them, or,
+ * where the table cannot be told, if any cut gives one. A name the list closes counts whether or not the instance
+ * still lists such a table. With a list of the only tables that may be read, the record has to be in a table that
+ * is found and open, and where the table cannot be told, every cut that is a table has to be open. Where no table
  * is found, or no name is given, the answer is yes.
+ *
+ * Measured: the instance compares a name without regard to case, so the name is judged in small letters.
  */
 export async function isClosedRecord(ctx: Context, updateName: string): Promise<boolean> {
   if (!ctx.sn.restricted) return false
-  if (!updateName) return true
-  const parts = updateName.split('_')
-  const cuts = Array.from({ length: parts.length }, (_, index) => parts.slice(0, parts.length - index).join('_')).filter(isTableName)
-  const denied = await ctx.dict.closedTables().catch(passOnNoConnection(null))
+  const name = updateName.toLowerCase()
+  if (!name || name.length > MAX_UPDATE_NAME) return true
+  const cuts = tableCuts(name)
+  const exact = tableBeforeId(name)
+  // "sys_script_include_<sys_id>" is no business rule: with a sys_id at the end only one cut is the table.
+  const candidates = exact && cuts.includes(exact) ? [exact] : cuts
+  if (candidates.some((table) => ctx.sn.denies(table))) return true
+  const denied = await ctx.dict.closedTables().catch(unlessNoConnection(null))
   if (!denied) return true
-  if (cuts.some((table) => denied.has(table))) return true
+  if (candidates.some((table) => denied.has(table))) return true
   if (!ctx.sn.openClasses()) return false
 
-  // The usual name ends in a generated sys_id, and what stands before it is the table.
-  const exact = /^(.+)_[0-9a-f]{32}$/.exec(updateName)?.[1]
-  for (const table of exact ? [exact] : cuts.slice(0, 4)) {
-    const info = await ctx.dict.table(table).catch(passOnNoConnection(undefined))
-    if (info === undefined) return true
-    if (info) return (await ctx.closed.reason(table)) !== null
+  const known = await ctx.dict.knownTables(candidates).catch(unlessNoConnection(null))
+  const tables = candidates.filter((table) => known?.has(table))
+  if (!tables.length) return true
+  for (const table of tables) {
+    if ((await ctx.closed.reason(table)) !== null) return true
   }
-  return true
+  return false
 }
 
 /**
@@ -558,7 +589,7 @@ async function keepSecretsOutOfReach(ctx: Context, table: string, query: string,
   }
   // A text search looks into fields the query does not name. Where one of them holds a secret, it is a way to probe it.
   if (parsed.textSearch) {
-    const columns = await ctx.dict.columnSet(table).catch(passOnNoConnection(null))
+    const columns = await ctx.dict.columnSet(table).catch(unlessNoConnection(null))
     const refuse = (why: string) => validation(`A text search looks into the fields of "${table}" without naming them, and ${why}. Filter on named fields instead. Nothing was sent.`, table)
     // Without the full list of fields there is no telling what the search would look into.
     if (!columns || columns.partial) throw refuse('the fields of this table could not be read completely, so it cannot be told whether one of them holds a secret')
@@ -767,7 +798,7 @@ async function refuseNamesInPlaceOfIds(ctx: Context, table: string, parsed: Pars
     for (let from = 0; from < odd.length; from += 40) {
       const group = odd.slice(from, from + 40)
       const query = group.length === 1 ? `sys_id=${group[0]}` : `sys_idIN${group.join(',')}`
-      const page = await ctx.sn.query<Row>({ table: target, query, fields: ['sys_id'], limit: group.length }).catch(passOnNoConnection(null))
+      const page = await ctx.sn.query<Row>({ table: target, query, fields: ['sys_id'], limit: group.length }).catch(unlessNoConnection(null))
       if (!page || page.total === null) {
         notLookedUp(group[0], 'it could not be checked whether a record has it')
         continue
@@ -777,7 +808,7 @@ async function refuseNamesInPlaceOfIds(ctx: Context, table: string, parsed: Pars
       // from this account, each value that did not come back is asked for by itself.
       const found = new Set(page.records.map((row) => String(row.sys_id ?? '').toLowerCase()))
       for (const item of group.filter((candidate) => !found.has(candidate.toLowerCase()))) {
-        const exists = group.length === 1 ? 0 : await ctx.sn.query<Row>({ table: target, query: `sys_id=${item}`, fields: ['sys_id'], limit: 1 }).then((one) => one.total, passOnNoConnection(null))
+        const exists = group.length === 1 ? 0 : await ctx.sn.query<Row>({ table: target, query: `sys_id=${item}`, fields: ['sys_id'], limit: 1 }).then((one) => one.total, unlessNoConnection(null))
         if (exists === 0) throw refuse(item)
         if (exists === null) notLookedUp(item, 'it could not be checked whether a record has it')
       }

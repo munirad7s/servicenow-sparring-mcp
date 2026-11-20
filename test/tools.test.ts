@@ -7,7 +7,7 @@ import { buildServer, createContext } from '../src/server.js'
 import { accountRoles } from '../src/tools/instance.js'
 import { queryByContent } from '../src/tools/origin.js'
 import { capturedByName, isClosedRecord, LOOKS_SECRET, payloadTables, scrubSecrets } from '../src/tools/shared.js'
-import { closedTables, column, dictionaryRoutes, fakeInstance, isProof, labelled, tableRow, type Route } from './fake.js'
+import { closedTables, column, dictionaryRoutes, fakeInstance, isProof, knownTables, labelled, tableRow, type Route } from './fake.js'
 
 type Data = Record<string, any>
 
@@ -1104,6 +1104,31 @@ test('a tool that walks a reference of its own is held to the closed tables like
   assert.equal(sentTo('upgrade_history_task').length + sentTo('upgrade_history_task', 'stats').length, 0)
 })
 
+test('the tables of a page of update names are asked for together, not name by name', async () => {
+  // With a list of the only tables that may be read, the table of each record has to be found. Two hundred names
+  // of dictionary entries share their beginnings: a handful of requests, where asking for each cut of each name
+  // was hundreds.
+  const rows = Array.from({ length: 200 }, (_, index) => ({ name: `sys_dictionary_incident_u_field_${index}`, type: 'Dictionary', target_name: `Field ${index}`, sys_created_by: 'abel', sys_updated_by: 'abel' }))
+  const world: Route[] = [
+    knownTables('sys_dictionary', 'incident'),
+    { table: 'sys_db_object', exact: 'name=sys_update_xml', rows: [tableRow('sys_update_xml', 'Update')] },
+    { table: 'sys_db_object', exact: 'name=sys_dictionary', rows: [tableRow('sys_dictionary', 'Dictionary')] },
+    { table: 'sys_db_object', query: '^ORname=sys_update_xml', rows: [tableRow('sys_update_xml', 'Update')] },
+    { table: 'sys_dictionary', query: 'nameINsys_update_xml', rows: [column('sys_update_xml', 'name'), column('sys_update_xml', 'target_name'), column('sys_update_xml', 'type'), column('sys_update_xml', 'sys_created_by'), column('sys_update_xml', 'sys_updated_by')] },
+    ...dictionaryRoutes,
+    { table: 'sys_update_xml', rows },
+    stats('sys_update_xml', { Dictionary: 200 }),
+  ]
+  const { answer, calls } = await connect(world, { tables: { allow: ['sys_*', 'incident', 'task'], deny: [] } })
+  const data = await answer('sn_delta', { limit: 200 })
+  assert.equal(data.updates.length, 200)
+  // The table is found and open, so the names stay.
+  assert.equal(data.updates[7].target_name, 'Field 7')
+  const asked = calls.filter((call) => call.table === 'sys_db_object' && /^nameIN[^^]*$/.test(call.query))
+  assert.ok(asked.length >= 1 && asked.length <= 3, `${asked.length} requests for the tables of 200 names`)
+  assert.ok(calls.length < 40, `${calls.length} requests in all`)
+})
+
 test('an update name is taken for a record of a closed table in every way it can be cut', async () => {
   const deny = (list: string[], closed: Route) => createContext(fakeInstance([closed, ...dictionaryRoutes], { tables: { allow: [], deny: list } }).sn)
   // With a deny list the closed tables are known by name, their child tables included.
@@ -1127,21 +1152,51 @@ test('an update name is taken for a record of a closed table in every way it can
   assert.equal(await isClosedRecord(noDictionary, NAME), true)
   // No name at all: which record it is cannot be told.
   assert.equal(await isClosedRecord(noUsers, ''), true)
+  // Measured: the instance compares a name without regard to case, so capitals are no way around the check.
+  assert.equal(await isClosedRecord(noUsers, `SYS_USER_${ID.toUpperCase()}`), true)
+  assert.equal(await isClosedRecord(noUsers, `Customer_Contact_${ID}`), true)
+  // A text that is no update name is not cut into ten thousand pieces.
+  const started = Date.now()
+  assert.equal(await isClosedRecord(noUsers, 'a_'.repeat(50_000)), true)
+  assert.ok(Date.now() - started < 500, `${Date.now() - started} ms`)
+
+  // With a sys_id at the end, what stands before it is the table: a script include is no business rule. Where
+  // something else follows, the table cannot be told, and any cut that is closed counts.
+  const noRules = deny(['sys_script'], closedTables(tableRow('sys_script', 'Business Rule', 'sys_metadata')))
+  assert.equal(await isClosedRecord(noRules, NAME), true)
+  assert.equal(await isClosedRecord(noRules, `sys_script_include_${ID}`), false)
+  assert.equal(await isClosedRecord(noRules, 'sys_script_include_my_util'), true)
+  // A name that cannot begin with a table is the record of no closed one.
+  assert.equal(await isClosedRecord(noRules, `My-App_${ID}`), false)
+
+  // A table the deny list names counts whether or not the instance still lists it: the captured changes of a
+  // table that was dropped are still there, with the names of its records.
+  const dropped = deny(['u_legacy_hr', 'u_old_*'], closedTables())
+  assert.equal(await isClosedRecord(dropped, `u_legacy_hr_${ID}`), true)
+  assert.equal(await isClosedRecord(dropped, 'u_old_bonus_schedule_x'), true)
+  assert.equal(await isClosedRecord(dropped, NAME), false)
 
   // With a list of the only tables that may be read, the table has to be found and be open.
-  const scripts: Route[] = ['sys_script', 'sys_script_include'].map((name) => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name, 'sys_metadata')] }))
-  const listed = createContext(fakeInstance([...scripts, ...dictionaryRoutes], { tables: { allow: ['incident', 'task', 'sys_script', 'sys_metadata', 'sys_d*', 'sys_c*'], deny: [] } }).sn)
+  const scripts: Route[] = ['sys_script', 'sys_script_include', 'sys_documentation', 'sys_dictionary'].map((name) => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name, 'sys_metadata')] }))
+  const world = [knownTables('incident', 'task', 'sys_script', 'sys_script_include', 'sys_documentation', 'sys_dictionary', 'customer_contact'), ...scripts, ...dictionaryRoutes]
+  const only = { tables: { allow: ['incident', 'task', 'sys_script', 'sys_metadata', 'sys_d*', 'sys_c*'], deny: [] } }
+  const listed = createContext(fakeInstance(world, only).sn)
   assert.equal(await isClosedRecord(listed, `incident_${ID}`), false)
   assert.equal(await isClosedRecord(listed, `customer_contact_${ID}`), true)
-  // The table of a record is the longest beginning of its name that is a table: a script include is no business rule.
   assert.equal(await isClosedRecord(listed, NAME), false)
   // Where it cannot be looked up what a name begins with, the record counts as closed.
-  const unreadable = createContext(fakeInstance([{ table: 'sys_db_object', exact: 'name=incident', status: 403 }, ...dictionaryRoutes], { tables: { allow: ['incident', 'task', 'sys_*'], deny: [] } }).sn)
+  const unreadable = createContext(fakeInstance([{ table: 'sys_db_object', query: 'nameIN', status: 403 }, ...dictionaryRoutes], { tables: { allow: ['incident', 'task', 'sys_*'], deny: [] } }).sn)
   assert.equal(await isClosedRecord(unreadable, `incident_${ID}`), true)
   assert.equal(await isClosedRecord(listed, `sys_script_include_${ID}`), true)
   assert.equal(await isClosedRecord(listed, 'sys_script_include_my_util'), true)
   // No table of that name is known to the instance: what the record is cannot be told.
   assert.equal(await isClosedRecord(listed, 'sys_no_such_table_x'), true)
+  // The table is found however many words follow it: a label and a dictionary entry are named after what they describe.
+  assert.equal(await isClosedRecord(listed, 'sys_documentation_incident_short_description_en'), false)
+  assert.equal(await isClosedRecord(listed, 'sys_dictionary_incident_u_my_custom_field'), false)
+  // A name that cannot begin with a table does not end the call with an error. It is the record of no open table.
+  assert.equal(await isClosedRecord(listed, `My-App_${ID}`), true)
+  assert.equal(await isClosedRecord(listed, `${'a'.repeat(81)}_${ID}`), true)
   // Where the list of closed tables cannot be established, every record counts as closed.
   const blind = createContext(fakeInstance([{ table: 'sys_db_object', status: 403 }], { tables: { allow: [], deny: ['sys_user'] } }).sn)
   assert.equal(await isClosedRecord(blind, NAME), true)
@@ -1251,6 +1306,12 @@ test('a record in a closed table is not read by the other tools either, and its 
   assert.equal(refused.data.error, 'blocked')
   assert.match(refused.data.message, /stands for a record in a table that is closed on this machine/)
   assert.equal(judged.sentTo('sys_metadata').length + judged.sentTo('sys_update_xml').length, 0)
+  // Measured: the instance finds "sys_script_…" under "SYS_SCRIPT_…" as well. Capitals are no way around it.
+  for (const name of [NAME.toUpperCase(), `Sys_Script_${ID}`]) {
+    const shouted = await judged.call('sn_origin', { updateName: name })
+    assert.equal(shouted.data.error, 'blocked', name)
+  }
+  assert.equal(judged.sentTo('sys_metadata').length + judged.sentTo('sys_update_xml').length + judged.sentTo('upgrade_history_task').length, 0)
 
   // Asked for by its sys_id, the table of application files is read without the rows of the closed table, so the
   // record is not found, and the answer says that rows were left out.

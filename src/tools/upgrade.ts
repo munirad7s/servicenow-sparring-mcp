@@ -6,7 +6,7 @@ import { UPGRADE_NOTES } from '../limitations.js'
 import { assertPlainValue } from '../query.js'
 import { clip, fail, labelOf, listing, listShape, ok, rawOf, tidy } from '../result.js'
 import { traced } from '../trace.js'
-import { capturedByName, CLOSED_NAME, errorKind, isClosedRecord, READ_ONLY, type Context } from './shared.js'
+import { capturedByName, CLOSED_NAME, errorKind, isClosedRecord, knowRecordTables, READ_ONLY, type Context } from './shared.js'
 
 /** Used only if the instance does not list its own disposition codes. The answer says when that happened. */
 export const FALLBACK_SKIPPED: Record<string, string> = {
@@ -296,6 +296,7 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
         const authors = await capturedByName(ctx, page.records.map((row) => rawOf(tidy(row)['upgrade_detail.file_name'])), (kind) =>
           warnings.push(`Who captured the changes to these records could not be read (sys_update_xml: ${kind}), so some entries carry no "capturedBy".`),
         )
+        await knowRecordTables(ctx, page.records.map((row) => rawOf(tidy(row)['upgrade_detail.file_name'])))
         const rows = await Promise.all(
           page.records.map(tidy).map(async (row) => ({
             file: rawOf(row['upgrade_detail.file_name']),

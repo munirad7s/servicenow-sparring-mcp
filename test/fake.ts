@@ -167,6 +167,11 @@ export const tableRow = (name: string, label: string, ...parents: string[]) => (
  */
 export const closedTables = (...rows: Row[]): Route => ({ table: 'sys_db_object', query: '^ORname=sys_db_object', rows: [...rows, tableRow('sys_db_object', 'Table')] })
 
+/** What an instance answers when it is asked which of some names are tables: the names that are. */
+export function knownTables(...names: string[]): Route {
+  return { table: 'sys_db_object', query: 'nameIN', rows: names.map((name) => ({ name })) }
+}
+
 /**
  * What an instance answers when it is asked for one table that extends another: the proof that this account can be
  * told what a table extends. The lists of child tables are trusted only after it.
@@ -188,6 +193,8 @@ export const dictionaryRoutes: Route[] = [
   ]),
   // No table of this small world is a child of a closed one, unless a test says so with a route of its own.
   closedTables(),
+  // Asked which of some names are tables, it lists the tables of this world.
+  knownTables('incident', 'task', 'sys_user', 'sys_script', 'sys_archive', 'sys_table_rotation', 'sys_properties', 'sys_choice', 'sys_documentation', 'sys_dictionary_override'),
   { table: 'sys_db_object', rows: [] },
   { table: 'sys_db_view', rows: [] },
   {
