@@ -281,7 +281,9 @@ export class Dictionary {
             check.owners.set(path, column.sourceField ? { table: column.definedOn, field: column.sourceField } : { table: current, field: segment })
           } else if (column.type !== 'reference' || !column.reference) {
             const why = column.reference ? `a list of references (${column.type})` : `of type ${column.type || 'unknown'}`
-            check.unknown.push({ field: path, table: current, segment, reason: `"${segment}" is ${why}, not a single reference, so it cannot be dot-walked`, suggestions: [] })
+            // Measured on lists with one entry: =, IN, LIKE and CONTAINS with the sys_id all find the row. LIKE also finds it among others.
+            const instead = column.reference ? `; to find the rows that list a record, compare the list with its sys_id: ${segment}LIKE<sys_id>` : ''
+            check.unknown.push({ field: path, table: current, segment, reason: `"${segment}" is ${why}, not a single reference, so it cannot be dot-walked${instead}`, suggestions: [] })
             break
           } else {
             current = column.reference

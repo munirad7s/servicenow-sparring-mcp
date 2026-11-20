@@ -242,6 +242,16 @@ test('a text search needs a word, and nothing is joined to it with ^OR', () => {
   assert.deepEqual(fieldsInEncodedQuery('123TEXTQUERY321=printer^priority=1^ORpriority=2'), ['priority'])
 })
 
+test('a refusal says where the question can be asked instead', () => {
+  // Forms that reach into another table: the field names in them cannot be checked against this table's dictionary.
+  assert.throws(() => fieldsInEncodedQuery('RLQUERYtask_sla.task,>=1^ENDRLQUERY'), /RLQUERY asks about the records of another table.*Query that table itself/)
+  assert.throws(() => fieldsInEncodedQuery('active=true^JOINincident.sys_id=task_sla.task!active=true'), /JOIN asks about the records of another table/)
+  // Tags and catalog variables are rows of tables of their own. Both were looked up on an instance.
+  assert.throws(() => fieldsInEncodedQuery('sys_tags.abc=abc'), /A tag on a record is a row of the table label_entry: table=<table>\^table_key=<sys_id of the record>\^label\.name=<tag>/)
+  assert.throws(() => fieldsInEncodedQuery('variables.abc=1'), /a row of sc_item_option_mtom/)
+  assert.throws(() => fieldsInEncodedQuery('assigned_toDYNAMIC90d1921e5f510100a9ad2572f2b477fe'), /look up the sys_id it stands for and compare with = or IN/)
+})
+
 test('a refusal names the term and how to write it', () => {
   assert.throws(() => fieldsInEncodedQuery('close_notesLIKE'), /needs a value.*ISEMPTY/)
   assert.throws(() => fieldsInEncodedQuery('active=true^GROUPBYstate'), /groupBy input/)

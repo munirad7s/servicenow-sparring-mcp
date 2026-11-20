@@ -71,7 +71,7 @@ test('dot-walks are followed through single references only', async () => {
   assert.match((await dict.checkFields('incident', ['caller_id.phone'])).unknown[0].reason, /not a field of "sys_user"/)
   assert.match((await dict.checkFields('incident', ['category.name'])).unknown[0].reason, /of type string, not a single reference/)
   // ServiceNow drops a condition that walks through a list field, although the field names a table.
-  assert.match((await dict.checkFields('incident', ['watch_list.email'])).unknown[0].reason, /list of references \(glide_list\)/)
+  assert.match((await dict.checkFields('incident', ['watch_list.email'])).unknown[0].reason, /list of references \(glide_list\).*compare the list with its sys_id: watch_listLIKE<sys_id>/)
 })
 
 test('"ref_<child>" reaches a field of a child table', async () => {

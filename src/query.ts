@@ -63,7 +63,7 @@ type Operator = (typeof OPERATORS)[number]
 /** Operators ServiceNow knows but that cannot give a trustworthy answer here. Checked before OPERATORS. */
 const REFUSED: Array<[string, string]> = [
   ['IN_HIERARCHY_DYNAMIC', 'it runs a script stored on the instance'],
-  ['DYNAMIC', 'it runs a script stored on the instance'],
+  ['DYNAMIC', 'it runs a script stored on the instance; look up the sys_id it stands for and compare with = or IN'],
   ['VALCHANGES', 'it compares with the previous value of a record, which exists only inside a business rule; here it matches nothing'],
   ['CHANGESFROM', 'it compares with the previous value of a record, which exists only inside a business rule; here it matches nothing'],
   ['CHANGESTO', 'it compares with the previous value of a record, which exists only inside a business rule; here it matches nothing'],
@@ -84,6 +84,14 @@ const NO_VALUE = new Set<Operator>(['ISEMPTY', 'ISNOTEMPTY', 'ISEMPTYSTRING', 'A
 const EMPTY_VALUE_ALLOWED = new Set<Operator>(['=', '!='])
 /** Tags and catalog variables are addressed like fields, but they are not in the dictionary and cannot be checked. */
 const NOT_IN_DICTIONARY = /(?:^|\.)(sys_tags|variables)(?:\.|$)/
+/** Where the same question can be asked in a form that can be checked. Both tables and their fields were looked up on an instance. */
+const WHERE_INSTEAD: Record<string, string> = {
+  sys_tags: 'A tag on a record is a row of the table label_entry: table=<table>^table_key=<sys_id of the record>^label.name=<tag>',
+  variables:
+    'The value of a catalog variable is a row of sc_item_option_mtom: request_item=<sys_id of the requested item>, with the question in sc_item_option.item_option_new.name and the answer in sc_item_option.value',
+}
+/** Query forms that reach into another table. Their field names cannot be checked against the dictionary of the queried one. */
+const OTHER_TABLE = /^(RLQUERY|ENDRLQUERY|JOIN|SUBQUERY|ENDSUBQUERY|TRENDBY|HAVING)/
 const RELATIVE = new Set<Operator>(['RELATIVEGT', 'RELATIVELT', 'RELATIVEGE', 'RELATIVELE', 'RELATIVEEE'])
 const PLAIN_FIELD = new Set<Operator>(['GT_FIELD', 'LT_FIELD', 'GT_OR_EQUALS_FIELD', 'LT_OR_EQUALS_FIELD'])
 
@@ -223,7 +231,12 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
   parsed.escapedCaret = query.includes('^^')
   const inDictionary = (path: string, raw: string) => {
     const special = NOT_IN_DICTIONARY.exec(path)
-    if (special) throw unsupported(raw, `${special[1]} is not sent, because it is addressed like a field but is not in the dictionary, so its use cannot be checked`)
+    if (special) {
+      throw unsupported(
+        raw,
+        `${special[1]} is not sent, because it is addressed like a field but is not in the dictionary, so its use cannot be checked. ${WHERE_INSTEAD[special[1]]}`,
+      )
+    }
     return path
   }
 
@@ -257,6 +270,10 @@ export function parseEncodedQuery(query: string, table?: string): ParsedQuery {
     }
 
     const match = FIELD_PREFIX.exec(term)
+    const other = OTHER_TABLE.exec(term)
+    if (other) {
+      throw unsupported(raw, `${other[1]} asks about the records of another table, whose field names cannot be checked here. Query that table itself: its rows that point to a record with <reference field>=<sys_id>, or counted per record with the groupBy input`)
+    }
     if (!match) throw unsupported(raw, 'it does not start with a lowercase field name')
     const [, field, rest] = match
     inDictionary(field, raw)
