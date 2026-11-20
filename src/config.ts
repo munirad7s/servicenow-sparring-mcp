@@ -162,9 +162,8 @@ function pick(env: Env): Record<string, string> {
 
 function readEnvFile(path: string): Record<string, string> {
   const text = readFileSync(path, 'utf8').replace(/^\uFEFF/, '')
-  const values = pick(parseEnv(text) as Env)
-  delete values.SERVICENOW_ENV_FILE
-  return values
+  // A SERVICENOW_ENV_FILE inside the file is not followed: the file to read is named by the environment alone.
+  return pick(parseEnv(text) as Env)
 }
 
 function isReadableFile(path: string): boolean {

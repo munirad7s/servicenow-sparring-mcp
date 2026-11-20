@@ -38,6 +38,15 @@ test('one huge value cannot flood the answer, even as the only row', () => {
   assert.match(warnings.join(' '), /cannot be read completely/)
 })
 
+test('the first row is always shown, however large: reading on would otherwise never get past it', () => {
+  // Sixty fields of 1,500 characters: no value is long enough to be cut, and the row is larger than an answer.
+  const row = Object.fromEntries(Array.from({ length: 60 }, (_, index) => [`u_field_${index}`, 'y'.repeat(1_500)]))
+  const warnings: string[] = []
+  assert.equal(clip([row], warnings).length, 1)
+  assert.equal(clip([row, row], warnings).length, 1)
+  assert.match(warnings.join(' '), /Only the first 1 of 2 fetched rows are shown/)
+})
+
 test('when rows are dropped, reading on continues right behind the last row shown', () => {
   const warnings: string[] = []
   const fetched = Array.from({ length: 200 }, (_, index) => ({ number: `INC${index}`, text: 'y'.repeat(1_500) }))

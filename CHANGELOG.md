@@ -13,6 +13,10 @@ answer; such changes are listed under "Changed".
   of every row it returns at the same moment. With more kinds of records among the rows it would be more, and an
   instance answers a burst with "too many requests". The limit is in the client now, for every request of every
   function: the same call stays at eight and takes no longer.
+- Four more rules without a test, found by a fifth run of single-line changes over 30 lines of the configuration,
+  the paging and the error texts: the first row of an answer is always shown, however large (reading on would
+  otherwise never get past it); a refusal by the instance counts as a login that worked; the roles of the account
+  are looked up only with a user name that can stand in a query; a user name without a password is named as that.
 
 ## 0.3.4 (2026-11-20)
 

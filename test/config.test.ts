@@ -40,6 +40,9 @@ test('refuses unsafe or incomplete configuration', () => {
   refused({ ...base, SERVICENOW_TABLE_DENY: 'sys_user, ../x' })
   refused({ ...base, SERVICENOW_TABLE_ALLOW: 'Incident' })
   refused({})
+  // Each says what is missing: a user name alone lacks its password, and nothing at all lacks credentials.
+  assert.throws(() => loadConfig({ SERVICENOW_INSTANCE_URL: base.SERVICENOW_INSTANCE_URL, SERVICENOW_USERNAME: 'reader' }), /SERVICENOW_PASSWORD is not set/)
+  assert.throws(() => loadConfig({ SERVICENOW_INSTANCE_URL: base.SERVICENOW_INSTANCE_URL }), /No credentials/)
 })
 
 test('http is allowed for a local test server only', () => {

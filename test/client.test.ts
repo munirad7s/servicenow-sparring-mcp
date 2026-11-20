@@ -405,6 +405,21 @@ test('no more than eight requests are with the instance at a time, however many 
   assert.equal((await failing.query({ table: 'incident' })).records.length, 0)
 })
 
+test('a refusal by the instance shows that it took the login: the requests behind it go side by side', async () => {
+  let now = 0
+  let most = 0
+  const sn = new ServiceNowClient(config, async (url) => {
+    most = Math.max(most, ++now)
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    now--
+    return String(url).includes('sys_user') ? json({ error: { message: 'User Not Authorized', detail: '' } }, 403) : json({ result: [] })
+  })
+  // Until the instance has taken the login once, requests go one at a time, so that a wrong password is tried once.
+  assert.equal(await kindOf(() => sn.query({ table: 'sys_user' })), 'acl')
+  await Promise.all(Array.from({ length: 6 }, () => sn.query({ table: 'incident' })))
+  assert.equal(most, 6)
+})
+
 test('every request carries a time limit', async () => {
   let signal: unknown
   const sn = new ServiceNowClient(config, async (_url, init) => {

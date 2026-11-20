@@ -4,6 +4,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import type { InstanceConfig } from '../src/config.js'
 import { buildServer, createContext } from '../src/server.js'
+import { accountRoles } from '../src/tools/instance.js'
 import { queryByContent } from '../src/tools/origin.js'
 import { capturedByName, isClosedRecord, LOOKS_SECRET, payloadTables, scrubSecrets } from '../src/tools/shared.js'
 import { closedTables, column, dictionaryRoutes, fakeInstance, labelled, tableRow, type Route } from './fake.js'
@@ -1353,6 +1354,16 @@ test('while tables are closed, a table whose fields cannot be read is not querie
 
   const open = await connect(world)
   assert.equal((await open.answer('sn_query', { table: 'incident', fields: ['number'] })).returned, 1)
+})
+
+test('the roles of the account are looked up only with a user name that can stand in a query', async () => {
+  const roles: Route = { table: 'sys_user_has_role', rows: [{ 'role.name': 'admin', 'user.user_name': 'reader' }] }
+  const fine = fakeInstance([roles])
+  assert.deepEqual(await accountRoles(fine.sn), { roles: 1, admin: true, readOnlyRole: false })
+  // A caret in the name would begin a second condition.
+  const odd = fakeInstance([roles], { auth: { kind: 'basic', username: 'reader^ORactive=true', password: 'secret' } })
+  assert.equal(await accountRoles(odd.sn), null)
+  assert.equal(odd.calls.length, 0)
 })
 
 test('a login the instance rejects is reported as that, also while tables are closed', async () => {
