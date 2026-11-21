@@ -36,7 +36,7 @@ export const listShape = {
     .describe('Rows matching on the server, before row-level access rules. Not the number of rows this account can see. null if unknown.'),
   returned: z.number().describe('Rows in this answer.'),
   offset: z.number(),
-  truncated: z.boolean().describe('true if more rows match than this answer holds.'),
+  truncated: z.boolean().describe('true if more rows match than this answer holds. Where the rows were not counted: true if the page is full, so that more can match.'),
   nextOffset: z.number().optional().describe('Pass as offset to read on.'),
 }
 

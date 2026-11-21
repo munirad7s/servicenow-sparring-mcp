@@ -306,6 +306,14 @@ Also measured:
   smaller than on the views: 0.5 seconds against 0.1 for 1.2 million rows, 4.5 against 1.0 for 3.5 million. So the server asks
   "does a row come back" without the count, takes no total from such an answer, and asks with the count only
   where no row came back, because the one row can be hidden from the account while the count says that it is there.
+- What the count costs on ordinary reads of twenty rows, twice each: on a table of 3.5 million rows, the newest
+  twenty 0.9 to 1.0 seconds with the count and 0.1 to 0.3 without; filtered by one field and sorted, 5 and 37
+  seconds against 2.5; searched for a word, 14 and 15 against 7; on a table of 470,000 rows with a filter, 0.6
+  and 2.6 against 0.45; on the largest view, four million rows, 10 to 10.6 against 0.1 to 0.25, sorted or not.
+  A filter that leaves 12,000 of 1.2 million rows, one that leaves 28 of 300,000, and a table of 16,000 rows
+  took the same either way. `sn_query` reads without the count where it is called with `count: false`, and
+  through the whole server such a read of the largest view took 1.6 to 3.2 seconds from the start of the
+  process, against 12.
 - What the rule for secret names takes out of real text is mostly no secret. 24,811 texts were read through it,
   70 million characters: every captured change, 3,000 versions, and up to sixty rows of each of 650 fields of a
   script, XML or JSON type on 446 tables. It changed 982 of them, in 3,601 places. 3,345 of those were one

@@ -3,6 +3,26 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## Unreleased
+
+### Added
+
+- **`sn_query` can read rows without counting how many match: `count: false`.** The Table API counts every row
+  that matches for each request, also where twenty are asked for, and on a large table or view that count is
+  what takes long. Measured on the test instance, twenty rows each time: of a view of four million rows 10.5
+  seconds with the count and 0.1 without; of a table of 3.5 million rows filtered by one field 5 to 37 seconds
+  and 2.5; searched for a word 14 and 7. The answer then has no total. `truncated` says only that the page is
+  full, and a page with fewer rows is no proof that none follow for an account that is not shown every row:
+  the answer says so, and where no row came back it says that this is not "none matches". A counted read that
+  does not come in time names the count as what often takes long.
+
+### Changed
+
+- The proof that a table applies a condition on the class of a row asks for one row that has a class, and no
+  longer for how many there are: 0.1 to 1.0 seconds where the count took 0.5 to 4.5 on tables of 1.2 and 3.5
+  million rows, once in ten minutes for each table. Where no row comes back it asks once more with the count,
+  because the one row can be hidden from the account.
+
 ## 0.4.4 (2026-11-21)
 
 Five reviews, and this time before the release that carries the answers to them: one of the fixes of 0.4.3,

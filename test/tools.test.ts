@@ -1108,11 +1108,14 @@ test('a table without rows proves nothing about a condition, and its answer is n
   const empty = await connect(familyWorld([below, { table: 'task', rows: [] }]), closed)
   await empty.answer('sn_query', { table: 'task', fields: ['number'] })
   await empty.answer('sn_query', { table: 'task', fields: ['number'] })
-  // Two questions that have to match nothing and one for a row with a class. No row has one, so the table is asked
-  // for a row with or without a class, and then for any row at all.
+  // Two questions that have to match nothing and one for a row with a class: for the row alone first, and with
+  // the count where none came back, because the one row could be hidden from the account. No row has a class,
+  // so the table is asked for a row with or without one, and then for any row at all.
   const EITHER = 'sys_class_nameISEMPTY^ORsys_class_nameISNOTEMPTY'
-  assert.deepEqual(empty.proofsFrom('task').slice(0, 5), ['sys_class_nameISEMPTY^sys_class_nameISNOTEMPTY', 'sys_class_nameINzz__no_such_class_a^sys_class_nameINzz__no_such_class_b', 'sys_class_nameISNOTEMPTY', EITHER, ''])
-  assert.equal(empty.proofsFrom('task').length, 10, 'asked again for the second query')
+  const HAS_CLASS = 'sys_class_nameISNOTEMPTY'
+  assert.deepEqual(empty.proofsFrom('task').slice(0, 6), ['sys_class_nameISEMPTY^sys_class_nameISNOTEMPTY', 'sys_class_nameINzz__no_such_class_a^sys_class_nameINzz__no_such_class_b', HAS_CLASS, HAS_CLASS, EITHER, ''])
+  assert.deepEqual(empty.calls.filter((call) => call.table === 'task' && call.query === HAS_CLASS).slice(0, 2).map((call) => call.params.get('sysparm_no_count')), ['true', null])
+  assert.equal(empty.proofsFrom('task').length, 12, 'asked again for the second query')
 
   // An instance can be set to answer a query it cannot use with no rows (glide.invalid_query.returns_no_rows). Where
   // it cannot use the class, every question matches nothing, and so would the request: "no rows", of a table that
@@ -1126,11 +1129,19 @@ test('a table without rows proves nothing about a condition, and its answer is n
   const classless = await connect(familyWorld([below, { table: 'task', exact: 'sys_class_nameISNOTEMPTY', rows: [] }, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
   assert.equal((await classless.answer('sn_query', { table: 'task', fields: ['number'] })).returned, 1)
   assert.equal(classless.proofsFrom('task').at(-1), EITHER)
-  // With a row in the table the proof holds, and is asked for once.
+  // With a row in the table the proof holds, and is asked for once. The row that has a class is asked for
+  // without the count, and it comes: no second question. Measured on a table of 3.5 million rows: 4.5 seconds
+  // with the count, one without.
   const filled = await connect(familyWorld([below, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
   await filled.answer('sn_query', { table: 'task', fields: ['number'] })
   await filled.answer('sn_query', { table: 'task', fields: ['number'] })
   assert.equal(filled.proofsFrom('task').length, 4)
+  assert.deepEqual(filled.calls.filter((call) => call.table === 'task' && call.query === HAS_CLASS).map((call) => call.params.get('sysparm_no_count')), ['true'])
+  // The row that has a class is hidden from this account: none comes back, and the count says that it is there.
+  // Its class is not shown, so "is not one of" cannot be asked, and the condition is not taken on trust.
+  const hiddenRow = await connect(familyWorld([below, { table: 'task', exact: HAS_CLASS, rows: [null] }, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
+  assert.equal((await hiddenRow.call('sn_query', { table: 'task', fields: ['number'] })).data.error, 'blocked')
+  assert.deepEqual(hiddenRow.calls.filter((call) => call.table === 'task' && call.query === HAS_CLASS).map((call) => call.params.get('sysparm_no_count')), ['true', null])
 
   // Nothing is asked of the table without a condition before the questions are answered: where one of them
   // matches a row, the row that has a class is not asked for either.
@@ -5867,6 +5878,68 @@ test('a list or an object behind a key that looks like a secret is taken out who
   const started = Date.now()
   assert.equal(clean('{"tokens":['.repeat(50_000)).text, '{"tokens":"[withheld]"')
   assert.ok(Date.now() - started < 5_000)
+})
+
+test('sn_query reads rows without counting how many match where it is asked to', async () => {
+  // Measured on one instance: twenty rows of a view of four million came in a tenth of a second, and in ten
+  // seconds with the count; of a table of 3.5 million rows filtered by one field, in 2.5 seconds against 5 to 37.
+  const rows = Array.from({ length: 30 }, (_, index) => ({ number: `INC${index}`, active: 'true' }))
+  const { answer, calls } = await connect([{ table: 'incident', query: 'caller_id=Abel', rows: [] }, ...dictionaryRoutes, { table: 'incident', rows }])
+  const sent = () => calls.filter((entry) => entry.table === 'incident').at(-1)!
+  const shape = (data: Data) => ({ total: data.total, returned: data.returned, truncated: data.truncated, nextOffset: data.nextOffset })
+
+  // Counted is what a read is unless it says otherwise.
+  const counted = await answer('sn_query', { table: 'incident', query: 'active=true', fields: ['number'], limit: 20 })
+  assert.deepEqual(shape(counted), { total: 30, returned: 20, truncated: true, nextOffset: 20 })
+  assert.equal(sent().params.has('sysparm_no_count'), false)
+  assert.doesNotMatch(counted.warnings.join(' '), /counted/)
+
+  // Not counted: no total. A full page says that more can follow, and the answer says what it cannot tell.
+  const plain = await answer('sn_query', { table: 'incident', query: 'active=true', fields: ['number'], limit: 20, count: false })
+  assert.equal(sent().params.get('sysparm_no_count'), 'true')
+  assert.deepEqual(shape(plain), { total: null, returned: 20, truncated: true, nextOffset: 20 })
+  assert.match(plain.warnings.join(' '), /Not counted, as asked: this answer has no total\. "truncated" says only that the page is full\. A page with fewer rows is no proof that none follow/)
+  // The last page is not full, and nothing in the answer says that more follow.
+  const last = await answer('sn_query', { table: 'incident', query: 'active=true', fields: ['number'], limit: 20, offset: 20, count: false })
+  assert.deepEqual(shape(last), { total: null, returned: 10, truncated: false, nextOffset: undefined })
+
+  // No row is not "none matches" where the rows were not counted. The answer says so, and still names what
+  // else can be the reason.
+  const none = await answer('sn_query', { table: 'incident', query: 'caller_id=Abel', fields: ['number'], count: false })
+  assert.deepEqual(shape(none), { total: null, returned: 0, truncated: false, nextOffset: undefined })
+  assert.match(none.warnings.join(' '), /No row came back, and the rows were not counted, as asked: none matches, or this account may not see those that do/)
+  assert.match(none.warnings.join(' '), /"caller_id" is a reference to sys_user.*that can be why nothing matched/)
+  assert.doesNotMatch(none.warnings.join(' '), /Not counted, as asked: this answer has no total/)
+
+  // Counted, a row matches and is hidden from this account: "nothing matched" is not what happened, and no
+  // reason for it is offered.
+  const hidden = await connect([{ table: 'incident', query: 'caller_id=Abel', rows: [null] }, ...dictionaryRoutes, { table: 'incident', rows }])
+  const unseen = await hidden.answer('sn_query', { table: 'incident', query: 'caller_id=Abel', fields: ['number'] })
+  assert.deepEqual({ total: unseen.total, returned: unseen.returned }, { total: 1, returned: 0 })
+  assert.doesNotMatch(unseen.warnings.join(' '), /that can be why nothing matched/)
+
+  // A count per value is a count: the setting is not used there.
+  const grouped = await connect([{ table: 'incident', api: 'stats', rows: [{ stats: { count: '30' }, groupby_fields: [{ field: 'active', value: 'true' }] }] }, ...dictionaryRoutes, { table: 'incident', rows }])
+  const perValue = await grouped.answer('sn_query', { table: 'incident', groupBy: 'active', count: false })
+  assert.equal(perValue.total, 30)
+  assert.ok(grouped.calls.every((entry) => !entry.params.has('sysparm_no_count')))
+
+  // An answer that does not come in time names the count as what often takes long, unless it was not asked for.
+  const slow = await connect([{ table: 'incident', query: 'active=true', timesOut: true }, ...dictionaryRoutes, { table: 'incident', rows }])
+  const late = await slow.call('sn_query', { table: 'incident', query: 'active=true', fields: ['number'] })
+  assert.equal(late.data.error, 'timeout')
+  assert.match(late.data.message, /Counting the rows that match is often what takes long on a large table or view: pass count false to read the rows without it\./)
+  const lateAgain = await slow.call('sn_query', { table: 'incident', query: 'active=true', fields: ['number'], count: false })
+  assert.equal(lateAgain.data.error, 'timeout')
+  assert.doesNotMatch(lateAgain.data.message, /pass count false/)
+
+  // The rows of closed child tables are left out of a read that does not count, like of any other.
+  const closed = await connect(familyWorld([closedTables(tableRow('incident', 'Incident', 'task')), { table: 'task', rows: [{ number: 'TASK1', sys_class_name: 'problem' }] }]), { tables: { allow: [], deny: ['incident'] } })
+  const open = await closed.answer('sn_query', { table: 'task', fields: ['number'], count: false })
+  assert.equal(open.total, null)
+  const read = closed.sentTo('task').at(-1)!
+  assert.match(read.query, /sys_class_nameNOT INincident\^ORsys_class_nameISEMPTY/)
+  assert.equal(read.params.get('sysparm_no_count'), 'true')
 })
 
 test('the id of the record a row belongs to is no secret, though its name ends like one', () => {

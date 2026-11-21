@@ -386,6 +386,13 @@ many. The npm scripts do not write it.
   missing from an entry older than 30 seconds is looked up once more, so a field created during a session is
   found. `sn_schema` reads the dictionary anew for every call, for a database view also that of the tables it
   joins.
+- `sn_query` says how many rows match, and on a table or view of millions of rows that count is what takes
+  long. With `count: false` it reads the rows without it. Measured, twenty rows each time: of a view of four
+  million rows in 0.1 seconds against 10.5 with the count, of a table of 3.5 million rows filtered by one field
+  in 2.5 seconds against 5 to 37, of the same table searched for a word in 7 seconds against 14; on tables of
+  some thousand rows it makes no difference. The answer then has no total, `truncated` says only that the page
+  is full, and rows this account may not see cannot be told from rows that are not there: the answer says so.
+  A counted read that does not come in time names the count as the likely reason.
 - Whether the instance answers a query it cannot use with no rows (`glide.invalid_query.returns_no_rows`) is
   read by `sn_dependencies`, which tells an empty category from a condition that was not understood by it, and
   kept for thirty seconds. No other answer depends on what that property was when it was read.

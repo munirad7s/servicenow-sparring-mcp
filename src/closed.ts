@@ -307,14 +307,18 @@ export function closedTables(sn: ServiceNowClient, dict: Dictionary): ClosedTabl
   const proofs = new Map<string, { at: number; drops: number; applied: Promise<boolean> }>()
   async function prove(table: string, field: string, kinds: string[]): Promise<{ applied: boolean; lasting: boolean }> {
     const [a, b] = NO_SUCH_CLASS
-    const ask = (query: string, fields = ['sys_id']) => sn.query<Record<string, unknown>>({ table, query, fields, limit: 1, trusted: true }).catch(unlessNoConnection(null))
+    const ask = (query: string, fields = ['sys_id'], uncounted = false) => sn.query<Record<string, unknown>>({ table, query, fields, limit: 1, trusted: true, uncounted }).catch(unlessNoConnection(null))
     const nothing = (page: Awaited<ReturnType<typeof ask>>) => page !== null && page.total === 0 && page.records.length === 0
     const questions = kinds.filter((kind) => kind !== 'NOT IN').map((kind) => (kind === 'ISEMPTY' ? `${field}ISEMPTY^${field}ISNOTEMPTY` : `${field}${kind}${a}^${field}${kind}${b}`))
     if (!(await Promise.all(questions.map((query) => ask(query)))).every(nothing)) return { applied: false, lasting: false }
 
     // Only now is a row asked for that the questions above did not have to match nothing: one that has a class.
     // Where a question failed, no such request goes out. Without such a row no row of a closed class is there.
-    const row = await ask(`${field}ISNOTEMPTY`, ['sys_id', field])
+    // Asked for the row and not for how many there are: measured, counting the rows of a large table that have a
+    // class took half a second to four and a half, and the one row a tenth to one. Where none comes back, the
+    // one row can be hidden from this account, and then the count says whether it is there.
+    let row = await ask(`${field}ISNOTEMPTY`, ['sys_id', field], true)
+    if (row && !row.records.length) row = await ask(`${field}ISNOTEMPTY`, ['sys_id', field])
     // The question failed: that is no answer, and "no row has a class" would be read from it.
     if (row === null) return { applied: false, lasting: false }
     const some = (page: Awaited<ReturnType<typeof ask>>) => Boolean(page && (page.records.length > 0 || (page.total ?? 0) > 0))
