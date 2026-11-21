@@ -3,6 +3,15 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## Unreleased
+
+### Development
+
+- `npm run compare` asks every query that passed once more with `count: false`: no total, and the rows of the
+  counted read. On the test instance all 311 did, in a run of 2,675 requests.
+- `sn_origin` of 0.4.6 against 0.4.2 on the same 519 records, in the same night: no answer differs, with 2,256
+  requests each.
+
 ## 0.4.6 (2026-11-21)
 
 No new function. A review held every document against the code of 0.4.5 and found 25 sentences that said more

@@ -10,7 +10,9 @@
  *    the same first rows. The ones it refuses on purpose are counted apart. The
  *    server gives a sorted query one more sort key, and says so in its answer:
  *    the instance is asked directly with that key, because without it the rows
- *    it answers with are not the same from one request to the next.
+ *    it answers with are not the same from one request to the next. Each query
+ *    that passed is asked once more with count false: no total, and the rows of
+ *    the counted read.
  *
  * 3. Rows. Whole rows are read both ways and compared cell by cell. A cell may
  *    differ only where the server says so in the cell itself: a value it
@@ -300,6 +302,17 @@ const REFUSED: Array<[string, string]> = [
 const tally = new Map<string, number>()
 const count = (kind: string) => tally.set(kind, (tally.get(kind) ?? 0) + 1)
 const wrong: string[] = []
+// The same queries once more without the count: no total, and the rows of the counted read. A read without an
+// order can begin with other rows from one request to the next, so there only their number is held against it.
+const uncounted = { same: 0, wrong: [] as string[] }
+const withoutCount = async (table: string, template: string, query: string, counted: Data, ordered: boolean) => {
+  const plain = await call('sn_query', { table, query, fields: ['sys_id'], limit: 5, count: false })
+  const ids = (rows: unknown) => JSON.stringify(((rows as Data[] | undefined) ?? []).map((row) => row.sys_id))
+  if (plain.isError) uncounted.wrong.push(`refused as "${plain.data.error}" without the count, and answered with it: ${table}  ${template}`)
+  else if (plain.data.total !== null) uncounted.wrong.push(`a total without the count (${plain.data.total}): ${table}  ${template}`)
+  else if (ordered ? ids(plain.data.records) !== ids(counted.records) : plain.data.returned !== counted.returned) uncounted.wrong.push(`other rows without the count: ${table}  ${template}`)
+  else uncounted.same++
+}
 for (const [table, queries] of PASSED) {
   // A table this instance does not have, or this account may not read, is left out.
   if ((await get(table, { sysparm_fields: 'sys_id', sysparm_limit: 1 })).status !== 200) {
@@ -330,8 +343,10 @@ for (const [table, queries] of PASSED) {
     } else if (String(mine.data.total) !== String(theirs.total)) {
       wrong.push(`other total: ${table}  ${template}  (sn_query ${mine.data.total}, directly ${theirs.total})`)
     } else if (named === query) {
-      if (ids(mine.data.records) === ids(theirs.rows)) count('same total and same rows as the Table API')
-      else wrong.push(`same total, other rows: ${table}  ${template}`)
+      if (ids(mine.data.records) === ids(theirs.rows)) {
+        count('same total and same rows as the Table API')
+        await withoutCount(table, template, query, mine.data, false)
+      } else wrong.push(`same total, other rows: ${table}  ${template}`)
     } else if (named === withStableOrder(query)) {
       // The one thing the server adds to a query it passes on: the sys_id as the last key of a sorted query, which
       // the answer names. Asked directly with that key, the instance has to give the same total as without it,
@@ -339,7 +354,10 @@ for (const [table, queries] of PASSED) {
       const keyed = await get(table, { sysparm_query: named, sysparm_fields: 'sys_id', sysparm_limit: 5 })
       if (keyed.status !== 200 || String(keyed.total) !== String(theirs.total)) wrong.push(`the sort key changes what matches: ${table}  ${template}  (${theirs.total} without it, ${keyed.status === 200 ? keyed.total : `HTTP ${keyed.status}`} with it)`)
       else if (ids(mine.data.records) !== ids(keyed.rows)) wrong.push(`same total, other rows: ${table}  ${template}`)
-      else count('same total as the Table API, and the same rows once the sort has its last key')
+      else {
+        count('same total as the Table API, and the same rows once the sort has its last key')
+        await withoutCount(table, template, query, mine.data, true)
+      }
     } else {
       wrong.push(`the answer names another query than the one given: ${table}  ${template}`)
     }
@@ -357,6 +375,10 @@ console.log(`\nQueries: ${[...tally.values()].reduce((sum, value) => sum + value
 for (const [kind, value] of [...tally].sort((a, b) => b[1] - a[1])) console.log(`  ${String(value).padStart(5)}  ${kind}`)
 console.log(`  ${String(wrong.length).padStart(5)}  difference(s)`)
 for (const line of wrong.slice(0, 40)) console.log(`         ${line}`)
+console.log(`\nWithout the count: ${uncounted.same + uncounted.wrong.length} of those queries asked again with count false`)
+console.log(`  ${String(uncounted.same).padStart(5)}  no total, and the rows of the counted read (their number, where the query has no order)`)
+console.log(`  ${String(uncounted.wrong.length).padStart(5)}  difference(s)`)
+for (const line of uncounted.wrong.slice(0, 40)) console.log(`         ${line}`)
 
 // ------------------------------------------------------------------------ rows
 
@@ -630,7 +652,7 @@ if (undescribed.length) console.log(`  ${String(undescribed.length).padStart(5)}
 for (const line of undescribed.slice(0, 10)) console.log(`         ${line}`)
 
 console.log(`\n${sn.requestCount + direct} requests, all GET: ${sn.requestCount} by the server, ${direct} directly.`)
-process.exit(differences.length || wrong.length || altered.length || miscounted.length || twice.length || droppedFields.length || undescribed.length ? 1 : 0)
+process.exit(differences.length || wrong.length || uncounted.wrong.length || altered.length || miscounted.length || twice.length || droppedFields.length || undescribed.length ? 1 : 0)
 
 // ---------------------------------------------------------------- closed tables
 

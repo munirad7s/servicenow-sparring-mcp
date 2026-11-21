@@ -625,6 +625,8 @@ On one instance of the Australia release, with `npm run origin-check`:
   names its records another way (lists and choice sets).
 - **195 random captured changes:** 97 `customer_created`, 70 `customized`, 27 `custom_application_file`, 1
   `deleted_here`. Of the 70 customized records, 59 were captured under system accounts and 11 by people.
+- **0.4.6 against 0.4.2, on the same 519 records and in the same night**: no answer differs, and both took 2,256
+  requests.
 - **0.4.2 against 0.4.1, on the same 519 records**: for 145 files that
   upgrades have entries for, 150 application files and 150 captured changes, no answer differs in verdict,
   provenance, divergence, created or `capturedBy`. Of 74 records asked for by the sys_id at the end of the name
@@ -698,7 +700,7 @@ npm run typecheck
 npm run smoke         # end-to-end against the configured instance, read-only
 npm run call -- sn_schema '{"table":"incident","filter":"assign"}'
 npm run origin-check  # measures sn_origin on the configured instance, with about 1,200 requests for samples of 100
-npm run compare       # holds sn_schema and sn_query against the instance asked directly, about 1,300 requests
+npm run compare       # holds sn_schema and sn_query against the instance asked directly, about 2,700 requests
 ```
 
 `npm run smoke` drives the real server through an MCP client and exits with 1 if a check fails. It prints counts and
@@ -712,7 +714,8 @@ if anything differs. It reads the dictionary one table of the parent chain after
 field with what `sn_schema` says: type, reference, mandatory, read-only, length, deactivated, whether it takes
 its values from a choice list, the table that defines it, and its label. And it sends a few hundred encoded
 queries to the Table API as they are and through `sn_query`: one the server passes on has to bring the same total
-and the same first rows, and the ones it refuses on purpose are counted apart. It reads rows both ways, for a
+and the same first rows, and the ones it refuses on purpose are counted apart. Each query that passed is asked
+once more with `count: false`, and has to bring no total and the rows of the counted read. It reads rows both ways, for a
 fixed selection of fields, and compares them cell by cell: a cell may differ where the server marks it, as
 withheld or as cut, and where it keeps a time as it is stored, in UTC. And it holds counts per value against the
 Aggregate API, read by pages, and tries up to twelve of the fields that each of up to twelve database views
@@ -786,7 +789,8 @@ What was tested, and what was not:
   fields of 55 tables in one of them). Of 331 encoded queries, 298 brought the same total and the same rows as
   the Table API, 13 more the same rows once the sort has its last key, 18 were refused as intended, and two went
   out with a condition added on purpose: a comparison on the value of a system property leaves out the
-  properties that hold a secret, and the answer says so. Of 2,019 cells in 24 reads of rows, 62 differed,
+  properties that hold a secret, and the answer says so. Asked once more with `count: false`, each of the 311
+  that passed brought no total and the rows of the counted read. Of 2,019 cells in 24 reads of rows, 62 differed,
   each one marked: 32 values withheld or cut, and 30 times that the server keeps as they are stored, in UTC,
   where the instance shows them in the time zone of the account. 21 counts per value came out the same as the
   Aggregate API, each group once. Six sorted lists of tables and five of database views, read page by page,
