@@ -3,7 +3,14 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
-## Unreleased
+## 0.4.5 (2026-11-21)
+
+One measurement made for 0.4.4 is what this release is built on: on a large table or view, counting the rows
+that match is often what takes long, not reading them. Six reviews before the release. Five held it back, each
+for sentences of an answer that say more than is true in a case that is not rare: four that came with the new
+parameter, and six that earlier releases already gave and that the reviews found on the way, four of those
+twice. The sixth was asked whether this release does anything wrong that 0.4.4 does not, and said that it can
+go out.
 
 ### Added
 
