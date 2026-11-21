@@ -9,6 +9,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { ServiceNowClient } from './client.js'
 import { loadSettings } from './config.js'
+import { namesLeftOut } from './result.js'
 import { buildServer } from './server.js'
 
 type Data = Record<string, any>
@@ -242,7 +243,7 @@ check('a dot-walk into it is refused', blocked(await ask('sn_query', { table: 'i
 const callers = await ask('sn_query', { table: 'incident', query: 'caller_idISNOTEMPTY^assignment_groupISNOTEMPTY', fields: ['caller_id', 'assignment_group'], displayValue: true, limit: 5 })
 check(
   'the name behind a reference into it is left out, and other names stay',
-  !callers.isError && (callers.data.records ?? []).every((row: Data) => typeof row.caller_id === 'string') && callers.data.warnings.some((warning: string) => warning.includes('were left out: caller_id')) &&
+  !callers.isError && (callers.data.records ?? []).every((row: Data) => typeof row.caller_id === 'string') && callers.data.warnings.includes(namesLeftOut(['caller_id'])) &&
     (callers.data.returned === 0 || (callers.data.records ?? []).some((row: Data) => typeof row.assignment_group === 'object')),
   `${callers.data.returned} rows`,
 )

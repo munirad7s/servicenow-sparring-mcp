@@ -35,6 +35,18 @@ answer; such changes are listed under "Changed".
   most and withheld whole if it still changes; `count: false` leaves the count out of the read of the rows
   and not of what the server asks before it; a number in a condition is written without `+`, exponent or a
   leading point; a field path has ten parts at most; an env file 64 KiB.
+- `npm run smoke` takes the sentence about names left out for closed tables from the server, where it looked
+  for words of it: reworded in the server alone, the check failed against the instance for an answer that was
+  right.
+
+### Looked at, and left as it is
+
+- Where a read for the evidence of `sn_origin` fails, the answer names the query as the server wrote it, which
+  can lack a condition that was added for closed tables, beside `readable: false`.
+- The 6,000 characters of a query are counted as they are sent, where a sign outside letters and digits takes
+  three: a query that is shorter as written can be refused for its length.
+- With a dictionary that can be read in part, the fields it did resolve are still checked for their type, and
+  only the others are checked against a row.
 
 ## 0.4.5 (2026-11-21)
 

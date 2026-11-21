@@ -48,6 +48,13 @@ const NONE_SKIPPED = 'It skips none where every row keeps its place from one pag
 export const ROWS_LEFT_OUT =
   'Tables are closed on this machine. What this answer was read from leaves out, by a condition on the class of a record, any row of a class that is closed or whose rows are copies of records of other tables, and any row that reaches such a row through a reference the query walks along, or through a joined table. A total does not count them.'
 
+/**
+ * What an answer says where it left out what fields show, for closed tables. One text for the server and for the
+ * script that checks it against an instance: reworded in one place only, the script looked for the old words.
+ */
+export const namesLeftOut = (fields: string[]): string =>
+  `Tables are closed on this machine, and what these fields show can come from a record of one, or from a row that is a copy of a record of another table, so it was left out: ${[...fields].sort().join(', ')}.`
+
 export function source(sn: ServiceNowClient, warnings: string[] = []) {
   // What the gate of closed tables did to the requests of this call, whichever tool sent them.
   const closed = currentCall()?.closed
@@ -55,9 +62,7 @@ export function source(sn: ServiceNowClient, warnings: string[] = []) {
     if (!warnings.includes(text)) warnings.push(text)
   }
   if (closed?.rowsLeftOut) add(ROWS_LEFT_OUT)
-  if (closed?.names.size) {
-    add(`Tables are closed on this machine, and what these fields show can come from a record of one, or from a row that is a copy of a record of another table, so it was left out: ${[...closed.names].sort().join(', ')}.`)
-  }
+  if (closed?.names.size) add(namesLeftOut([...closed.names]))
   if (closed?.copies.size) {
     add(
       `Tables are closed on this machine, and these fields point into a table whose rows are named after records of other tables, so their display values were left out: ${[...closed.copies].sort().join(', ')}. ` +
