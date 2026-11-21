@@ -3,7 +3,11 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
-## Unreleased
+## 0.4.6 (2026-11-21)
+
+No new function. A review held every document against the code of 0.4.5 and found 25 sentences that said more
+than the code does, or what an earlier version did. Most of them stood in the descriptions an agent reads
+before it calls, which reach a user only with a release.
 
 ### Fixed
 
