@@ -11,6 +11,9 @@ answer; such changes are listed under "Changed".
   counted read. On the test instance all 311 did, in a run of 2,675 requests.
 - `sn_origin` of 0.4.6 against 0.4.2 on the same 519 records, in the same night: no answer differs, with 2,256
   requests each.
+- The rule for secret names was read over the long plain-text fields of the test instance as well, 17,763
+  texts: 2,822 of the 2,877 places it took out were three keys of one table of product data that end in
+  `_key`. Left as it is, and written down in `docs/encoded-queries.md`.
 
 ## 0.4.6 (2026-11-21)
 

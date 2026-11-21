@@ -331,6 +331,12 @@ Also measured:
   did a list or an object behind such a key fail to close, which would take the rest of the text or of its
   CDATA section along, and none was withheld whole. The largest removals were each one object: the template of
   a connection record, a signed time stamp. The slowest text took 20 milliseconds to read.
+- The same over long plain text: 17,763 texts of some 770 fields that hold a thousand characters or more, on
+  about 600 tables. The rule changed 87 of them, in 2,877 places: 34 archived mails that carry a `"token"`, and
+  2,822 places in 33 rows of one table of product data, where `attr_key`, `attr_val_key` and
+  `subclass_code_key` name an attribute and hold no secret. They are taken out as before. A name that ends in
+  `_key` is the widest part of the rule, and what stands behind it cannot be told from a key by its form: a
+  record id can, which is why `document_key` is the one name set aside.
 - The table of tables had 10,806 rows. Asked for the one changed last and for how many there are, it answered in
   about 120 milliseconds with 97 bytes. Asked for a name that ends in a given sys_id, the versions (49,263
   rows) answered in 0.2 seconds, and the entries of upgrades through their reference in 0.1.
