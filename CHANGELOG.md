@@ -9,14 +9,14 @@ answer; such changes are listed under "Changed".
 
 - **`sn_query` can read rows without counting how many match: `count: false`.** The Table API counts every row
   that matches for each request, also where twenty are asked for, and on a large table or view that count is
-  what takes long. Measured on the test instance, twenty rows each time: of a view of four million rows 10.5
+  often what takes long. Measured on the test instance, twenty rows each time: of a view of four million rows 10.5
   seconds with the count and 0.1 without; of a table of 3.5 million rows filtered by one field 5 to 37 seconds
   and 2.5; searched for a word 14 and 7. The answer then has no total. `truncated` says that the page is full
   or that rows were left out to fit the answer, and a page with fewer rows is no proof that none follow for an
   account that is not shown every row: the answer says so. Where no row came back it says what that can mean:
   on the first page that none matches, behind it that the rows end there, and either time that the account may
-  not see them. Where such an answer was cut to fit, it says that reading on repeats rows if some of the page
-  are hidden from the account, which only the count could tell. A counted read that does not come in time
+  not see them. Where such an answer was cut to fit, it says that reading on can repeat rows if some of the
+  page are hidden from the account, which only the count could tell. A counted read that does not come in time
   names the count as what often takes long. `npm run smoke` reads five rows both ways on the instance and
   holds them against each other.
 

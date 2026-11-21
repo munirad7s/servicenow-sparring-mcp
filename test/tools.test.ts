@@ -501,7 +501,9 @@ test('a view that lists the fields it takes from a table has no other field of t
   const slow = await connect(world(listed, { table: 'incident_caller', query: 'ORDERBYinc_number^ORDERBYinc_sys_id', timesOut: true }, rows))
   const late = await slow.call('sn_query', { table: 'incident_caller', query: 'ORDERBYinc_number', fields: ['inc_number'] })
   assert.equal(late.data.error, 'timeout')
-  assert.match(late.data.message, /This was a sorted read of a database view\. It is sorted by the sys_ids of the tables the view joins as well.*read without ORDERBY, or raise SERVICENOW_TIMEOUT_MS/)
+  assert.match(late.data.message, /This was a sorted read of a database view\. It is sorted by the sys_ids of the tables the view joins as well, as far as the view carries them, and on a large view that takes longer\. Narrow the query, read without ORDERBY, or raise SERVICENOW_TIMEOUT_MS/)
+  // What the keys achieve is not promised there: a view that does not carry all of them gets the same sentence.
+  assert.doesNotMatch(late.data.message, /every row comes once/)
   const slowTable = await connect([{ table: 'incident', query: 'ORDERBYnumber', timesOut: true }, ...dictionaryRoutes, { table: 'incident', rows: [{ number: 'INC1' }] }])
   const lateTable = await slowTable.call('sn_query', { table: 'incident', query: 'ORDERBYnumber', fields: ['number'] })
   assert.equal(lateTable.data.error, 'timeout')
@@ -5915,7 +5917,7 @@ test('sn_query reads rows without counting how many match where it is asked to',
   assert.match(cut.warnings.join(' '), /"truncated" then says that the page is full, or that rows were left out to fit the answer/)
   // Reading on from there repeats rows if some of this page are hidden from the account. Counted, the answer
   // knows whether any are, and warns only then; not counted, it cannot know, and says what follows if so.
-  assert.match(cut.warnings.join(' '), /The answer was cut, and without a total it cannot be told whether rows of this page are hidden from this account\. If some are, reading on from nextOffset repeats a few rows\. None are skipped\./)
+  assert.match(cut.warnings.join(' '), /The answer was cut, and without a total it cannot be told whether rows of this page are hidden from this account\. If some are, reading on from nextOffset can repeat a few rows\. None are skipped\./)
   const cutCounted = await long.answer('sn_query', { table: 'incident', fields: ['number', 'short_description'], limit: 200 })
   assert.ok(cutCounted.returned < 40 && cutCounted.total === 40)
   assert.doesNotMatch(cutCounted.warnings.join(' '), /repeat/)

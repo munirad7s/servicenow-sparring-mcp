@@ -38,7 +38,7 @@ export const listShape = {
   offset: z.number(),
   truncated: z
     .boolean()
-    .describe('true if rows follow behind this answer: rows were left out to fit it, or more rows match behind this page. Where the rows were not counted: rows were left out, or the page is full, so that more can match.'),
+    .describe('true if rows follow behind this answer: rows were left out to fit it, or more rows match behind this page. Where the answer has no total: rows were left out, or the page is full, so that more can match.'),
   nextOffset: z.number().optional().describe('Pass as offset to read on.'),
 }
 
@@ -92,7 +92,7 @@ export function listing(sn: ServiceNowClient, page: Page<unknown>, warnings: str
     warnings.push('Because rows were withheld and the answer was cut, reading on from nextOffset can repeat a few rows. None are skipped.')
   } else if (cut && page.total === null) {
     // Without a total it is not known whether rows of this page were withheld, and the same holds if some were.
-    warnings.push('The answer was cut, and without a total it cannot be told whether rows of this page are hidden from this account. If some are, reading on from nextOffset repeats a few rows. None are skipped.')
+    warnings.push('The answer was cut, and without a total it cannot be told whether rows of this page are hidden from this account. If some are, reading on from nextOffset can repeat a few rows. None are skipped.')
   }
 
   const truncated = cut || (page.total !== null ? end < page.total : fetched === page.limit)
