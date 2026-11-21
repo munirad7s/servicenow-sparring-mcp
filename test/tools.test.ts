@@ -602,7 +602,7 @@ test('a closed table cannot be read through a dot-walk, a child table, a view or
   // The reference itself may be read. The name behind it comes from the closed table and is left out.
   const data = await noUsers.answer('sn_query', { table: 'incident', fields: ['number', 'caller_id'], displayValue: true })
   assert.deepEqual(data.records, [{ number: 'INC1', caller_id: ID }])
-  assert.match(data.warnings.join(' '), /these fields can point to a record of one, or to a row that is a copy of a record of another table, so the names behind them were left out: caller_id/)
+  assert.match(data.warnings.join(' '), /what these fields show can come from a record of one, or from a row that is a copy of a record of another table, so it was left out: caller_id/)
   const all = await noUsers.answer('sn_query', { table: 'incident', displayValue: true })
   assert.deepEqual({ caller: all.records[0].caller_id, assignee: all.records[0].assigned_to }, { caller: ID, assignee: ID })
 
@@ -624,7 +624,7 @@ test('a closed table gives away no names through a list of references, an unknow
   // A watch list holds references too: its display value is a list of names from the closed table.
   const listed = await noUsers.answer('sn_query', { table: 'incident', fields: ['number', 'watch_list'], displayValue: true })
   assert.deepEqual(listed.records, [{ number: 'INC1', watch_list: `${ID},${ID}` }])
-  assert.match(listed.warnings.join(' '), /these fields can point to a record of one, or to a row that is a copy of a record of another table, so the names behind them were left out: watch_list/)
+  assert.match(listed.warnings.join(' '), /what these fields show can come from a record of one, or from a row that is a copy of a record of another table, so it was left out: watch_list/)
   await noUsers.answer('sn_query', { table: 'incident', groupBy: 'watch_list' })
   assert.equal(noUsers.sentTo('incident', 'stats')[0].params.get('sysparm_display_value'), null, 'the groups are not asked for their names')
   assert.match((await noUsers.answer('sn_query', { table: 'incident', groupBy: 'watch_list' })).warnings.join(' '), /"watch_list" is a list\. It is counted by its whole content/)
@@ -925,7 +925,7 @@ test('the name behind a reference is left out where the record can be a row of a
   const { answer, call, sentTo } = await connect(world, noUsers)
   const read = await answer('sn_query', { table: 'incident', fields: ['number', 'u_contact', 'u_owner', 'u_watchers'], displayValue: true })
   assert.deepEqual(read.records, [{ number: 'INC1', u_contact: ID, u_owner: ID, u_watchers: ID }])
-  assert.match(read.warnings.join(' '), /these fields can point to a record of one, or to a row that is a copy of a record of another table, so the names behind them were left out: u_contact\./)
+  assert.match(read.warnings.join(' '), /what these fields show can come from a record of one, or from a row that is a copy of a record of another table, so it was left out: u_contact\./)
   // A reference or a list whose target did not come back can point anywhere.
   assert.match(read.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name \(read from sys_dictionary and sys_dictionary_override\), so their display values were left out: u_owner, u_watchers/)
   assert.doesNotMatch(JSON.stringify(read), /Abel|Beth|Carol/)
@@ -933,7 +933,7 @@ test('the name behind a reference is left out where the record can be a row of a
   const counted = await answer('sn_query', { table: 'incident', groupBy: 'u_contact' })
   assert.deepEqual(counted.groups, [{ value: ID, count: 3 }])
   assert.equal(sentTo('incident', 'stats')[0].params.get('sysparm_display_value'), null)
-  assert.match(counted.warnings.join(' '), /were left out: u_contact/)
+  assert.match(counted.warnings.join(' '), /so it was left out: u_contact/)
 
   // Comparing with text or sorting works on those names.
   for (const query of ['u_contactSTARTSWITHAbel', 'ORDERBYu_contact', 'u_ownerLIKEBeth', 'ORDERBYDESCu_watchers']) {
@@ -954,7 +954,7 @@ test('with a list of the only tables that may be read, a name is left out where 
   const read = await answer('sn_query', { table: 'incident', fields: ['number', 'caller_id', 'parent'], displayValue: true })
   // No table below task is missing from the list, so the name behind "parent" stays.
   assert.deepEqual(read.records, [{ number: 'INC1', caller_id: ID, parent: { value: ID, display: 'TASK0000001' } }])
-  assert.match(read.warnings.join(' '), /were left out: caller_id\./)
+  assert.match(read.warnings.join(' '), /so it was left out: caller_id\./)
   assert.equal((await call('sn_query', { table: 'incident', query: 'caller_idSTARTSWITHAbel', fields: ['number'] })).data.error, 'blocked')
 
   // The user table itself answers without the rows of the classes that are not on the list.
@@ -973,7 +973,7 @@ test('a reference into a parent table does not give away the rows of its closed 
   // The task behind the reference can be an incident: its number is the name of a record of the closed table.
   const read = await answer('sn_query', { table: 'task_sla', fields: ['stage', 'task'], displayValue: true })
   assert.deepEqual(read.records, [{ stage: 'in_progress', task: ID }])
-  assert.match(read.warnings.join(' '), /were left out: task\./)
+  assert.match(read.warnings.join(' '), /so it was left out: task\./)
   assert.deepEqual((await answer('sn_query', { table: 'task_sla', groupBy: 'task' })).groups, [{ value: ID, count: 2 }])
   assert.equal((await call('sn_query', { table: 'task_sla', query: 'taskSTARTSWITHINC', fields: ['stage'] })).data.error, 'blocked')
 
@@ -3319,7 +3319,7 @@ test('a linked application file does not give away the record it links to', asyn
   const reviewing = await connect([...pointing, ...world], { tables: { allow: [], deny: ['sys_user'] } })
   const shown = await reviewing.answer('sn_query', { table: 'u_review', fields: ['u_note', 'u_file'], displayValue: true })
   assert.deepEqual(shown.records, [{ u_note: 'x', u_file: ID }])
-  assert.match(shown.warnings.join(' '), /were left out: u_file/)
+  assert.match(shown.warnings.join(' '), /so it was left out: u_file/)
 
   // Measured: the entry for a deleted application file keeps the name and the update name of the record that was
   // deleted. Its update name says which table that record was of.
@@ -3495,7 +3495,7 @@ test('what a field shows is passed on only for kinds of fields that show nothing
   const attachments = await connect([closedTables(tableRow('sys_attachment', 'Attachment')), ...world], { tables: { allow: [], deny: ['sys_attachment'] } })
   const without = await attachments.answer('sn_query', wanted)
   assert.equal(without.records[0].u_document, ID)
-  assert.match(without.warnings.join(' '), /these fields can point to a record of one, or to a row that is a copy of a record of another table, so the names behind them were left out: u_document/)
+  assert.match(without.warnings.join(' '), /what these fields show can come from a record of one, or from a row that is a copy of a record of another table, so it was left out: u_document/)
 
   // Nothing is closed: everything is shown.
   const open = await connect(world)
@@ -3835,6 +3835,26 @@ test('sn_origin: the evidence can be run again', async () => {
   )
   assert.equal(evidence.versions.table, 'sys_update_version')
   assert.equal(evidence.versions.query, `name=${NAME}^ORDERBYstate^ORDERBYDESCsys_created_on^ORDERBYDESCsys_id`)
+
+  // The query an answer names is the one that was sent. With a table closed below the captured changes, the
+  // rule for closed tables adds a condition on the class to that read, and the evidence names it with the rest.
+  const world: Route[] = [
+    closedTables(tableRow('u_updates', 'Updates', 'sys_update_xml')),
+    ...['sys_metadata', 'sys_update_xml', 'sys_update_set', 'sys_update_version', 'upgrade_history_task', 'sys_upgrade_history_log', 'sys_upgrade_history', 'sys_package', 'sys_scope'].map((name): Route => ({ table: 'sys_db_object', exact: `name=${name}`, rows: [tableRow(name, name)] })),
+    { table: 'sys_dictionary', query: 'nameINsys_update_xml', rows: [...['name', 'action', 'type', 'sys_created_by', 'sys_updated_by'].map((field) => column('sys_update_xml', field)), column('sys_update_xml', 'update_set', 'reference', 'sys_update_set'), column('sys_update_xml', 'replace_on_upgrade', 'boolean'), column('sys_update_xml', 'sys_created_on', 'glide_date_time'), column('sys_update_xml', 'sys_updated_on', 'glide_date_time'), column('sys_update_xml', 'sys_class_name', 'sys_class_name')] },
+    { table: 'sys_dictionary', query: 'nameINsys_update_set', rows: [column('sys_update_set', 'name')] },
+    { table: 'sys_dictionary', query: 'nameINsys_metadata', rows: [column('sys_metadata', 'sys_package', 'reference', 'sys_package'), column('sys_metadata', 'sys_scope', 'reference', 'sys_scope'), column('sys_metadata', 'sys_class_name', 'sys_class_name')] },
+    { table: 'sys_dictionary', query: 'nameINsys_package', rows: [column('sys_package', 'sys_class_name', 'sys_class_name'), column('sys_package', 'name')] },
+    { table: 'sys_dictionary', query: 'nameINsys_scope', rows: [column('sys_scope', 'scope'), column('sys_scope', 'name')] },
+    ...dictionaryRoutes,
+    ...origin('sys_plugins', [change()], []),
+  ]
+  const closed = await connect(world, { tables: { allow: [], deny: ['u_updates'] } })
+  const gated = await closed.answer('sn_origin', { sysId: ID })
+  const sent = closed.sentTo('sys_update_xml').find((call) => call.query.startsWith(`name=${NAME}^`))?.query
+  assert.match(String(sent), /sys_class_nameNOT INu_updates\^ORsys_class_nameISEMPTY/, gated.warnings.join(' | '))
+  assert.equal(gated.evidence.customerUpdates.query, sent)
+  assert.equal(gated.evidence.customerUpdates.total, 1)
 })
 
 test('sn_origin: with more update rows than one page, the first capture is asked for', async () => {
@@ -5998,6 +6018,10 @@ test('the id of the record a row belongs to is no secret, though its name ends l
   }
   // Inside a list or an object that is taken out whole, it goes with it.
   assert.equal(scrubSecrets(`{"credentials":{"document_key":"${ID}","user":"abel"}}`).text, '{"credentials":"[withheld]"}')
+  // A number behind such a key is taken out to its end, also where it is written with an exponent.
+  assert.equal(scrubSecrets('{"otp":482913e7,"n":1}').text, '{"otp":"[withheld]","n":1}')
+  assert.equal(scrubSecrets('{"otp": -1.5E-3}').text, '{"otp": "[withheld]"}')
+  assert.equal(scrubSecrets('{"otp":482913}').text, '{"otp":"[withheld]"}')
   // An element of that name that ends in itself still loses what its attributes repeat, and one with attributes
   // is taken out as before: measured, none of the 3,345 had one, and an attribute can repeat anything.
   assert.equal(scrubSecrets(`<a><document_key display_value="Some record"/></a>`).text, '<a><document_key/></a>')

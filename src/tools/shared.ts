@@ -420,7 +420,8 @@ function* secretValues(text: string): Generator<{ start: number; end: number; pu
     const value = quote === '"' ? String.raw`"(?:[^"\\]|\\.)+"` : String.raw`\\"(?:[^"\\]|\\\\(?:\\\\|\\"|[^"\\])|\\[^"\\])+\\"`
     const gap = quote === '"' ? String.raw`\s*` : String.raw`(?:\s|\\[nrt])*`
     const mark = quote === '"' ? '"' : String.raw`\"`
-    for (const match of text.matchAll(new RegExp(String.raw`(${quote}([A-Za-z_][\w.-]*)${quote}${gap}:${gap})(?:${value}|-?\d[\d.]*)`, 'g'))) {
+    // A number to its end, exponent included: cut before it, "482913e7" left "e7" behind the note.
+    for (const match of text.matchAll(new RegExp(String.raw`(${quote}([A-Za-z_][\w.-]*)${quote}${gap}:${gap})(?:${value}|-?\d[\d.]*(?:[eE][+-]?\d+)?)`, 'g'))) {
       const [whole, lead, key] = match
       // "true" and "false" are switches, and what an earlier reading put there is a note.
       if (!LOOKS_SECRET.test(key) || /:(?:\s|\\[nrt])*\\?"(true|false)\\?"$/.test(whole) || whole === `${lead}${mark}${WITHHELD}${mark}`) continue

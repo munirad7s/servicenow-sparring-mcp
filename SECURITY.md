@@ -25,7 +25,8 @@ Especially welcome:
   scripts, which a person runs in a folder of their choice, also read a file named `.env` there when no
   `SERVICENOW_*` variable is set. The server itself does not.
 
-Requests are built in `src/client.ts`, input is checked in `src/query.ts`, settings are read in `src/config.ts`.
+Requests are built in `src/client.ts`; queries, table names and field paths are checked in `src/query.ts` and
+the other input of a call by the schema of its tool; settings are read in `src/config.ts`.
 The rules for tables that are closed on the machine are in `src/closed.ts`; the client asks them for every request,
 whichever function sends it. What is taken out of an answer before it leaves the server is decided in
 `src/tools/shared.ts` and `src/tools/query.ts`, and every answer of every function passes `ok()` in
@@ -57,7 +58,8 @@ dictionary. Where the type cannot be read, a field is withheld if its name sugge
 that types were missing. A secret in a field with a harmless name and an unreadable type would pass.
 
 A secret that somebody wrote into an ordinary text, a script or a description, is another matter. The server
-takes out of every text what looks like one by the name of an XML element or of a JSON key in quotes. That is a
+takes out of every text what looks like one by the name of an XML element or of a JSON key in quotes (letters,
+digits, `_`, `.` and `-`). That is a
 net for the usual forms, not a boundary: a secret under a name that suggests nothing passes, and a condition on
 such a field still tells whether the text contains a given piece. Only fields of a secret type, the values of
 system properties and fields that carry whole records are closed to comparisons.

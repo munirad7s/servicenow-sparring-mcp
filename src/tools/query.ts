@@ -334,7 +334,9 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         'Read records from any table with an encoded query. Use it to look at real data and configuration instead of ' +
         'assuming. Before anything is sent, the query is checked: every field name against the instance dictionary ' +
         '(ServiceNow ignores a condition on an unknown field and answers unfiltered), and choice fields against their ' +
-        'stored values (a label matches nothing). Queries containing "javascript:" are refused. A field that holds a ' +
+        'stored values (a label matches nothing). Where the dictionary cannot be read, names are checked against a row ' +
+        'of the table and the checks that need a type or a list of choices are not made: "fieldCheck" and the warnings ' +
+        'say which it was. Queries containing "javascript:" are refused. A field that holds a ' +
         'secret can be asked whether it is filled (ISEMPTY, ISNOTEMPTY) and nothing else. "!=", "NOT IN", "NOT LIKE" ' +
         'and "NSAMEAS" leave out rows where the field is empty. The answer says how many rows match in total; to count only, pass ' +
         'limit 1 and fields ["sys_id"] and read "total". On a table or view of millions of rows that count is often what ' +
@@ -358,7 +360,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
           .array(z.string().max(400))
           .max(100)
           .optional()
-          .describe('Fields to return. Name them: answers stay small, and a field the instance leaves out is reported.'),
+          .describe('Fields to return. Name them: answers stay small, and a field the instance leaves out of the first row is reported.'),
         groupBy: z
           .string()
           .max(400)
@@ -369,13 +371,16 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         displayValue: z
           .boolean()
           .default(false)
-          .describe('true adds display values: a reference or choice comes back as {value, display}. Needed to read journal fields such as comments and work_notes.'),
+          .describe(
+            'true adds display values: a reference or choice comes back as {value, display} where what it shows differs from what it stores and may be passed on, and as the stored value alone otherwise. Needed to read journal fields such as comments and work_notes.',
+          ),
         count: z
           .boolean()
           .default(true)
           .describe(
             'false reads the rows without counting how many match. Measured: twenty rows of a view of four million came in a tenth of a second, and in ten seconds with the count. ' +
-              'The answer then has no total, "truncated" says that the page is full or that rows were left out to fit the answer, and rows this account may not see cannot be told from rows that are not there. Not used with groupBy.',
+              'The answer then has no total, "truncated" says that the page is full or that rows were left out to fit the answer, and rows this account may not see cannot be told from rows that are not there. ' +
+              'What the server asks before the read, such as a proof for a database view, counts as before. Not used with groupBy.',
           ),
       },
       outputSchema: {

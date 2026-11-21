@@ -46,7 +46,7 @@ export const listShape = {
 const NONE_SKIPPED = 'It skips none where every row keeps its place from one page to the next.'
 
 export const ROWS_LEFT_OUT =
-  'Tables are closed on this machine. What this answer was read from leaves out, by a condition on the class of a record, any row of a class that is closed or whose rows are copies of records of other tables, and any row that reaches such a row through a reference or a joined table. A total does not count them.'
+  'Tables are closed on this machine. What this answer was read from leaves out, by a condition on the class of a record, any row of a class that is closed or whose rows are copies of records of other tables, and any row that reaches such a row through a reference the query walks along, or through a joined table. A total does not count them.'
 
 export function source(sn: ServiceNowClient, warnings: string[] = []) {
   // What the gate of closed tables did to the requests of this call, whichever tool sent them.
@@ -56,7 +56,7 @@ export function source(sn: ServiceNowClient, warnings: string[] = []) {
   }
   if (closed?.rowsLeftOut) add(ROWS_LEFT_OUT)
   if (closed?.names.size) {
-    add(`Tables are closed on this machine, and these fields can point to a record of one, or to a row that is a copy of a record of another table, so the names behind them were left out: ${[...closed.names].sort().join(', ')}.`)
+    add(`Tables are closed on this machine, and what these fields show can come from a record of one, or from a row that is a copy of a record of another table, so it was left out: ${[...closed.names].sort().join(', ')}.`)
   }
   if (closed?.copies.size) {
     add(

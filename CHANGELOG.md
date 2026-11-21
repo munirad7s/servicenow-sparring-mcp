@@ -3,6 +3,39 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
+## Unreleased
+
+### Fixed
+
+- `sn_origin` named the queries of its evidence as it wrote them, not as they were sent: with a table closed
+  below one of the three tables it reads, the condition that leaves those rows out was missing from the query
+  in the answer. It names what was sent.
+- A number behind a key that looks like a secret is taken out to its end: written with an exponent, `482913e7`
+  left `e7` behind the note.
+- The two sentences that 0.4.5 listed as less exact than they could be say what holds: rows are left out
+  that reach a closed record "through a reference the query walks along", and behind a reference it is "what
+  these fields show" that is left out, which for a journal field is the text of its entries.
+
+### Documents
+
+- A review of every document against the code of 0.4.5 found 25 sentences that said more than the code does,
+  or what an earlier version did, most of them in the descriptions an agent reads before it calls. Corrected:
+  what proves that a database view applies a condition (two questions since 0.4.4, where a table of forms and
+  the limits of an answer still named one); that only a proof that succeeded is kept for ten minutes; what an
+  answer of `sn_schema` proves about a field that is missing from it, and what counts as a field of a view's
+  own; that `displayValue` gives a pair only where what a field shows differs from what it stores and may be
+  passed on; that a field left out is noticed in the first row of an answer; that field names are checked
+  against a row where the dictionary cannot be read; what `sn_origin` lists under `upgradeSkips`, which are
+  the entries of upgrades whatever their disposition; three sentences of `sn_upgrade_skips`; that pages are no
+  snapshot; which functions read by pages; that what a table shows as its name is followed through seven
+  tables, not six; that the 6,000 characters hold the query of the call as well; 10 MiB, not 10 MB; and where
+  input is checked.
+- Named for the first time: a key is recognised where it is written with letters, digits, `_`, `.` and `-`; a
+  system property inside a payload is recognised as the element `sys_properties`; a text is read six times at
+  most and withheld whole if it still changes; `count: false` leaves the count out of the read of the rows
+  and not of what the server asks before it; a number in a condition is written without `+`, exponent or a
+  leading point; a field path has ten parts at most; an env file 64 KiB.
+
 ## 0.4.5 (2026-11-21)
 
 One measurement made for 0.4.4 is what this release is built on: on a large table or view, counting the rows

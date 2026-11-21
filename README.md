@@ -128,7 +128,7 @@ are reported as unknown.
 
 More guards: table names and field names are validated before they reach a URL; a value read from the instance is
 checked like any other before it goes into the next query; `https` is required (`http` only for `localhost`);
-redirects are not followed; requests time out; an answer larger than 10 MB is not read to the end. Until the
+redirects are not followed; requests time out; an answer larger than 10 MiB is not read to the end. Until the
 instance has accepted the login once, requests go one at a time, so a wrong password costs one rejected login, not
 one for every request in flight.
 
@@ -161,14 +161,17 @@ provider, the data leaves your network. Five things limit what can go that way:
   still tells whether the text contains a given piece. Secrets belong in fields made for them.
 - **A record inside a text is cleaned.** The payload of a captured change, of a version, of an upgrade entry or of
   a deleted record is the whole record as text. What looks like a secret in it is taken out, by the name of its
-  element, and a system property in it is judged as one read from its table. Such a payload can be read, but not
+  element, and a system property in it, an element `sys_properties`, is judged as one read from its table. Such a payload can be read, but not
   searched. The comparison of two payloads that an instance stores beside them (`payload_diff`) is not passed on
   at all: read the payload. The same is done with every text of every answer, whichever function gives it: a script that holds
   `"api_key": "…"`, or a list or an object behind such a key (`"tokens": ["…"]`), comes back with that value
   taken out, and the answer says so. A text of the instance is read before it is shortened, where a message
   quotes it or a long value is cut, and a cell that comes as an object where an instance sends text is passed
   on as the text it is written as, so that a key and its value are read together. The one text that is passed
-  on as it is, is the `query` of an answer: that is what was sent, in the words of the call. It goes by the name of an XML element, or of a JSON key in quotes.
+  on as it is, is the `query` of an answer: that is what was sent, in the words of the call. It goes by the name of an XML element, or of a JSON key in quotes
+  that is written with letters, digits, `_`, `.` and `-`. A text is read until a reading finds nothing more, six
+  times at most: one that still changes then is withheld whole (measured: none of 24,811 texts of the test
+  instance was).
   An element is recognised where it holds text and closes: one that holds further elements is not taken out,
   and neither is `true` or `false`, which is a switch and no secret. A secret
   under a name that suggests nothing is not recognised, nor one written another way: a key whose letters are
@@ -274,13 +277,14 @@ provider, the data leaves your network. Five things limit what can go that way:
     table for a sys_id and for the class of one row: those answers are not passed on.
   - Where the server cannot establish which tables a request reads from, it does not send it. That includes
     what is too large to establish. The rows of closed tables are left out of a table above them by naming their
-    classes in the query, and a query has a length: with more closed tables below a table than fit into 6,000
-    characters, that table is refused, and one of its open child tables has to be asked. Measured: with a table
+    classes in the query, and a query has a length: where the query of a call and those classes, written once
+    for each part of the query, do not fit into 6,000 characters together, the request is refused. With more
+    closed tables below a table than fit by themselves, one of its open child tables has to be asked. Measured: with a table
     closed that has 1,348 tables below it, its parent was refused that way. The server follows a table to its
     parents through 32 levels, reads up to 2,000 tables per question about what a deny list closes and 3,000
-    below a table with an allow list, and follows what a table shows as its name through six tables. Beyond
+    below a table with an allow list, and follows what a table shows as its name through seven tables. Beyond
     any of these it does not guess: the request is refused, and where it is the name behind a reference that
-    leads further than six tables, that name is left out and the row is read without it.
+    leads further than seven tables, that name is left out and the row is read without it.
 
   A closed table is reported as "could not be checked", as an error of kind `blocked`.
 
@@ -323,9 +327,12 @@ many. The npm scripts do not write it.
 
 ## Requests, caching and pauses
 
-- A list that is longer than one answer is read by pages (`nextOffset`). A sorted query on a table is sent with
-  the sys_id as a sort key, added at the end where the query does not sort by it already, so that every row
-  comes once: without it, rows that are equal in what the
+- `sn_query`, `sn_delta` and `sn_upgrade_skips` read a list that is longer than one answer by pages
+  (`nextOffset`); the other functions bound their lists and say where one was cut. Pages are no snapshot: each
+  is a request of its own, and rows that are added or removed between two of them move the ones behind. A
+  sorted query on a table is sent with the sys_id as a sort key, added at the end where the query does not sort
+  by it already, so that every row has one place and comes once while the rows stay the same: without it, rows
+  that are equal in what the
   query sorts by change places between pages (measured: 989 different rows in a thousand captured changes read
   newest first). The `query` of an answer shows the key. A row of a database view has no sys_id of its own: its
   keys are the sys_ids of the tables the view joins, each where the instance proves that it can filter and sort
@@ -392,7 +399,8 @@ many. The npm scripts do not write it.
   in 2.5 seconds against 5 to 37, of the same table searched for a word in 7 seconds against 14; on tables of
   some thousand rows it makes no difference. The answer then has no total, `truncated` says that the page is
   full or that rows were left out to fit the answer, and rows this account may not see cannot be told from
-  rows that are not there: the answer says so.
+  rows that are not there: the answer says so. It is the read of the rows that goes without the count: what the
+  server asks before it, a proof for a database view or a row to check field names against, counts as before.
   A counted read that does not come in time names the count as what often takes long.
 - Whether the instance answers a query it cannot use with no rows (`glide.invalid_query.returns_no_rows`) is
   read by `sn_dependencies`, which tells an empty category from a condition that was not understood by it, and
@@ -432,7 +440,7 @@ npx -y github:munirad7s/servicenow-sparring-mcp doctor
 | `SERVICENOW_INSTANCE_URL` | The instance address, for example `https://example.service-now.com` |
 | `SERVICENOW_USERNAME`, `SERVICENOW_PASSWORD` | Basic authentication |
 | `SERVICENOW_TOKEN` | A ready-made OAuth access token, sent as a bearer token. Wins over user name and password |
-| `SERVICENOW_ENV_FILE` | Path to a file with the variables above. `~` means your home folder |
+| `SERVICENOW_ENV_FILE` | Path to a file with the variables above, 64 KiB at most. `~` means your home folder |
 | `SERVICENOW_TABLE_ALLOW`, `SERVICENOW_TABLE_DENY` | Optional. Table names or prefixes ending in `*`, separated by commas |
 | `SERVICENOW_AUDIT_LOG` | Optional. A file that receives one line per request |
 | `SERVICENOW_TIMEOUT_MS` | Optional request timeout, default 30000, between 1000 and 120000 |
@@ -459,9 +467,11 @@ its lines and do not change how it ends.
 
 It also asks the instance about each field the server filters by in queries it writes itself: those of
 `sn_delta`, `sn_origin`, `sn_upgrade_skips` and `sn_plugins`, and those it reads the dictionary with, 63 fields of
-22 tables. It asks for the rows where the field is empty and filled at once. An instance that applies the
-condition answers with none. One that does not know the field drops the condition and answers with rows; the
-functions would then answer unfiltered there, and `doctor` ends with 1 and names the field. A field of a table
+22 tables. It asks for the rows where the field is empty and filled at once, and for one row where it is
+either. An instance that applies the condition answers the first with none and the second with a row. One that
+does not know the field drops the condition and answers the first with rows, or, where it is set to answer what
+it cannot use with nothing, answers both with none although the table has rows; the functions would then answer
+unfiltered there, or with nothing, and `doctor` ends with 1 and names the field. A field of a table
 the account cannot read is not asked about. On the test instance 60 of the 63 could be asked, and all 60 are
 applied.
 
@@ -615,7 +625,7 @@ On one instance of the Australia release, with `npm run origin-check`:
   names its records another way (lists and choice sets).
 - **195 random captured changes:** 97 `customer_created`, 70 `customized`, 27 `custom_application_file`, 1
   `deleted_here`. Of the 70 customized records, 59 were captured under system accounts and 11 by people.
-- **This release against the one before, on the same 519 records** (0.4.2 against 0.4.1): for 145 files that
+- **0.4.2 against 0.4.1, on the same 519 records**: for 145 files that
   upgrades have entries for, 150 application files and 150 captured changes, no answer differs in verdict,
   provenance, divergence, created or `capturedBy`. Of 74 records asked for by the sys_id at the end of the name
   of a version, 5 were `not_found` before and are `unknown` now: no record answers and no captured change is

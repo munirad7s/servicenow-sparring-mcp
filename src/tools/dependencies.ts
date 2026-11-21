@@ -161,7 +161,7 @@ const categorySchema = z.object({
   status: z.enum(['checked', 'not_checked']),
   reason: z.string().optional(),
   table: z.string().describe('Table the items were read from.'),
-  query: z.string().describe('The encoded query that was sent. Re-run it with sn_query to see more.'),
+  query: z.string().describe('The encoded query of this category: the one that was sent, or, where the category was not checked, the one that would have been. Re-run it with sn_query to see more.'),
   total: z.number().nullable().describe('Matching rows on the server, before row-level access rules.'),
   returned: z.number(),
   truncated: z.boolean(),

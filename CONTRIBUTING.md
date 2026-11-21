@@ -6,7 +6,9 @@ Thank you for helping. A few rules keep this project what it is.
 
 1. **Reads only.** No tool and no code path may send anything but `GET`. `test/repo.test.ts` fails otherwise. A
    feature that needs a write does not belong here.
-2. **No unchecked input.** Everything that ends up in a URL or an encoded query passes through `src/query.ts`.
+2. **No unchecked input.** Table names, field paths and encoded queries pass through `src/query.ts` before they
+   reach a URL. Numbers and switches are bounded by the schema of each tool, the address of the instance by
+   `src/config.ts`.
    What cannot be checked is refused. A value read from the instance is checked like any other before it goes into
    the next query.
 3. **Say what is not known.** A tool that cannot read a source reports "not checked" or "unknown". It never returns
@@ -41,7 +43,7 @@ depend on it: it leaves unknown fields out of a row, and it answers "Invalid tab
 
 A rule that keeps something back (a secret, a row of a closed table, a verdict that is not established) needs a
 test that fails without it. To see whether it has one, take the rule out or turn it round, one line at a time,
-and run the tests. Since 0.3.4 that was done for 692 lines, and 107 of the changes went unnoticed at first. Of 17
+and run the tests. Since 0.3.4 that was done for 695 lines, and 107 of the changes went unnoticed at first. Of 17
 changes that a reviewer of 0.4.1 expected no test to notice, 8 were not noticed; of 15 that a reviewer of 0.4.2
 named, none was.
 

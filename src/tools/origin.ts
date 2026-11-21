@@ -218,7 +218,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           .enum(['here', 'delivered', 'unknown'])
           .describe(
             '"delivered" if a vendor version of the record exists, or if it belongs to a delivered package and is older than its first captured change. ' +
-              '"here" if no vendor version exists and the record is as old as its first captured change, or belongs to no package and was changed here. "unknown" otherwise.',
+              '"here" if no vendor version exists and the record is as old as its first captured change, or belongs to no package and has a captured change made here. "unknown" otherwise.',
           ),
         capturedBy: z
           .enum(['people', 'system_accounts', 'nobody', 'unknown'])
@@ -261,7 +261,9 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
               total: z.number().nullable(),
               rows: z.array(rowSchema).describe('The newest five entries: disposition, review, target, upgrade, createdOn.'),
             })
-            .describe('Upgrades that did not overwrite this record. The upgrade engine compares content, so it also finds changes nobody captured. "target" is the name the upgrade gives the record.'),
+            .describe(
+              'What upgrades recorded for this record, each with its disposition: entries that were skipped, and entries that were applied as well. The upgrade engine compares content, so a skipped entry also shows a change nobody captured. "target" is the name the upgrade gives the record.',
+            ),
         }),
         caveats: z.array(z.string()),
       },
@@ -907,7 +909,7 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
           evidence: {
             customerUpdates: {
               table: 'sys_update_xml',
-              query: name ? updatesQuery : '',
+              query: updates?.query ?? (name ? updatesQuery : ''),
               readable: updates !== null,
               total: updates?.total ?? null,
               firstCapturedOn: firstCapturedOn || null,
@@ -915,14 +917,14 @@ export function registerOriginTool(server: McpServer, ctx: Context) {
             },
             versions: {
               table: 'sys_update_version',
-              query: name ? versionsQuery : '',
+              query: versions?.query ?? (name ? versionsQuery : ''),
               readable: versions !== null,
               total: versions?.total ?? null,
               bySource: sources,
               current: current && compact(current),
               rows: versionRows.slice(0, 5).map(compact),
             },
-            upgradeSkips: { table: 'upgrade_history_task', query: name ? skipsQuery : '', readable: skips !== null, total: skips?.total ?? null, rows: skipRows.slice(0, 5) },
+            upgradeSkips: { table: 'upgrade_history_task', query: skips?.query ?? (name ? skipsQuery : ''), readable: skips !== null, total: skips?.total ?? null, rows: skipRows.slice(0, 5) },
           },
           caveats: ORIGIN_CAVEATS,
         })

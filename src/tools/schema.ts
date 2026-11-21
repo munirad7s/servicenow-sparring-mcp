@@ -16,8 +16,9 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
       description:
         'Return the fields of a table as they apply to it: the fields of all parent tables included, dictionary ' +
         'overrides applied, each with the table that defines it and the label it has on this table. Use "filter" to ' +
-        'look for one field: unless a warning says the dictionary was only partly readable, a field that is not in the ' +
-        'answer does not exist on the table. Also answers for database views, whose fields carry the prefix of the ' +
+        'look for one field: a field that is not in the answer does not exist on the table, unless a warning says that ' +
+        'the dictionary was only partly readable or that the answer was cut, or includeInherited was set to false. ' +
+        'Also answers for database views, whose fields carry the prefix of the ' +
         'table they come from ("joinedFrom"); for a view, dictionary overrides and the labels of child tables are not ' +
         'applied, so ask for the joined table to see those. Reports the chain of parent tables and the kind of table. "mandatory" and "readOnly" are ' +
         'what the dictionary says: UI policies, data policies and client scripts can change both on a form, which ' +
@@ -31,7 +32,7 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
         includeInherited: z
           .boolean()
           .default(true)
-          .describe('false lists only the fields this table defines itself. Leave true to check whether a field exists.'),
+          .describe('false lists only the fields this table defines itself; for a database view that is every field it shows. Leave true to check whether a field exists.'),
       },
       outputSchema: {
         ...sourceShape,
@@ -43,7 +44,7 @@ export function registerSchemaTool(server: McpServer, ctx: Context) {
           joins: z.array(z.object({ table: z.string(), prefix: z.string() })).optional().describe('For a database view: the tables it joins.'),
         }),
         fieldCount: z.number().describe('Fields that apply to the table, inherited ones included.'),
-        ownFieldCount: z.number().describe('Fields the table defines itself.'),
+        ownFieldCount: z.number().describe('Fields the table defines itself. For a database view: every field it shows.'),
         returned: z.number().describe('Fields in this answer, after includeInherited and filter.'),
         columns: z.array(
           z.object({

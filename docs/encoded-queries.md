@@ -47,7 +47,7 @@ A value of the wrong kind belongs here too. The instance does not reject it:
 | A time of day written as a time | `start_time=08:00:00`, `>12:00:00` | `=` and `>` match nothing, `<12:00:00` every row: a time of day is stored as a point in time on 1970-01-01 | refuses, and names the form: `1970-01-01 08:00:00` |
 | `BETWEEN` or `ON` on a true/false field | `activeBETWEENfoo@bar`, `activeONa@b@c` | returns the rows where the field is false: 29 of 82 | refuses: these are for dates |
 | A name in place of a sys_id behind `!=` or `NOT IN` | `assignment_group!=Service Desk` | leaves no row out: all 40 incidents with a group came back, the 12 of that group among them. By name, `assignment_group.name!=Service Desk`, it is 28 | looks the value up in the referenced table and refuses where no record has it as its sys_id. A sys_id is not always 32 hex digits: `global` and `Default view` are sys_ids |
-| A field of a database view that the view does not filter by. A view can list the fields it takes from a table it joins, and drops a condition on any other: 11,759 of 11,759 rows for a value nobody has. On some views it answers 403 instead. A sort by such a field does nothing. It also dropped the condition on one of eight fields a list did name | `<prefix>_<field>=x` | asks first for the rows where the field is empty and filled at once (`<field>ISEMPTY^<field>ISNOTEMPTY`): with none it sends the query, with rows or an error it refuses. Asked once in ten minutes per field, and only kept while the view has rows |
+| A field of a database view that the view does not filter by. A view can list the fields it takes from a table it joins, and drops a condition on any other: 11,759 of 11,759 rows for a value nobody has. On some views it answers 403 instead. A sort by such a field does nothing. It also dropped the condition on one of eight fields a list did name | `<prefix>_<field>=x` | asks first for the rows where the field is empty and filled at once (`<field>ISEMPTY^<field>ISNOTEMPTY`), which has to be none, and then for one row where it is either, which has to be there: with both it sends the query, and without it refuses, unless the view has no row at all. A proof that succeeded is kept for ten minutes per field; one that failed, and what an empty view answered, is asked again |
 
 Read as dates, when measured: `2026-01-01 00:00:00`, `2026-01-01`, `2026-1-1`, `2026-01-01 00:00`,
 `2026-01-01T00:00:00` with and without a `Z`, and also `20260101` and `2026/01/01`, which the server refuses all
@@ -166,7 +166,8 @@ Also measured:
   were the same with it and without. The same on four remote tables, whose rows a script makes up.
 - The Aggregate API gives the groups of a count another order from one request to the next: five requests for
   the dictionary entries per type brought three orders. The server puts groups in the order of their size, and
-  groups of one size in the order of their values, so that a list of groups read by pages holds each group once.
+  groups of one size in the order of their values, so that a list of groups read by pages holds each group once
+  while the counts stay the same: every page counts anew.
 - `^OR` binds to the condition before it, tighter than `^`, in the Table API and in the Aggregate API alike. Of 82
   incidents, 10 were inactive with priority 1 and 4 had priority 2, all of them active:
   `active=false^priority=1^ORpriority=2` matched 10 in both, not 14, and so did the same conditions in another
@@ -295,7 +296,8 @@ Also measured:
   `sysparm_display_value=all` 48,364 cells, every one an object of `value` and `display_value`, the display
   value empty in 2,391 of them; 680 cells of currency fields carried a third part, `currency_display_value`.
   No cell was a list or another kind of object. The server passes on value and display value; an object of
-  another shape, which no cell here had, is passed on as the text it is written as.
+  another shape, which no cell here had, is passed on as the text it is written as; a row nested deeper than
+  four levels is refused as no answer of an instance.
 - Counting is what makes a question slow, not finding a row. Eight database views, the six with the most rows
   (93,000 to 3.9 million) and two smaller ones that answered slowly, were asked for one row where a field is
   empty or filled: with the count that took 0.3 to 11.7 seconds, 5 seconds on a view of 145 rows and 11 on the
@@ -340,6 +342,11 @@ Related-list queries (`RLQUERY … ENDRLQUERY`), tag conditions by id (`sys_tags
 names against the dictionary. Tags and variables are refused wherever a field can stand: in a condition, behind a
 dot-walk, in a sort, and as the second field of a comparison. `IN_HIERARCHY` with a sys_id is accepted on the
 strength of its documentation only.
+
+Two forms are refused without having been tried on an instance, because the server cannot tell what one would
+do with them. A number on a number field is written as digits, with a minus sign and a decimal point where
+needed: `+1`, `.5` and `1e3` are refused, `1`, `0.5` and `1000` are sent. And a field path has ten parts at
+most: a walk through more than nine references is refused.
 
 The refusal of a choice label looks at the labels of the active choices, in every language the instance has, of
 fields of the queried table, of fields a database view takes from its tables, and of fields reached by a

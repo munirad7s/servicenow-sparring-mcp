@@ -165,13 +165,13 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
         excludeErrors: z
           .boolean()
           .default(false)
-          .describe('true leaves out "Skipped Error": files the upgrade could not apply. What remains was skipped because it differs from the vendor version.'),
+          .describe('true leaves out "Skipped Error": files the upgrade could not apply. With onlySkipped, what remains was skipped because it differs from the vendor version.'),
         unreviewedOnly: z.boolean().default(false).describe('true lists only entries in state "Not Reviewed".'),
         fileContains: z
           .string()
           .max(120)
           .optional()
-          .describe('Text the file name must contain. File names begin with the table of the record, as in "sys_script_<sys_id>": "sys_script" finds business rules, and script includes and client scripts as well, whose tables begin the same way. A table name such as "incident" finds its dictionary and form entries, not its business rules.'),
+          .describe('Text the file name must contain. File names mostly begin with the table of the record, as in "sys_script_<sys_id>" (not for a version of a workflow, the choices of a field and the related lists of a form): "sys_script" finds business rules, and script includes and client scripts as well, whose tables begin the same way. A table name such as "incident" finds its dictionary and form entries, not its business rules.'),
         limit: z.number().int().min(1).max(200).default(50),
         offset: z.number().int().min(0).default(0),
       },
@@ -202,7 +202,7 @@ export function registerUpgradeTool(server: McpServer, ctx: Context) {
                 .optional()
                 .describe(
                   'Who made the captured changes to this record: "people" if a person is on any of its update rows, "system_accounts" if only installations, upgrades and jobs are, ' +
-                    '"nobody" if no change is captured (the record differs all the same: it was changed without capture). Absent if that could not be read.',
+                    '"nobody" if no change is captured (a record that was skipped for a difference then differs all the same: it was changed without capture). Absent if that could not be read.',
                 ),
             }),
           )
