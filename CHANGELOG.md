@@ -22,6 +22,15 @@ answer; such changes are listed under "Changed".
 
 ### Changed
 
+- Five sentences of answers said more than is true in a case that is not rare, and say what holds now. A cut
+  answer that told how to read on said "None are skipped": that holds where every row keeps its place from one
+  page to the next, and a sorted view that does not carry every key gives no such order. Such a view was said
+  to have rows that "cannot all be told apart", where it is only not established that its order tells them
+  apart. Rows left out for closed tables were called rows "of a closed child table of this one", also where
+  they were rows that reach such a record through a reference or a joined table. Names left out behind a
+  reference were said to point "into a table that is closed", where the field can point to a record of one.
+  And a refusal for closed tables said that the request "would have read from one of them", also where it
+  could not be established that it would not.
 - The proof that a table applies a condition on the class of a row asks for one row that has a class, and no
   longer for how many there are: 0.1 to 1.0 seconds where the count took 0.5 to 4.5 on tables of 1.2 and 3.5
   million rows. A proof is kept for ten minutes for a table and the kind of condition it was asked about, and

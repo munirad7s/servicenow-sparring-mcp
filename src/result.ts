@@ -42,8 +42,11 @@ export const listShape = {
   nextOffset: z.number().optional().describe('Pass as offset to read on.'),
 }
 
+/** Reading on behind a cut answer begins at or before the first row that was not shown, where the rows keep their order. */
+const NONE_SKIPPED = 'It skips none where every row keeps its place from one page to the next.'
+
 export const ROWS_LEFT_OUT =
-  'Tables are closed on this machine. Rows that belong to a closed child table of this one were left out by a condition on sys_class_name, and the total does not count them.'
+  'Tables are closed on this machine. Rows were left out of what this answer was read from, by a condition on the class of a record: rows of a closed child table, and rows that reach a record of one through a reference or a joined table. A total does not count them.'
 
 export function source(sn: ServiceNowClient, warnings: string[] = []) {
   // What the gate of closed tables did to the requests of this call, whichever tool sent them.
@@ -52,7 +55,7 @@ export function source(sn: ServiceNowClient, warnings: string[] = []) {
     if (!warnings.includes(text)) warnings.push(text)
   }
   if (closed?.rowsLeftOut) add(ROWS_LEFT_OUT)
-  if (closed?.names.size) add(`The names behind references into a table that is closed on this machine were left out: ${[...closed.names].sort().join(', ')}.`)
+  if (closed?.names.size) add(`Tables are closed on this machine, and these fields can point to a record of one, so the names behind them were left out: ${[...closed.names].sort().join(', ')}.`)
   if (closed?.copies.size) {
     add(
       `Tables are closed on this machine, and these fields point into a table whose rows are named after records of other tables, so their display values were left out: ${[...closed.copies].sort().join(', ')}. ` +
@@ -89,10 +92,10 @@ export function listing(sn: ServiceNowClient, page: Page<unknown>, warnings: str
     }
   }
   if (cut && withheld) {
-    warnings.push('Because rows were withheld and the answer was cut, reading on from nextOffset can repeat a few rows. None are skipped.')
+    warnings.push(`Because rows were withheld and the answer was cut, reading on from nextOffset can repeat a few rows. ${NONE_SKIPPED}`)
   } else if (cut && page.total === null) {
     // Without a total it is not known whether rows of this page were withheld, and the same holds if some were.
-    warnings.push('The answer was cut, and without a total it cannot be told whether rows of this page are hidden from this account. If some are, reading on from nextOffset can repeat a few rows. None are skipped.')
+    warnings.push(`The answer was cut, and without a total it cannot be told whether rows of this page are hidden from this account. If some are, reading on from nextOffset can repeat a few rows. ${NONE_SKIPPED}`)
   }
 
   const truncated = cut || (page.total !== null ? end < page.total : fetched === page.limit)
@@ -328,7 +331,7 @@ function hintFor(kind: string, about: string | undefined, message: string): stri
     case 'config':
       return 'The server is not configured correctly. This is for the person who set it up, not something to work around.'
     case 'blocked':
-      return `Tables are closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY), and this request would have read from one of them: the message says which and why. Report it as "could not be checked": it says nothing about the data.`
+      return `Tables are closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY), and this request would have read from one of them, or it could not be established that it would not: the message says which, and why. Report it as "could not be checked": it says nothing about the data.`
     case 'auth':
       return 'The instance rejected the credentials. Check the SERVICENOW_* variables. With a token: it may have expired.'
     case 'acl':

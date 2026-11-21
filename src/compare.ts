@@ -523,7 +523,7 @@ const pagesOf = async (table: string, query: string, columns: string[], pages: n
   for (let page = 0; page < pages; page++) {
     const read = await call('sn_query', { table, query, fields: columns, limit: 100, offset: page * 100 })
     if (read.isError) return null
-    warned ||= ((read.data.warnings as string[] | undefined) ?? []).some((warning) => /cannot all be told apart/.test(warning))
+    warned ||= ((read.data.warnings as string[] | undefined) ?? []).some((warning) => /not established that the order tells every row apart/.test(warning))
     const rows = read.data.records as Data[]
     keys.push(...rows.map((row) => columns.map((column) => (row[column] && typeof row[column] === 'object' ? row[column].value : row[column])).join('|')))
     if (rows.length < 100) break
@@ -572,7 +572,7 @@ for (const view of ((await get('sys_db_view', { sysparm_fields: 'name', sysparm_
   else if (new Set(read.keys).size !== read.keys.length) twice.push(`${view} sorted by ${sortBy}: ${read.keys.length - new Set(read.keys).size} of ${read.keys.length} rows came twice, and the answer did not warn`)
 }
 console.log(`\nSorted reads by pages: ${readByPages} of tables and ${viewsByPages} of database views, ${rowsByPages} rows`)
-if (warnedViews) console.log(`  ${String(warnedViews).padStart(5)}  view(s) whose answer says that its rows cannot all be told apart`)
+if (warnedViews) console.log(`  ${String(warnedViews).padStart(5)}  view(s) whose answer says that its order is not known to tell every row apart`)
 if (pagesLeftOut) console.log(`  ${String(pagesLeftOut).padStart(5)}  left out: not readable here, also when asked directly`)
 console.log(`  ${String(twice.length).padStart(5)}  difference(s)`)
 for (const line of twice) console.log(`         ${line}`)
