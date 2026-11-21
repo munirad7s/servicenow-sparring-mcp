@@ -328,8 +328,8 @@ many. The npm scripts do not write it.
   comes once: without it, rows that are equal in what the
   query sorts by change places between pages (measured: 989 different rows in a thousand captured changes read
   newest first). The `query` of an answer shows the key. A row of a database view has no sys_id of its own: its
-  keys are the sys_ids of the tables the view joins, where the view carries them, and the answer says so where
-  it does not: the order is then not known to tell every row apart.
+  keys are the sys_ids of the tables the view joins, each where the instance proves that it can filter and sort
+  the view by it, and the answer says so where it does not: the order is then not known to tell every row apart.
 - One `sn_query` is one request, plus what the first use of a table takes: one to read what the table is, one
   for every 500 fields of its dictionary, three to look for rules that filter, archive or rotate it, and more
   where a value has to be looked up. Measured on the tables of one instance: five to seven. On a database view,

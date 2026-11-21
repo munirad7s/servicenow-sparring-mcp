@@ -46,7 +46,7 @@ export const listShape = {
 const NONE_SKIPPED = 'It skips none where every row keeps its place from one page to the next.'
 
 export const ROWS_LEFT_OUT =
-  'Tables are closed on this machine. Rows were left out of what this answer was read from, by a condition on the class of a record: rows of a closed child table, and rows that reach a record of one through a reference or a joined table. A total does not count them.'
+  'Tables are closed on this machine. What this answer was read from leaves out, by a condition on the class of a record, any row of a class that is closed or whose rows are copies of records of other tables, and any row that reaches such a row through a reference or a joined table. A total does not count them.'
 
 export function source(sn: ServiceNowClient, warnings: string[] = []) {
   // What the gate of closed tables did to the requests of this call, whichever tool sent them.
@@ -55,7 +55,9 @@ export function source(sn: ServiceNowClient, warnings: string[] = []) {
     if (!warnings.includes(text)) warnings.push(text)
   }
   if (closed?.rowsLeftOut) add(ROWS_LEFT_OUT)
-  if (closed?.names.size) add(`Tables are closed on this machine, and these fields can point to a record of one, so the names behind them were left out: ${[...closed.names].sort().join(', ')}.`)
+  if (closed?.names.size) {
+    add(`Tables are closed on this machine, and these fields can point to a record of one, or to a row that is a copy of a record of another table, so the names behind them were left out: ${[...closed.names].sort().join(', ')}.`)
+  }
   if (closed?.copies.size) {
     add(
       `Tables are closed on this machine, and these fields point into a table whose rows are named after records of other tables, so their display values were left out: ${[...closed.copies].sort().join(', ')}. ` +
@@ -331,7 +333,7 @@ function hintFor(kind: string, about: string | undefined, message: string): stri
     case 'config':
       return 'The server is not configured correctly. This is for the person who set it up, not something to work around.'
     case 'blocked':
-      return `Tables are closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY), and this request would have read from one of them, or it could not be established that it would not: the message says which, and why. Report it as "could not be checked": it says nothing about the data.`
+      return `Tables are closed on this machine (SERVICENOW_TABLE_ALLOW, SERVICENOW_TABLE_DENY). This request asks about one of them, would have read from one, or could not be shown to stay clear of them: the message says which, and why. Report it as "could not be checked": it says nothing about the data.`
     case 'auth':
       return 'The instance rejected the credentials. Check the SERVICENOW_* variables. With a token: it may have expired.'
     case 'acl':

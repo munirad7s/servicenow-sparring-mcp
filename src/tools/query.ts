@@ -251,7 +251,9 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
     }
     if (!members.length || without.length) {
       warnings.push(
-        `This is a sorted read of a database view, and ${members.length ? `the view does not carry the sys_id of ${without.join(', ')}` : 'the tables it joins could not be read'}, so it is not established that the order tells every row apart. ` +
+        // Not "the view does not carry it": the instance did not prove that it uses the key, which is also what
+        // an account sees that may not filter by it.
+        `This is a sorted read of a database view, and ${members.length ? `the instance did not prove that it can filter or sort this view by the sys_id of ${without.join(', ')}, so the order goes without it` : 'the tables it joins could not be read'}: it is not established that the order tells every row apart. ` +
           'Rows that are equal in what the query is sorted by can change places from one page to the next: read by pages, a row can come twice and another not at all.',
       )
     }

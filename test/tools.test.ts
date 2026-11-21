@@ -495,7 +495,7 @@ test('a view that lists the fields it takes from a table has no other field of t
   const partly = await connect(world(listed, dropped('usr_sys_id'), rows))
   const loose = await partly.answer('sn_query', { table: 'incident_caller', query: 'ORDERBYinc_number', fields: ['inc_number'] })
   assert.equal(loose.query, 'ORDERBYinc_number^ORDERBYinc_sys_id')
-  assert.match(loose.warnings.join(' '), /sorted read of a database view, and the view does not carry the sys_id of sys_user, so it is not established that the order tells every row apart.*a row can come twice and another not at all/)
+  assert.match(loose.warnings.join(' '), /sorted read of a database view, and the instance did not prove that it can filter or sort this view by the sys_id of sys_user, so the order goes without it: it is not established that the order tells every row apart.*a row can come twice and another not at all/)
   // Sorting a large view by those keys takes longer: measured 23 seconds where one sort key took 9. An answer that
   // does not come in time says what was asked for and what to do.
   const slow = await connect(world(listed, { table: 'incident_caller', query: 'ORDERBYinc_number^ORDERBYinc_sys_id', timesOut: true }, rows))
@@ -602,7 +602,7 @@ test('a closed table cannot be read through a dot-walk, a child table, a view or
   // The reference itself may be read. The name behind it comes from the closed table and is left out.
   const data = await noUsers.answer('sn_query', { table: 'incident', fields: ['number', 'caller_id'], displayValue: true })
   assert.deepEqual(data.records, [{ number: 'INC1', caller_id: ID }])
-  assert.match(data.warnings.join(' '), /these fields can point to a record of one, so the names behind them were left out: caller_id/)
+  assert.match(data.warnings.join(' '), /these fields can point to a record of one, or to a row that is a copy of a record of another table, so the names behind them were left out: caller_id/)
   const all = await noUsers.answer('sn_query', { table: 'incident', displayValue: true })
   assert.deepEqual({ caller: all.records[0].caller_id, assignee: all.records[0].assigned_to }, { caller: ID, assignee: ID })
 
@@ -624,7 +624,7 @@ test('a closed table gives away no names through a list of references, an unknow
   // A watch list holds references too: its display value is a list of names from the closed table.
   const listed = await noUsers.answer('sn_query', { table: 'incident', fields: ['number', 'watch_list'], displayValue: true })
   assert.deepEqual(listed.records, [{ number: 'INC1', watch_list: `${ID},${ID}` }])
-  assert.match(listed.warnings.join(' '), /these fields can point to a record of one, so the names behind them were left out: watch_list/)
+  assert.match(listed.warnings.join(' '), /these fields can point to a record of one, or to a row that is a copy of a record of another table, so the names behind them were left out: watch_list/)
   await noUsers.answer('sn_query', { table: 'incident', groupBy: 'watch_list' })
   assert.equal(noUsers.sentTo('incident', 'stats')[0].params.get('sysparm_display_value'), null, 'the groups are not asked for their names')
   assert.match((await noUsers.answer('sn_query', { table: 'incident', groupBy: 'watch_list' })).warnings.join(' '), /"watch_list" is a list\. It is counted by its whole content/)
@@ -820,7 +820,7 @@ test('a closed table is reached neither through its child tables nor through its
   const LEFT_OUT = 'sys_class_nameNOT INincident,sc_req_item,u_major_incident,u_special_request^ORsys_class_nameISEMPTY'
   const data = await noIncidents.answer('sn_query', { table: 'task', query: 'numberSTARTSWITHTASK^NQnumberSTARTSWITHINC', fields: ['number'] })
   assert.equal(noIncidents.sentTo('task')[0].query, `numberSTARTSWITHTASK^${LEFT_OUT}^NQnumberSTARTSWITHINC^${LEFT_OUT}`)
-  assert.match(data.warnings.join(' '), /Rows were left out of what this answer was read from, by a condition on the class of a record/)
+  assert.match(data.warnings.join(' '), /What this answer was read from leaves out, by a condition on the class of a record, any row of a class that is closed/)
   await noIncidents.answer('sn_query', { table: 'task', groupBy: 'sys_class_name' })
   assert.equal(noIncidents.sentTo('task', 'stats')[0].query, LEFT_OUT)
   // The list of closed tables is asked for once, by every level of parents, and for the table of tables as proof.
@@ -925,7 +925,7 @@ test('the name behind a reference is left out where the record can be a row of a
   const { answer, call, sentTo } = await connect(world, noUsers)
   const read = await answer('sn_query', { table: 'incident', fields: ['number', 'u_contact', 'u_owner', 'u_watchers'], displayValue: true })
   assert.deepEqual(read.records, [{ number: 'INC1', u_contact: ID, u_owner: ID, u_watchers: ID }])
-  assert.match(read.warnings.join(' '), /these fields can point to a record of one, so the names behind them were left out: u_contact\./)
+  assert.match(read.warnings.join(' '), /these fields can point to a record of one, or to a row that is a copy of a record of another table, so the names behind them were left out: u_contact\./)
   // A reference or a list whose target did not come back can point anywhere.
   assert.match(read.warnings.join(' '), /could not be told which table these fields point to, or what a row of that table shows as its name \(read from sys_dictionary and sys_dictionary_override\), so their display values were left out: u_owner, u_watchers/)
   assert.doesNotMatch(JSON.stringify(read), /Abel|Beth|Carol/)
@@ -981,7 +981,7 @@ test('a reference into a parent table does not give away the rows of its closed 
   const walked = await answer('sn_query', { table: 'task_sla', query: 'stage=in_progress^NQstage=paused', fields: ['stage', 'task.number'] })
   assert.equal(sentTo('task_sla').at(-1)!.query, `stage=in_progress^${LEFT_OUT}^NQstage=paused^${LEFT_OUT}`)
   assert.equal(walked.query, sentTo('task_sla').at(-1)!.query)
-  assert.match(walked.warnings.join(' '), /Rows were left out of what this answer was read from, by a condition on the class of a record/)
+  assert.match(walked.warnings.join(' '), /What this answer was read from leaves out, by a condition on the class of a record, any row of a class that is closed/)
   // A reference from a task to its parent task is such a walk as well, on top of the condition for the table itself.
   await answer('sn_query', { table: 'task', fields: ['number', 'parent.number'] })
   assert.equal(
@@ -1007,7 +1007,7 @@ test('a database view that joins a parent table leaves out the rows of its close
   const { answer, sentTo, proofsFrom } = await connect(familyWorld([below, ...view]), { tables: { allow: [], deny: ['incident'] } })
   const data = await answer('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
   assert.deepEqual(sentTo('task_with_sla').map((sent) => sent.query), ['tsk_sys_class_nameNOT INincident^ORtsk_sys_class_nameISEMPTY'])
-  assert.match(data.warnings.join(' '), /Rows were left out of what this answer was read from, by a condition on the class of a record/)
+  assert.match(data.warnings.join(' '), /What this answer was read from leaves out, by a condition on the class of a record, any row of a class that is closed/)
   // Asked once per view, not with every query.
   await answer('sn_query', { table: 'task_with_sla', fields: ['tsk_number'] })
   assert.deepEqual(proofsFrom('task_with_sla'), PROOFS)
@@ -1128,7 +1128,7 @@ test('a table without rows proves nothing about a condition, and its answer is n
   assert.match(unusable.data.message, /could not be established that the instance applies a condition on "sys_class_name"/)
   // Nothing was found to be read from a closed table here: it could not be shown that nothing would be. The
   // hint covers both, and the message says which it was.
-  assert.match(unusable.data.hint, /this request would have read from one of them, or it could not be established that it would not: the message says which, and why/)
+  assert.match(unusable.data.hint, /This request asks about one of them, would have read from one, or could not be shown to stay clear of them: the message says which, and why/)
   assert.equal(silent.sentTo('task').length, 0)
   // Rows whose class is empty are rows all the same: the field is used, and the request goes out.
   const classless = await connect(familyWorld([below, { table: 'task', exact: 'sys_class_nameISNOTEMPTY', rows: [] }, { table: 'task', rows: [{ number: 'TASK1' }] }]), closed)
@@ -2462,7 +2462,7 @@ test('a record in a closed table is not read by the other tools either, and its 
   const answer = await filtered.answer('sn_origin', { sysId: ID })
   assert.equal(filtered.sentTo('sys_metadata')[0].query, `sys_id=${ID}^sys_class_nameNOT INsys_metadata_delete,sys_metadata_link,sys_script^ORsys_class_nameISEMPTY`)
   assert.equal(answer.record, null)
-  assert.match(answer.warnings.join(' '), /Rows were left out of what this answer was read from, by a condition on the class of a record/)
+  assert.match(answer.warnings.join(' '), /What this answer was read from leaves out, by a condition on the class of a record, any row of a class that is closed/)
   assert.doesNotMatch(JSON.stringify(answer), /Example rule/)
   // Not "no such record": it can be one of the rows that were left out.
   assert.equal(answer.verdict, 'unknown')
@@ -3307,7 +3307,7 @@ test('a linked application file does not give away the record it links to', asyn
   // Read as rows of the parent table, nothing says which table the record is of. The parent answers without them.
   const parent = await closed.answer('sn_query', { table: 'sys_metadata', query: 'sys_nameSTARTSWITHA', fields: ['sys_name'] })
   assert.equal(closed.sentTo('sys_metadata')[0].query, 'sys_nameSTARTSWITHA^sys_class_nameNOT INsys_metadata_delete,sys_metadata_link^ORsys_class_nameISEMPTY')
-  assert.match(parent.warnings.join(' '), /Rows were left out of what this answer was read from, by a condition on the class of a record/)
+  assert.match(parent.warnings.join(' '), /What this answer was read from leaves out, by a condition on the class of a record, any row of a class that is closed/)
 
   // A reference into the table of application files can point to such a file, whose name is that of the record it
   // links to: the name behind the reference is left out like one behind a reference into a closed table.
@@ -3495,7 +3495,7 @@ test('what a field shows is passed on only for kinds of fields that show nothing
   const attachments = await connect([closedTables(tableRow('sys_attachment', 'Attachment')), ...world], { tables: { allow: [], deny: ['sys_attachment'] } })
   const without = await attachments.answer('sn_query', wanted)
   assert.equal(without.records[0].u_document, ID)
-  assert.match(without.warnings.join(' '), /these fields can point to a record of one, so the names behind them were left out: u_document/)
+  assert.match(without.warnings.join(' '), /these fields can point to a record of one, or to a row that is a copy of a record of another table, so the names behind them were left out: u_document/)
 
   // Nothing is closed: everything is shown.
   const open = await connect(world)
