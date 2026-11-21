@@ -426,7 +426,7 @@ npm install
 `npm install` also builds the server into `dist/`.
 
 Without a checkout, `npx` can fetch and build it from GitHub. The first start takes about fifteen seconds; add
-`#v0.4.6` to the name to stay on one release. Checked on Linux with npm 11.
+`#v0.4.7` to the name to stay on one release. Checked on Linux with npm 11.
 
 ```bash
 npx -y github:munirad7s/servicenow-sparring-mcp --version
@@ -494,7 +494,7 @@ Any client that starts a local MCP server over stdio works. The usual configurat
 }
 ```
 
-- Without a checkout: `"command": "npx"` and `"args": ["-y", "github:munirad7s/servicenow-sparring-mcp#v0.4.6"]`.
+- Without a checkout: `"command": "npx"` and `"args": ["-y", "github:munirad7s/servicenow-sparring-mcp#v0.4.7"]`.
 - On Windows, write paths with forward slashes or doubled backslashes: `"C:/tools/instance.env"`.
 - A desktop app may not see a `node` that a version manager installed. Then give the full path of the `node`
   program as `command`.

@@ -3,7 +3,10 @@
 Versions follow [semantic versioning](https://semver.org). Before 1.0 a minor version can change the shape of an
 answer; such changes are listed under "Changed".
 
-## Unreleased
+## 0.4.7 (2026-11-21)
+
+Apart from its version, the code of the server is that of 0.4.6. What is new is in the script that holds the
+server against an instance, and in what was measured after 0.4.6 and written down.
 
 ### Development
 
