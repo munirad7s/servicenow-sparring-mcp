@@ -41,6 +41,14 @@ answer; such changes are listed under "Changed".
   with the count, because the one row can be hidden from the account: one request more than before for a
   table without rows or without a visible one.
 
+### Looked at, and left as it is
+
+- The note about what closed tables leave out of an answer speaks of "any row that reaches such a row through
+  a reference". The condition is added for a reference that the query walks through, `task.number`, and not
+  for one that a row merely carries: behind that one the name is left out, and the row stays.
+- The note about what was left out behind a reference calls it "names". Read with display values while the
+  table of journal entries is closed, a journal field loses the text of its entries, which is no name.
+
 ## 0.4.4 (2026-11-21)
 
 Five reviews, and this time before the release that carries the answers to them: one of the fixes of 0.4.3,
