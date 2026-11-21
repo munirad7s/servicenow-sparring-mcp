@@ -393,7 +393,7 @@ many. The npm scripts do not write it.
   some thousand rows it makes no difference. The answer then has no total, `truncated` says that the page is
   full or that rows were left out to fit the answer, and rows this account may not see cannot be told from
   rows that are not there: the answer says so.
-  A counted read that does not come in time names the count as the likely reason.
+  A counted read that does not come in time names the count as what often takes long.
 - Whether the instance answers a query it cannot use with no rows (`glide.invalid_query.returns_no_rows`) is
   read by `sn_dependencies`, which tells an empty category from a condition that was not understood by it, and
   kept for thirty seconds. No other answer depends on what that property was when it was read.

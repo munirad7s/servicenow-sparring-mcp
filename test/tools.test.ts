@@ -5913,6 +5913,13 @@ test('sn_query reads rows without counting how many match where it is asked to',
   const cut = await long.answer('sn_query', { table: 'incident', fields: ['number', 'short_description'], limit: 200, count: false })
   assert.ok(cut.returned < 40 && cut.truncated === true && cut.nextOffset === cut.returned, JSON.stringify(shape(cut)))
   assert.match(cut.warnings.join(' '), /"truncated" then says that the page is full, or that rows were left out to fit the answer/)
+  // Reading on from there repeats rows if some of this page are hidden from the account. Counted, the answer
+  // knows whether any are, and warns only then; not counted, it cannot know, and says what follows if so.
+  assert.match(cut.warnings.join(' '), /The answer was cut, and without a total it cannot be told whether rows of this page are hidden from this account\. If some are, reading on from nextOffset repeats a few rows\. None are skipped\./)
+  const cutCounted = await long.answer('sn_query', { table: 'incident', fields: ['number', 'short_description'], limit: 200 })
+  assert.ok(cutCounted.returned < 40 && cutCounted.total === 40)
+  assert.doesNotMatch(cutCounted.warnings.join(' '), /repeat/)
+  assert.doesNotMatch(plain.warnings.join(' '), /repeat/)
 
   // No row is not "none matches" where the rows were not counted. The answer says so, and still names what
   // else can be the reason.

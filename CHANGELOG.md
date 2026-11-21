@@ -15,7 +15,10 @@ answer; such changes are listed under "Changed".
   or that rows were left out to fit the answer, and a page with fewer rows is no proof that none follow for an
   account that is not shown every row: the answer says so. Where no row came back it says what that can mean:
   on the first page that none matches, behind it that the rows end there, and either time that the account may
-  not see them. A counted read that does not come in time names the count as what often takes long.
+  not see them. Where such an answer was cut to fit, it says that reading on repeats rows if some of the page
+  are hidden from the account, which only the count could tell. A counted read that does not come in time
+  names the count as what often takes long. `npm run smoke` reads five rows both ways on the instance and
+  holds them against each other.
 
 ### Changed
 
