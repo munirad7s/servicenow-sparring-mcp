@@ -5898,10 +5898,21 @@ test('sn_query reads rows without counting how many match where it is asked to',
   const plain = await answer('sn_query', { table: 'incident', query: 'active=true', fields: ['number'], limit: 20, count: false })
   assert.equal(sent().params.get('sysparm_no_count'), 'true')
   assert.deepEqual(shape(plain), { total: null, returned: 20, truncated: true, nextOffset: 20 })
-  assert.match(plain.warnings.join(' '), /Not counted, as asked: this answer has no total\. "truncated" says only that the page is full\. A page with fewer rows is no proof that none follow/)
+  assert.match(plain.warnings.join(' '), /Not counted, as asked: this answer has no total\. "truncated" then says that the page is full, or that rows were left out to fit the answer\. A page with fewer rows is no proof that none follow/)
   // The last page is not full, and nothing in the answer says that more follow.
   const last = await answer('sn_query', { table: 'incident', query: 'active=true', fields: ['number'], limit: 20, offset: 20, count: false })
   assert.deepEqual(shape(last), { total: null, returned: 10, truncated: false, nextOffset: undefined })
+  // Behind the last row no row comes back. That is the end of the rows, and not "none matches".
+  const behind = await answer('sn_query', { table: 'incident', query: 'active=true', fields: ['number'], limit: 20, offset: 30, count: false })
+  assert.deepEqual(shape(behind), { total: null, returned: 0, truncated: false, nextOffset: undefined })
+  assert.match(behind.warnings.join(' '), /No row came back at offset 30, and the rows were not counted, as asked: the rows that match end before it, or this account may not see those that do/)
+  assert.doesNotMatch(behind.warnings.join(' '), /none matches/)
+  // A long text in every row: rows are left out to fit the answer, and "truncated" says so for a page that is
+  // not full. The answer names both things it can mean.
+  const long = await connect([...dictionaryRoutes, { table: 'incident', rows: Array.from({ length: 40 }, (_, index) => ({ number: `INC${index}`, short_description: 'x'.repeat(3_000) })) }])
+  const cut = await long.answer('sn_query', { table: 'incident', fields: ['number', 'short_description'], limit: 200, count: false })
+  assert.ok(cut.returned < 40 && cut.truncated === true && cut.nextOffset === cut.returned, JSON.stringify(shape(cut)))
+  assert.match(cut.warnings.join(' '), /"truncated" then says that the page is full, or that rows were left out to fit the answer/)
 
   // No row is not "none matches" where the rows were not counted. The answer says so, and still names what
   // else can be the reason.
@@ -5910,6 +5921,16 @@ test('sn_query reads rows without counting how many match where it is asked to',
   assert.match(none.warnings.join(' '), /No row came back, and the rows were not counted, as asked: none matches, or this account may not see those that do/)
   assert.match(none.warnings.join(' '), /"caller_id" is a reference to sys_user.*that can be why nothing matched/)
   assert.doesNotMatch(none.warnings.join(' '), /Not counted, as asked: this answer has no total/)
+  // Behind the first page the same empty answer says nothing about why nothing matched: rows may have.
+  const noneBehind = await answer('sn_query', { table: 'incident', query: 'caller_id=Abel', fields: ['number'], offset: 20, count: false })
+  assert.match(noneBehind.warnings.join(' '), /No row came back at offset 20/)
+  assert.doesNotMatch(noneBehind.warnings.join(' '), /that can be why nothing matched/)
+
+  // Not counted, and rows came back for the same condition: nothing is said about why nothing matched.
+  const some = await connect([{ table: 'incident', query: 'caller_id=Abel', rows: [{ number: 'INC1' }] }, ...dictionaryRoutes, { table: 'incident', rows }])
+  const found = await some.answer('sn_query', { table: 'incident', query: 'caller_id=Abel', fields: ['number'], count: false })
+  assert.equal(found.returned, 1)
+  assert.doesNotMatch(found.warnings.join(' '), /that can be why nothing matched/)
 
   // Counted, a row matches and is hidden from this account: "nothing matched" is not what happened, and no
   // reason for it is offered.

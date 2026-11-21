@@ -373,7 +373,7 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
           .default(true)
           .describe(
             'false reads the rows without counting how many match. Measured: twenty rows of a view of four million came in a tenth of a second, and in ten seconds with the count. ' +
-              'The answer then has no total, "truncated" says only that the page is full, and rows this account may not see cannot be told from rows that are not there. Not used with groupBy.',
+              'The answer then has no total, "truncated" says that the page is full or that rows were left out to fit the answer, and rows this account may not see cannot be told from rows that are not there. Not used with groupBy.',
           ),
       },
       outputSchema: {
@@ -439,13 +439,17 @@ export function registerQueryTool(server: McpServer, ctx: Context) {
         for (const field of readAlong) rows.forEach((row) => delete row[field])
 
         if (!count) {
+          // What an answer without a total can say, for the page that was asked for. Behind the first page, no row
+          // is what the end of the rows looks like, and not "none matches".
+          const nothing = offset ? `No row came back at offset ${offset}, and the rows were not counted, as asked: the rows that match end before it` : 'No row came back, and the rows were not counted, as asked: none matches'
           warnings.push(
             page.records.length
-              ? 'Not counted, as asked: this answer has no total. "truncated" says only that the page is full. A page with fewer rows is no proof that none follow: rows this account may not see are taken out of a page after it is cut.'
-              : 'No row came back, and the rows were not counted, as asked: none matches, or this account may not see those that do. Ask with the count to tell the two apart.',
+              ? 'Not counted, as asked: this answer has no total. "truncated" then says that the page is full, or that rows were left out to fit the answer. A page with fewer rows is no proof that none follow: rows this account may not see are taken out of a page after it is cut.'
+              : `${nothing}, or this account may not see those that do. Ask with the count to tell the two apart.`,
           )
         }
-        if ((count ? page.total === 0 : !page.records.length) && guard.parsed.conditions.length) {
+        // Nothing matched: counted, the total says so. Not counted, only a first page without a row can mean it.
+        if ((count ? page.total === 0 : !page.records.length && !offset) && guard.parsed.conditions.length) {
           warnings.push(...(await explainEmpty(ctx, guard).catch(() => [])))
         }
         await warnAboutQueryRules(table, warnings)

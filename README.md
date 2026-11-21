@@ -390,8 +390,9 @@ many. The npm scripts do not write it.
   long. With `count: false` it reads the rows without it. Measured, twenty rows each time: of a view of four
   million rows in 0.1 seconds against 10.5 with the count, of a table of 3.5 million rows filtered by one field
   in 2.5 seconds against 5 to 37, of the same table searched for a word in 7 seconds against 14; on tables of
-  some thousand rows it makes no difference. The answer then has no total, `truncated` says only that the page
-  is full, and rows this account may not see cannot be told from rows that are not there: the answer says so.
+  some thousand rows it makes no difference. The answer then has no total, `truncated` says that the page is
+  full or that rows were left out to fit the answer, and rows this account may not see cannot be told from
+  rows that are not there: the answer says so.
   A counted read that does not come in time names the count as the likely reason.
 - Whether the instance answers a query it cannot use with no rows (`glide.invalid_query.returns_no_rows`) is
   read by `sn_dependencies`, which tells an empty category from a condition that was not understood by it, and

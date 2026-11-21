@@ -94,6 +94,16 @@ check('an empty result on a reference compared with a name is explained', !byNam
 const paged = await call('sn_query', { table: 'sys_db_object', fields: ['name'], limit: 2 })
 check('sn_query pages and reports the total', !paged.isError && paged.data.truncated === true && paged.data.nextOffset === 2 && paged.data.total > 2, `total ${paged.data.total}`)
 
+// The same rows, sorted so that both reads have one order, once with the count and once without it.
+const ordered = { table: 'sys_db_object', query: 'ORDERBYname', fields: ['name'], limit: 5 }
+const withTotal = await call('sn_query', ordered)
+const withoutTotal = await call('sn_query', { ...ordered, count: false })
+check(
+  'sn_query without the count returns the same rows and no total',
+  !withTotal.isError && !withoutTotal.isError && withoutTotal.data.total === null && withTotal.data.total > 5 && JSON.stringify(withoutTotal.data.records) === JSON.stringify(withTotal.data.records) && withoutTotal.data.truncated === true && withoutTotal.data.warnings.some((warning: string) => warning.startsWith('Not counted, as asked')),
+  `${withoutTotal.data.returned} rows, total ${withoutTotal.data.total} against ${withTotal.data.total}`,
+)
+
 const perState = await call('sn_query', { table: 'incident', groupBy: 'state' })
 const counted = (perState.data.groups ?? []).reduce((sum: number, group: Data) => sum + group.count, 0)
 check('sn_query counts rows per value of a field', !perState.isError && perState.data.records.length === 0 && counted === perState.data.total && perState.data.totalGroups === perState.data.groups?.length, `${perState.data.totalGroups} groups, ${perState.data.total} rows`)
